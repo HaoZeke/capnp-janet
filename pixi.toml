@@ -1,0 +1,30 @@
+[workspace]
+name = "capnp-janet"
+description = "Native Cap'n Proto runtime for Janet"
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+[dependencies]
+c-compiler = "*"
+meson = ">=1.4"
+ninja = "*"
+pkg-config = "*"
+
+[feature.janet.dependencies]
+# janet package on conda-forge when available; otherwise system janet
+pkg-config = "*"
+
+[feature.docs.dependencies]
+python = ">=3.10"
+sphinx = ">=7,<9"
+
+[environments]
+default = []
+janet = ["janet"]
+docs = ["docs"]
+
+[tasks]
+configure = { cmd = "meson setup build --prefix=$CONDA_PREFIX", description = "Meson setup" }
+build = { cmd = "meson compile -C build", description = "Compile" }
+test = { cmd = "meson test -C build -v", description = "Run tests" }
+reconfigure = { cmd = "meson setup build --reconfigure --prefix=$CONDA_PREFIX" }

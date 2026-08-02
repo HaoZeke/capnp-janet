@@ -1,0 +1,60 @@
+#+title: capnp-janet architecture
+#+options: toc:2 num:t
+
+* Layers
+
+#+begin_example
+  capnp_kinds / capnp_pointer   (headers: constants + word codecs)
+           |
+     capnp_message              (segment arena view, resolve, readers)
+           |
+     capnp_builder              (single-segment bump builder)
+           |
+     janet_mod                  (Janet native module + register for embeds)
+           |
+     capnpc-janet (planned)     (capnp compile -o plugin)
+#+end_example
+
+* Design choices
+
+** Native C core, Janet on top
+
+Janet embeds as a C amalgamation. The wire runtime is C so:
+
+- =libgrok_policyd= can link Cap'n readers without the Janet VM for host-side
+  framing, and
+- the same readers register into the sealed Janet pack environment for
+  zero-copy field access on the Cap'n message the host already built.
+
+This mirrors =capnp-fortran= (native language runtime, not a thin FFI over
+C++) more than pycapnp (C++ wrapper). c-capnproto remains the golden-master
+peer for byte parity, not a required runtime dependency.
+
+** Zero-copy contract
+
+=capnp_message_view_flat= aliases the caller's stream-framed buffer. Janet
+=message-view-buffer= keeps the Janet buffer GC-marked for the message
+abstract lifetime. =message-from-buffer= copies so the buffer may be reused.
+
+** What packs see
+
+Packs never receive parallel C DTO tables. Host builds a Cap'n =ShellView=
+(or other schema type) with c-capnproto or this builder; the pack opens the
+message with =capnp/*= and decides. Generated accessors (v0.3) will name
+fields; until then packs use pointer/data indices from the schema.
+
+* Embed sketch (policyd)
+
+#+begin_example
+  C host:
+    build Policy.ShellView with c-capnproto
+    serialize or pass segment pointer
+    janet_init; capnp_janet_register(env); load pack
+    pack reads Cap'n; returns decision (Janet values or Cap'n builder)
+
+  Janet pack:
+    (defn check-shell [msg]
+      (def root (capnp/root msg))
+      ... read argv / pathProbes via getp + get-text ...
+      @{:action :deny :reason "..."})
+#+end_example
