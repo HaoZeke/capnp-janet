@@ -301,7 +301,8 @@ static const JanetReg capnp_cfuns[] = {
     {NULL, NULL, NULL}};
 
 void capnp_janet_register(JanetTable *env) {
-  janet_cfuns(env, "capnp", capnp_cfuns);
+  /* Prefix so packs call (capnp/build-message …) etc. */
+  janet_cfuns_prefix(env, "capnp", capnp_cfuns);
 }
 
 void capnp_janet_env(JanetTable *env) { capnp_janet_register(env); }
