@@ -4,8 +4,8 @@
 /* Public C headers for embedders (e.g. libgrok_policyd). */
 
 #include "capnp_builder.h"
-#include "capnp_kinds.h"
-#include "capnp_message.h"
+#include <capnp-janet/capnp_kinds.h>
+#include <capnp-janet/capnp_message.h>
 
 /* Optional Janet registration (requires janet.h in the TU that links). */
 #ifdef CAPNP_JANET_WITH_JANET

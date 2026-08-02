@@ -1,7 +1,7 @@
 #ifndef CAPNP_JANET_BUILDER_H
 #define CAPNP_JANET_BUILDER_H
 
-#include "capnp_message.h"
+#include <capnp-janet/capnp_message.h>
 #include <stddef.h>
 #include <stdint.h>
 
@@ -32,6 +32,8 @@ int capnp_builder_struct(capnp_bptr_t *ptr, uint16_t dwords, uint16_t pwords,
                          capnp_bptr_t *body_out /* optional: body start as fake */);
 
 /* Data writers on a struct body (word offset of body start). */
+int capnp_builder_set_u16(capnp_builder_t *b, size_t body_word,
+                          uint32_t byte_offset, uint16_t value);
 int capnp_builder_set_u32(capnp_builder_t *b, size_t body_word,
                           uint32_t byte_offset, uint32_t value);
 int capnp_builder_set_bool(capnp_builder_t *b, size_t body_word,
@@ -46,6 +48,22 @@ int capnp_builder_set_text(capnp_builder_t *b, size_t body_word,
 int capnp_builder_set_list_text(capnp_builder_t *b, size_t body_word,
                                 uint16_t dwords, uint16_t ptr_index,
                                 const char *const *items, uint32_t nitems);
+
+/*
+ * Set pointer slot to List(Struct) composite list.
+ * Each element has elem_dwords data words and elem_pwords pointer words.
+ * On success, *first_elem_body is the body word of element 0 (then stride
+ * elem_dwords+elem_pwords).
+ */
+int capnp_builder_set_list_struct(capnp_builder_t *b, size_t body_word,
+                                  uint16_t dwords, uint16_t ptr_index,
+                                  uint32_t nitems, uint16_t elem_dwords,
+                                  uint16_t elem_pwords,
+                                  size_t *first_elem_body);
+
+/* Pointer-slot word of a struct body (for nested set_text etc.). */
+size_t capnp_builder_ptr_word(size_t body_word, uint16_t dwords,
+                              uint16_t ptr_index);
 
 /*
  * Stream-frame the single segment into *out (malloc). Caller frees.

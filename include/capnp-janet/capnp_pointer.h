@@ -1,7 +1,7 @@
 #ifndef CAPNP_JANET_POINTER_H
 #define CAPNP_JANET_POINTER_H
 
-#include "capnp_kinds.h"
+#include <capnp-janet/capnp_kinds.h>
 #include <stdint.h>
 
 /* Decode / encode 64-bit little-endian Cap'n pointer words. */

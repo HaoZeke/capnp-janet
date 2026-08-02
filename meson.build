@@ -11,7 +11,7 @@ project(
   ],
 )
 
-inc = include_directories('src')
+inc = include_directories('include')
 
 lib_sources = files(
   'src/capnp_message.c',
@@ -25,17 +25,23 @@ capnp_janet_lib = library(
   install: true,
 )
 
+# Pure C Cap'n runtime. pkg-config / subproject consumers use this.
 capnp_janet_dep = declare_dependency(
   link_with: capnp_janet_lib,
   include_directories: inc,
 )
 
+# Janet CFUN TU for hosts that embed their own Janet amalgamation.
+capnp_janet_mod_src = files('src/janet_mod.c')
+
+meson.override_dependency('capnp-janet', capnp_janet_dep)
+
 install_headers(
-  'src/capnp_kinds.h',
-  'src/capnp_pointer.h',
-  'src/capnp_message.h',
-  'src/capnp_builder.h',
-  'src/capnp_janet.h',
+  'include/capnp-janet/capnp_kinds.h',
+  'include/capnp-janet/capnp_pointer.h',
+  'include/capnp-janet/capnp_message.h',
+  'include/capnp-janet/capnp_builder.h',
+  'include/capnp-janet/capnp_janet.h',
   subdir: 'capnp-janet',
 )
 
@@ -50,7 +56,7 @@ janet_dep = dependency('janet', required: get_option('janet'))
 if janet_dep.found()
   shared_module(
     'capnp',
-    'src/janet_mod.c',
+    capnp_janet_mod_src,
     dependencies: [capnp_janet_dep, janet_dep],
     name_prefix: '',
     install: true,
@@ -63,5 +69,5 @@ pkg.generate(
   capnp_janet_lib,
   name: 'capnp-janet',
   description: 'Native Cap\'n Proto runtime for Janet (and C embedders)',
-  subdirs: 'capnp-janet',
+  filebase: 'capnp-janet',
 )

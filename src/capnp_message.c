@@ -1,5 +1,5 @@
-#include "capnp_message.h"
-#include "capnp_pointer.h"
+#include <capnp-janet/capnp_message.h>
+#include <capnp-janet/capnp_pointer.h>
 
 #include <stdlib.h>
 #include <string.h>

@@ -1,5 +1,5 @@
-#include "capnp_builder.h"
-#include "capnp_message.h"
+#include <capnp-janet/capnp_builder.h>
+#include <capnp-janet/capnp_message.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -89,6 +89,50 @@ static void test_view_flat(void) {
   free(flat);
 }
 
+static void test_composite_list(void) {
+  /*
+   * Outer { probes @0 :List(Probe) }
+   * Probe { exists @0 :Bool; name @0 :Text }  — 1 data word, 1 pointer
+   */
+  capnp_builder_t b;
+  capnp_builder_init(&b);
+  capnp_bptr_t root, body;
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  CHECK(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "outer");
+  size_t first = 0;
+  CHECK(capnp_builder_set_list_struct(&b, body.word, 0, 0, 2, 1, 1, &first) ==
+            CAPNP_OK,
+        "list struct");
+  /* elem0: exists=1, name=aa */
+  CHECK(capnp_builder_set_bool(&b, first, 0, 1) == CAPNP_OK, "bool0");
+  CHECK(capnp_builder_set_text(&b, first, 1, 0, "aa", 2) == CAPNP_OK, "t0");
+  size_t e1 = first + 2;
+  CHECK(capnp_builder_set_bool(&b, e1, 0, 0) == CAPNP_OK, "bool1");
+  CHECK(capnp_builder_set_text(&b, e1, 1, 0, "b", 1) == CAPNP_OK, "t1");
+
+  uint8_t *flat = NULL;
+  size_t flat_len = 0;
+  CHECK(capnp_builder_serialize(&b, &flat, &flat_len) == CAPNP_OK, "ser");
+  capnp_builder_free(&b);
+
+  capnp_message_t m;
+  CHECK(capnp_message_from_flat(&m, flat, flat_len) == CAPNP_OK, "flat");
+  free(flat);
+  capnp_ptr_t r, list, e0, e1p;
+  CHECK(capnp_root(&m, &r) == CAPNP_OK, "root r");
+  CHECK(capnp_getp(&r, 0, &list) == CAPNP_OK, "get list");
+  CHECK(list.kind == CAPNP_PK_LIST && list.esize == CAPNP_SZ_COMPOSITE, "comp");
+  CHECK(capnp_list_len(&list) == 2, "len2");
+  CHECK(capnp_list_getp(&list, 0, &e0) == CAPNP_OK, "e0");
+  CHECK(capnp_get_bool(&e0, 0, 0) == 1, "exists0");
+  const char *n0;
+  size_t l0;
+  CHECK(capnp_get_text(&e0, 0, &n0, &l0) == CAPNP_OK && l0 == 2, "name0");
+  CHECK(capnp_list_getp(&list, 1, &e1p) == CAPNP_OK, "e1");
+  CHECK(capnp_get_bool(&e1p, 0, 1) == 0, "exists1");
+  capnp_message_free(&m);
+}
+
 static void test_schema_evolution_default(void) {
   /* Struct with 0 data words: get_u32 past end returns default. */
   capnp_builder_t b;
@@ -113,6 +157,7 @@ static void test_schema_evolution_default(void) {
 int main(void) {
   test_roundtrip_demo();
   test_view_flat();
+  test_composite_list();
   test_schema_evolution_default();
   if (failures) {
     fprintf(stderr, "%d failure(s)\n", failures);

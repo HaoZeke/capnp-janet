@@ -1,5 +1,5 @@
-#include "capnp_builder.h"
-#include "capnp_pointer.h"
+#include <capnp-janet/capnp_builder.h>
+#include <capnp-janet/capnp_pointer.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -86,6 +86,18 @@ size_t capnp_builder_struct_body(const capnp_bptr_t *struct_ptr) {
   return (size_t)((int64_t)struct_ptr->word + 1 + off);
 }
 
+int capnp_builder_set_u16(capnp_builder_t *b, size_t body_word,
+                          uint32_t byte_offset, uint16_t value) {
+  if (!b)
+    return CAPNP_ERR_ARG;
+  size_t abs = body_word * CAPNP_WORD_BYTES + byte_offset;
+  if (abs + 2 > b->words * CAPNP_WORD_BYTES)
+    return CAPNP_ERR_BOUNDS;
+  b->data[abs] = (uint8_t)(value);
+  b->data[abs + 1] = (uint8_t)(value >> 8);
+  return CAPNP_OK;
+}
+
 int capnp_builder_set_u32(capnp_builder_t *b, size_t body_word,
                           uint32_t byte_offset, uint32_t value) {
   if (!b)
@@ -164,6 +176,46 @@ int capnp_builder_set_list_text(capnp_builder_t *b, size_t body_word,
     if (write_text_at(b, list_start + i, t, tlen))
       return CAPNP_ERR_ALLOC;
   }
+  return CAPNP_OK;
+}
+
+size_t capnp_builder_ptr_word(size_t body_word, uint16_t dwords,
+                              uint16_t ptr_index) {
+  return body_word + dwords + ptr_index;
+}
+
+int capnp_builder_set_list_struct(capnp_builder_t *b, size_t body_word,
+                                  uint16_t dwords, uint16_t ptr_index,
+                                  uint32_t nitems, uint16_t elem_dwords,
+                                  uint16_t elem_pwords,
+                                  size_t *first_elem_body) {
+  if (!b)
+    return CAPNP_ERR_ARG;
+  size_t list_ptr_word = body_word + dwords + ptr_index;
+  if (list_ptr_word >= b->words)
+    return CAPNP_ERR_BOUNDS;
+
+  size_t step = (size_t)elem_dwords + elem_pwords;
+  size_t content_words = (size_t)nitems * step;
+  /* tag + elements */
+  size_t need = 1 + content_words;
+  size_t tag_word;
+  if (alloc_words(b, need, &tag_word))
+    return CAPNP_ERR_ALLOC;
+
+  /* Tag: struct pointer layout with offset = element count. */
+  uint64_t tag =
+      capnp_wp_make_struct((int32_t)nitems, elem_dwords, elem_pwords);
+  capnp_store_le64(b->data + tag_word * CAPNP_WORD_BYTES, tag);
+
+  int32_t off = (int32_t)((int64_t)tag_word - (int64_t)list_ptr_word - 1);
+  /* list count field for composite = words of content excluding tag */
+  uint64_t lw =
+      capnp_wp_make_list(off, CAPNP_SZ_COMPOSITE, (uint32_t)content_words);
+  capnp_store_le64(b->data + list_ptr_word * CAPNP_WORD_BYTES, lw);
+
+  if (first_elem_body)
+    *first_elem_body = tag_word + 1;
   return CAPNP_OK;
 }
 

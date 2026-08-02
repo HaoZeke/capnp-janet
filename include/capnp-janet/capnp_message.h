@@ -1,7 +1,7 @@
 #ifndef CAPNP_JANET_MESSAGE_H
 #define CAPNP_JANET_MESSAGE_H
 
-#include "capnp_kinds.h"
+#include <capnp-janet/capnp_kinds.h>
 #include <stddef.h>
 #include <stdint.h>
 
