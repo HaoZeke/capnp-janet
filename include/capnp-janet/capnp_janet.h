@@ -3,7 +3,7 @@
 
 /* Public C headers for embedders (e.g. libgrok_policyd). */
 
-#include "capnp_builder.h"
+#include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_kinds.h>
 #include <capnp-janet/capnp_message.h>
 
