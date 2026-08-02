@@ -52,6 +52,13 @@ test_wire = executable(
 )
 test('wire', test_wire)
 
+test_list_text = executable(
+  'test_list_text',
+  'test/test_list_text.c',
+  dependencies: capnp_janet_dep,
+)
+test('list_text', test_list_text)
+
 janet_dep = dependency('janet', required: get_option('janet'))
 if janet_dep.found()
   shared_module(

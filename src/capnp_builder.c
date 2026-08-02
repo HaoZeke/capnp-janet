@@ -166,6 +166,7 @@ int capnp_builder_set_list_text(capnp_builder_t *b, size_t body_word,
   if (nitems == 0)
     list_start = list_ptr_word + 1;
 
+  /* Normative List(Text): pointer list, element size C=6 (encoding.html). */
   int32_t off = (int32_t)((int64_t)list_start - (int64_t)list_ptr_word - 1);
   uint64_t lw = capnp_wp_make_list(off, CAPNP_SZ_PTR, nitems);
   capnp_store_le64(b->data + list_ptr_word * CAPNP_WORD_BYTES, lw);

@@ -451,34 +451,58 @@ int capnp_list_getp(const capnp_ptr_t *list, uint32_t index, capnp_ptr_t *out) {
   return CAPNP_ERR_KIND;
 }
 
+/*
+ * List(Text) per https://capnproto.org/encoding.html:
+ *   - Written as a pointer list (element size C=6); each element is a pointer
+ *     to Text (List(UInt8) with trailing NUL counted on the wire).
+ *   - A list of pointer values may also be *decoded* as a composite list of
+ *     one-pointer, zero-data structs (schema evolution upgrade). Accept both
+ *     when reading (same rule as Cap'n C++ / capnp-fortran).
+ */
 int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
                         const char **out, size_t *len) {
   capnp_ptr_t elem;
-  int rc = capnp_list_getp(list, index, &elem);
-  if (rc)
-    return rc;
-  if (elem.kind == CAPNP_PK_NULL) {
-    if (out)
-      *out = "";
-    if (len)
-      *len = 0;
-    return CAPNP_OK;
+  int rc;
+
+  if (!list || list->kind != CAPNP_PK_LIST)
+    return CAPNP_ERR_KIND;
+
+  /* C=6 pointer list: resolve element pointer to the Text blob. */
+  if (list->esize == CAPNP_SZ_PTR) {
+    rc = capnp_list_getp(list, index, &elem);
+    if (rc)
+      return rc;
+    if (elem.kind == CAPNP_PK_NULL) {
+      if (out)
+        *out = "";
+      if (len)
+        *len = 0;
+      return CAPNP_OK;
+    }
+    if (elem.kind == CAPNP_PK_LIST && elem.esize == CAPNP_SZ_BYTE) {
+      const char *p = (const char *)(elem.msg->segs[elem.seg].data +
+                                     elem.word * CAPNP_WORD_BYTES);
+      size_t n = elem.count;
+      if (n > 0 && p[n - 1] == '\0')
+        n -= 1;
+      if (out)
+        *out = p;
+      if (len)
+        *len = n;
+      return CAPNP_OK;
+    }
+    return CAPNP_ERR_KIND;
   }
-  /* Pointer-list List(Text): element is a byte list (NUL-terminated). */
-  if (elem.kind == CAPNP_PK_LIST && elem.esize == CAPNP_SZ_BYTE) {
-    const char *p = (const char *)(elem.msg->segs[elem.seg].data +
-                                   elem.word * CAPNP_WORD_BYTES);
-    size_t n = elem.count;
-    if (n > 0 && p[n - 1] == '\0')
-      n -= 1;
-    if (out)
-      *out = p;
-    if (len)
-      *len = n;
-    return CAPNP_OK;
-  }
-  /* c-capnproto List(Text) as composite list of 0-data/1-pointer structs. */
-  if (elem.kind == CAPNP_PK_STRUCT)
+
+  /* C=7 composite upgrade view: element is a struct; Text at pointer 0. */
+  if (list->esize == CAPNP_SZ_COMPOSITE) {
+    rc = capnp_list_getp(list, index, &elem);
+    if (rc)
+      return rc;
+    if (elem.kind != CAPNP_PK_STRUCT)
+      return CAPNP_ERR_KIND;
     return capnp_get_text(&elem, 0, out, len);
+  }
+
   return CAPNP_ERR_KIND;
 }
