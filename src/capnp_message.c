@@ -464,7 +464,7 @@ int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
       *len = 0;
     return CAPNP_OK;
   }
-  /* Text is a byte list hanging off a pointer list element. */
+  /* Pointer-list List(Text): element is a byte list (NUL-terminated). */
   if (elem.kind == CAPNP_PK_LIST && elem.esize == CAPNP_SZ_BYTE) {
     const char *p = (const char *)(elem.msg->segs[elem.seg].data +
                                    elem.word * CAPNP_WORD_BYTES);
@@ -477,6 +477,8 @@ int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
       *len = n;
     return CAPNP_OK;
   }
-  /* Struct with text at pointer 0 is not the List(Text) path. */
+  /* c-capnproto List(Text) as composite list of 0-data/1-pointer structs. */
+  if (elem.kind == CAPNP_PK_STRUCT)
+    return capnp_get_text(&elem, 0, out, len);
   return CAPNP_ERR_KIND;
 }
