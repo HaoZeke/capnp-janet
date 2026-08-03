@@ -134,11 +134,11 @@ docs/orgmode/  architecture notes
 
 ## Roadmap
 
-1. **v0.1** — reader + minimal builder + C/Janet API + wire tests (this tree)
-2. **v0.2** — packed codec, composite-list builder, orphans
+1. **v0.1** — reader + minimal builder + C/Janet API + wire tests
+2. **v0.2** — packed + canonical + primitive lists + AddressBook/calculator samples (**this tree**)
 3. **v0.3** — `capnpc-janet`: `capnp compile -o` plugin, generated accessors
-4. **v0.4** — c-capnproto byte-parity interop suite (same idea as capnp-fortran)
-5. Canonical form, dynamic API as needed
+4. **v0.4** — orphans, cross-message setp clone, c-capnproto golden-master interop
+5. Dynamic API as needed; RPC remains out of scope
 
 ## Related
 
