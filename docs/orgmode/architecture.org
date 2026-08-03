@@ -58,3 +58,19 @@ fields; until then packs use pointer/data indices from the schema.
       ... read argv / pathProbes via getp + get-text ...
       @{:action :deny :reason "..."})
 #+end_example
+
+* Testing surface (Janet)
+
+C wire tests (=meson test=) cover =capnp_get_u64= / =capnp_builder_set_u64=
+and list-u64. Codegen smoke (=test/test_codegen.sh=) asserts generated
+=UInt64=/=Int64= getters call =capnp/get-u64=.
+
+**Testament / Judge suite for generated modules.** Not wired in-tree yet:
+product hosts amalgamate Janet (no standalone =janet= pkg-config / jpm on
+the remote builder path this library uses). A pure Testament suite would
+need either (1) a system Janet + jpm install of Testament as a *test-only*
+dep outside product packs, or (2) a small C host that links the
+amalgamation, registers =capnp_janet_register=, and =dofile=s generated
+helpers. Prefer (1) when a builder image gains Janet without pulling
+product amalgamation into this repo. Until then, C + codegen smoke is the
+regression gate for the get-u64 path.

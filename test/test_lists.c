@@ -113,8 +113,73 @@ static void test_copy_flat(void) {
   capnp_message_free(&m2);
 }
 
+
+static void test_struct_u64(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m;
+  capnp_ptr_t r;
+  const uint64_t want = 0x1122334455667788ULL;
+
+  capnp_builder_init(&b);
+  capnp_builder_root(&b, &root);
+  /* 1 data word holds one u64 at byte offset 0. */
+  capnp_builder_struct(&root, 1, 0, &body);
+  CHECK(capnp_builder_set_u64(&b, body.word, 0, want) == CAPNP_OK, "set u64");
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
+  capnp_builder_free(&b);
+  CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "flat");
+  free(flat);
+  CHECK(capnp_root(&m, &r) == CAPNP_OK, "root");
+  CHECK_EQ_U64(capnp_get_u64(&r, 0, 0), want, "get u64");
+  /* past-end default on empty struct */
+  capnp_message_free(&m);
+
+  capnp_builder_init(&b);
+  capnp_builder_root(&b, &root);
+  capnp_builder_struct(&root, 0, 0, &body);
+  capnp_builder_serialize(&b, &flat, &flen);
+  capnp_builder_free(&b);
+  CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "flat0");
+  free(flat);
+  CHECK(capnp_root(&m, &r) == CAPNP_OK, "root0");
+  CHECK_EQ_U64(capnp_get_u64(&r, 0, 99), 99, "default past end");
+  capnp_message_free(&m);
+}
+
+static void test_list_u64(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body;
+  uint64_t items[] = {1ULL, 0x100000001ULL, 0xdeadbeefcafebabeULL};
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m;
+  capnp_ptr_t r, list;
+
+  capnp_builder_init(&b);
+  capnp_builder_root(&b, &root);
+  capnp_builder_struct(&root, 0, 1, &body);
+  CHECK(capnp_builder_set_list_u64(&b, body.word, 0, 0, items, 3) == CAPNP_OK,
+        "set list u64");
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
+  capnp_builder_free(&b);
+  CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "flat");
+  free(flat);
+  CHECK(capnp_root(&m, &r) == CAPNP_OK, "root");
+  CHECK(capnp_getp(&r, 0, &list) == CAPNP_OK, "list");
+  CHECK_EQ_U32(capnp_list_len(&list), 3, "len");
+  CHECK_EQ_U64(capnp_list_get_u64(&list, 0, 0), items[0], "e0");
+  CHECK_EQ_U64(capnp_list_get_u64(&list, 1, 0), items[1], "e1");
+  CHECK_EQ_U64(capnp_list_get_u64(&list, 2, 0), items[2], "e2");
+  capnp_message_free(&m);
+}
+
 int main(void) {
   test_list_u32();
+  test_struct_u64();
+  test_list_u64();
   test_data_blob();
   test_list_f64();
   test_copy_flat();

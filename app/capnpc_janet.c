@@ -274,9 +274,8 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node) {
       break;
     case TYPE_UINT64:
     case TYPE_INT64:
-      /* get-u64 not exposed on Janet yet; use get-f64 only for floats. */
       fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/get-u32 ptr %u))\n", sname,
+              "(defn %s-get-%s [ptr]\n  (capnp/get-u64 ptr %u))\n", sname,
               fname, (unsigned)(offset * 8));
       break;
     case TYPE_FLOAT64:

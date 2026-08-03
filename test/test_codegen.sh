@@ -28,4 +28,16 @@ if grep -q 'Person\.Phone' addressbook.janet; then
   echo "FAIL: dotted identifiers in generated Janet" >&2
   exit 1
 fi
+
+# UInt64/Int64 must emit get-u64 (not get-u32).
+cp "$ROOT/schema/u64probe.capnp" "$TMP/"
+capnp compile "-o$PLUGIN" u64probe.capnp
+test -f u64probe.janet
+grep -q 'U64Probe-get-id' u64probe.janet
+grep -q 'U64Probe-get-signed' u64probe.janet
+grep -q 'capnp/get-u64' u64probe.janet
+if grep -E 'get-id|get-signed' u64probe.janet | grep -q 'get-u32'; then
+  echo "FAIL: u64 fields still emit get-u32" >&2
+  exit 1
+fi
 echo "ok codegen"

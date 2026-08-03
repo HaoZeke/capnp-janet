@@ -150,6 +150,21 @@ static Janet cfun_get_u32(int32_t argc, Janet *argv) {
       (double)capnp_get_u32(&p->ptr, (uint32_t)off, dflt));
 }
 
+static Janet cfun_get_u64(int32_t argc, Janet *argv) {
+  janet_arity(argc, 2, 3);
+  capnp_ptr_wrap *p = get_ptr(argv, 0);
+  int32_t off = janet_getinteger(argv, 1);
+  /* Number path: mantissa-safe integers (same as build-message :u64). */
+  uint64_t dflt = 0;
+  if (argc > 2) {
+    if (!janet_checktype(argv[2], JANET_NUMBER))
+      janet_panic("capnp/get-u64: default must be number");
+    dflt = (uint64_t)janet_unwrap_number(argv[2]);
+  }
+  return janet_wrap_number(
+      (double)capnp_get_u64(&p->ptr, (uint32_t)off, dflt));
+}
+
 static Janet cfun_get_f64(int32_t argc, Janet *argv) {
   janet_arity(argc, 2, 3);
   capnp_ptr_wrap *p = get_ptr(argv, 0);
@@ -312,6 +327,8 @@ static const JanetReg capnp_cfuns[] = {
      "(capnp/get-u16 struct-ptr byte-offset &opt default)"},
     {"get-u32", cfun_get_u32,
      "(capnp/get-u32 struct-ptr byte-offset &opt default)"},
+    {"get-u64", cfun_get_u64,
+     "(capnp/get-u64 struct-ptr byte-offset &opt default)"},
     {"get-f64", cfun_get_f64,
      "(capnp/get-f64 struct-ptr byte-offset &opt default)"},
     {"get-bool", cfun_get_bool,

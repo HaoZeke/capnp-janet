@@ -29,7 +29,7 @@ packs import.
 - Canonical form (`capnp_canonicalize`) — **byte-identical** to
   `capnp convert binary:canonical` on AddressBook
 - Sample parity tests: AddressBook + calculator Expression (C++/pycapnp shapes)
-- Janet module (`capnp/...`) and plain C API for static embeds
+- Janet module (`capnp/...` including `get-u64`) and plain C API for static embeds
 - Traversal word budget and depth limit (C++ defaults)
 
 ## Parity
@@ -93,6 +93,7 @@ Link `libcapnp_janet` (pkg-config: `capnp-janet`).
 (def msg (capnp/message-from-buffer buf))
 (def root (capnp/root msg))
 (print (capnp/get-u32 root 0))       # 42
+; (capnp/get-u64 root byte-offset) for UInt64/Int64 fields
 (print (capnp/get-text root 0))      # hello
 (def items (capnp/getp root 1))
 (print (capnp/list-get-text items 1)) # bb

@@ -3,6 +3,7 @@
 #define CAPNP_JANET_TEST_HARNESS_H
 
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 
 static int g_failures = 0;
@@ -22,6 +23,17 @@ static int g_failures = 0;
     if (_a != _b) {                                                            \
       fprintf(stderr, "FAIL %s:%d: %s (got %u want %u)\n", __FILE__, __LINE__, \
               msg, (unsigned)_a, (unsigned)_b);                                \
+      g_failures++;                                                            \
+    }                                                                          \
+  } while (0)
+
+#define CHECK_EQ_U64(a, b, msg)                                                \
+  do {                                                                         \
+    uint64_t _a = (uint64_t)(a);                                               \
+    uint64_t _b = (uint64_t)(b);                                               \
+    if (_a != _b) {                                                            \
+      fprintf(stderr, "FAIL %s:%d: %s (got %llu want %llu)\n", __FILE__,       \
+              __LINE__, msg, (unsigned long long)_a, (unsigned long long)_b);  \
       g_failures++;                                                            \
     }                                                                          \
   } while (0)
