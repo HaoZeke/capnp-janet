@@ -44,7 +44,7 @@ packs import.
 | Schema-evolution reads (defaults past end) | partial | yes | yes | **yes** |
 | Builder / deep copy | limited | yes | yes | **builder + copy_flat** (no orphans/setp-clone yet) |
 | Canonical form | no | yes | yes | **yes** (byte-parity tested) |
-| Code generator (`capnp compile -o`) | yes | yes | yes | **planned** (`capnpc-janet`) |
+| Code generator (`capnp compile -o`) | yes | yes | yes | **yes** (`capnpc-janet` v1: structs/enums + getters) |
 | RPC | no | yes | yes | out of scope for v0.x |
 
 ## Install
@@ -135,9 +135,9 @@ docs/orgmode/  architecture notes
 ## Roadmap
 
 1. **v0.1** — reader + minimal builder + C/Janet API + wire tests
-2. **v0.2** — packed + canonical + primitive lists + AddressBook/calculator samples (**this tree**)
-3. **v0.3** — `capnpc-janet`: `capnp compile -o` plugin, generated accessors
-4. **v0.4** — orphans, cross-message setp clone, c-capnproto golden-master interop
+2. **v0.2** — packed + canonical + primitive lists + samples
+3. **v0.3** — `capnpc-janet` plugin (structs/enums/getters) (**this tree**)
+4. **v0.4** — orphans, cross-message setp clone, c-capnproto golden-master, richer codegen (unions/defaults)
 5. Dynamic API as needed; RPC remains out of scope
 
 ## Related

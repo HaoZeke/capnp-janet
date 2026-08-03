@@ -49,6 +49,13 @@ install_headers(
   subdir: 'capnp-janet',
 )
 
+capnpc_janet = executable(
+  'capnpc-janet',
+  'app/capnpc_janet.c',
+  dependencies: capnp_janet_dep,
+  install: true,
+)
+
 test_inc = include_directories('test')
 
 test_wire = executable(
@@ -124,6 +131,19 @@ test(
   test_canonical,
   workdir: meson.project_source_root(),
   env: {'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root()},
+)
+
+# capnpc-janet smoke (needs system `capnp` CLI).
+bash = find_program('bash', required: true)
+test(
+  'codegen',
+  bash,
+  args: [meson.project_source_root() / 'test/test_codegen.sh'],
+  depends: [capnpc_janet],
+  workdir: meson.project_source_root(),
+  env: {
+    'CAPNP_JANET_BUILD': meson.project_build_root(),
+  },
 )
 
 janet_dep = dependency('janet', required: get_option('janet'))
