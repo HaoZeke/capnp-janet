@@ -60,6 +60,28 @@ int capnp_builder_set_list_text(capnp_builder_t *b, size_t body_word,
                                 uint16_t dwords, uint16_t ptr_index,
                                 const char *const *items, uint32_t nitems);
 
+/* Data = List(UInt8) without requiring trailing NUL (Text always has NUL). */
+int capnp_builder_set_data(capnp_builder_t *b, size_t body_word,
+                           uint16_t dwords, uint16_t ptr_index,
+                           const uint8_t *data, size_t data_len);
+
+/* Primitive lists (element sizes 2/3/4/5). */
+int capnp_builder_set_list_u8(capnp_builder_t *b, size_t body_word,
+                              uint16_t dwords, uint16_t ptr_index,
+                              const uint8_t *items, uint32_t nitems);
+int capnp_builder_set_list_u16(capnp_builder_t *b, size_t body_word,
+                               uint16_t dwords, uint16_t ptr_index,
+                               const uint16_t *items, uint32_t nitems);
+int capnp_builder_set_list_u32(capnp_builder_t *b, size_t body_word,
+                               uint16_t dwords, uint16_t ptr_index,
+                               const uint32_t *items, uint32_t nitems);
+int capnp_builder_set_list_u64(capnp_builder_t *b, size_t body_word,
+                               uint16_t dwords, uint16_t ptr_index,
+                               const uint64_t *items, uint32_t nitems);
+int capnp_builder_set_list_f64(capnp_builder_t *b, size_t body_word,
+                               uint16_t dwords, uint16_t ptr_index,
+                               const double *items, uint32_t nitems);
+
 /*
  * Set pointer slot to List(Struct) composite list.
  * Each element has elem_dwords data words and elem_pwords pointer words.

@@ -23,9 +23,11 @@ packs import.
 - Stream-framed deserialize (copy) and zero-copy view of caller buffers
 - Struct / list / far / double-far / capability pointer resolution
 - Data field readers (`u8`/`u16`/`u32`/`u64`/`f64`/`bool`) with past-end defaults
-- Text and `List(Text)` readers
-- Single-segment builder: structs, Text, `List(Text)`, `List(Struct)`, nested
-  slots, `u16`/`u32`/`u64`/`f64`/`bool`, stream serialize
+- Text, Data, `List(Text)`, primitive lists (`u8`/`u16`/`u32`/`u64`/`f64`)
+- Single-segment builder: structs, Text/Data, lists, nested slots, stream serialize
+- Packed codec (`capnp_pack` / `capnp_unpack`); unpacks official C++ packed frames
+- Canonical form (`capnp_canonicalize`) — **byte-identical** to
+  `capnp convert binary:canonical` on AddressBook
 - Sample parity tests: AddressBook + calculator Expression (C++/pycapnp shapes)
 - Janet module (`capnp/...`) and plain C API for static embeds
 - Traversal word budget and depth limit (C++ defaults)
@@ -34,15 +36,15 @@ packs import.
 
 | Feature | capnp-c | capnp-C++ | capnp-fortran | capnp-janet |
 |---------|---------|-----------|---------------|-------------|
-| Wire format read (struct/list/far/cap) | yes | yes | yes | yes (v0.1) |
-| Stream framing | yes | yes | yes | yes |
-| Packed codec | yes | yes | yes | planned |
-| Zero-copy reads from caller buffer | yes | yes | yes | yes |
-| Traversal and depth limits | no | yes | yes | yes |
-| Schema-evolution reads (defaults past end) | partial | yes | yes | yes |
-| Builder / deep copy | limited | yes | yes | minimal builder |
-| Canonical form | no | yes | yes | planned |
-| Code generator (`capnp compile -o`) | yes | yes | yes | planned (`capnpc-janet`) |
+| Wire format read (struct/list/far/cap) | yes | yes | yes | **yes** |
+| Stream framing | yes | yes | yes | **yes** |
+| Packed codec | yes | yes | yes | **yes** (roundtrip; pack heuristic may differ) |
+| Zero-copy reads from caller buffer | yes | yes | yes | **yes** |
+| Traversal and depth limits | no | yes | yes | **yes** |
+| Schema-evolution reads (defaults past end) | partial | yes | yes | **yes** |
+| Builder / deep copy | limited | yes | yes | **builder + copy_flat** (no orphans/setp-clone yet) |
+| Canonical form | no | yes | yes | **yes** (byte-parity tested) |
+| Code generator (`capnp compile -o`) | yes | yes | yes | **planned** (`capnpc-janet`) |
 | RPC | no | yes | yes | out of scope for v0.x |
 
 ## Install

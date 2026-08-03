@@ -517,3 +517,108 @@ int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
 
   return CAPNP_ERR_KIND;
 }
+
+int capnp_get_data(const capnp_ptr_t *s, uint16_t ptr_index, const uint8_t **out,
+                   size_t *len) {
+  capnp_ptr_t list;
+  int rc = capnp_getp(s, ptr_index, &list);
+  if (rc)
+    return rc;
+  if (list.kind == CAPNP_PK_NULL) {
+    if (out)
+      *out = NULL;
+    if (len)
+      *len = 0;
+    return CAPNP_OK;
+  }
+  if (list.kind != CAPNP_PK_LIST || list.esize != CAPNP_SZ_BYTE)
+    return CAPNP_ERR_KIND;
+  if (out)
+    *out = list.msg->segs[list.seg].data + list.word * CAPNP_WORD_BYTES;
+  if (len)
+    *len = list.count;
+  return CAPNP_OK;
+}
+
+static const uint8_t *list_elem_bytes(const capnp_ptr_t *list, uint32_t index,
+                                      size_t elem_bytes) {
+  return list->msg->segs[list->seg].data + list->word * CAPNP_WORD_BYTES +
+         (size_t)index * elem_bytes;
+}
+
+uint8_t capnp_list_get_u8(const capnp_ptr_t *list, uint32_t index,
+                          uint8_t dflt) {
+  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_BYTE ||
+      index >= list->count)
+    return dflt;
+  return *list_elem_bytes(list, index, 1);
+}
+
+uint16_t capnp_list_get_u16(const capnp_ptr_t *list, uint32_t index,
+                            uint16_t dflt) {
+  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_TWO ||
+      index >= list->count)
+    return dflt;
+  return (uint16_t)(list_elem_bytes(list, index, 2)[0] |
+                    (list_elem_bytes(list, index, 2)[1] << 8));
+}
+
+uint32_t capnp_list_get_u32(const capnp_ptr_t *list, uint32_t index,
+                            uint32_t dflt) {
+  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_FOUR ||
+      index >= list->count)
+    return dflt;
+  return capnp_load_le32(list_elem_bytes(list, index, 4));
+}
+
+uint64_t capnp_list_get_u64(const capnp_ptr_t *list, uint32_t index,
+                            uint64_t dflt) {
+  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_EIGHT ||
+      index >= list->count)
+    return dflt;
+  return capnp_load_le64(list_elem_bytes(list, index, 8));
+}
+
+double capnp_list_get_f64(const capnp_ptr_t *list, uint32_t index, double dflt) {
+  uint64_t bits;
+  double v;
+  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_EIGHT ||
+      index >= list->count)
+    return dflt;
+  bits = capnp_load_le64(list_elem_bytes(list, index, 8));
+  memcpy(&v, &bits, sizeof(v));
+  return v;
+}
+
+int capnp_message_copy_flat(const capnp_message_t *m, uint8_t **out,
+                            size_t *out_len) {
+  size_t table_bytes, body_words, total, i, off;
+  uint8_t *buf;
+
+  if (!m || !out || !out_len || m->nsegs == 0)
+    return CAPNP_ERR_ARG;
+  body_words = 0;
+  for (i = 0; i < m->nsegs; i++)
+    body_words += m->segs[i].words;
+  table_bytes = 4u + 4u * (size_t)m->nsegs;
+  if (table_bytes % 8u != 0)
+    table_bytes += 4u;
+  total = table_bytes + body_words * CAPNP_WORD_BYTES;
+  buf = (uint8_t *)malloc(total);
+  if (!buf)
+    return CAPNP_ERR_ALLOC;
+  capnp_store_le32(buf, m->nsegs - 1);
+  for (i = 0; i < m->nsegs; i++)
+    capnp_store_le32(buf + 4 + 4 * i, (uint32_t)m->segs[i].words);
+  if (table_bytes > 4u + 4u * m->nsegs)
+    memset(buf + 4 + 4 * m->nsegs, 0, table_bytes - (4 + 4 * m->nsegs));
+  off = table_bytes;
+  for (i = 0; i < m->nsegs; i++) {
+    size_t nbytes = m->segs[i].words * CAPNP_WORD_BYTES;
+    memcpy(buf + off, m->segs[i].data, nbytes);
+    off += nbytes;
+  }
+  *out = buf;
+  *out_len = total;
+  return CAPNP_OK;
+}

@@ -16,6 +16,8 @@ inc = include_directories('include')
 lib_sources = files(
   'src/capnp_message.c',
   'src/capnp_builder.c',
+  'src/capnp_packed.c',
+  'src/capnp_canonical.c',
 )
 
 capnp_janet_lib = library(
@@ -41,6 +43,8 @@ install_headers(
   'include/capnp-janet/capnp_pointer.h',
   'include/capnp-janet/capnp_message.h',
   'include/capnp-janet/capnp_builder.h',
+  'include/capnp-janet/capnp_packed.h',
+  'include/capnp-janet/capnp_canonical.h',
   'include/capnp-janet/capnp_janet.h',
   subdir: 'capnp-janet',
 )
@@ -84,6 +88,40 @@ test_calculator = executable(
 test(
   'calculator',
   test_calculator,
+  workdir: meson.project_source_root(),
+  env: {'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root()},
+)
+
+test_packed = executable(
+  'test_packed',
+  'test/test_packed.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+test(
+  'packed',
+  test_packed,
+  workdir: meson.project_source_root(),
+  env: {'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root()},
+)
+
+test_lists = executable(
+  'test_lists',
+  'test/test_lists.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+test('lists', test_lists)
+
+test_canonical = executable(
+  'test_canonical',
+  'test/test_canonical.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+test(
+  'canonical',
+  test_canonical,
   workdir: meson.project_source_root(),
   env: {'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root()},
 )

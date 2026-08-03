@@ -90,4 +90,26 @@ int capnp_list_getp(const capnp_ptr_t *list, uint32_t index, capnp_ptr_t *out);
 int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
                         const char **out, size_t *len);
 
+/* Data field (List(UInt8), may omit trailing NUL). */
+int capnp_get_data(const capnp_ptr_t *s, uint16_t ptr_index, const uint8_t **out,
+                   size_t *len);
+
+/* Primitive list element readers (esize byte/two/four/eight). */
+uint8_t capnp_list_get_u8(const capnp_ptr_t *list, uint32_t index, uint8_t dflt);
+uint16_t capnp_list_get_u16(const capnp_ptr_t *list, uint32_t index,
+                            uint16_t dflt);
+uint32_t capnp_list_get_u32(const capnp_ptr_t *list, uint32_t index,
+                            uint32_t dflt);
+uint64_t capnp_list_get_u64(const capnp_ptr_t *list, uint32_t index,
+                            uint64_t dflt);
+double capnp_list_get_f64(const capnp_ptr_t *list, uint32_t index, double dflt);
+
+/*
+ * Serialize stream-framed message currently viewed/owned by m into malloc
+ * buffer (deep copy of all segments into a single-segment frame when nsegs==1;
+ * multi-segment frames preserved).
+ */
+int capnp_message_copy_flat(const capnp_message_t *m, uint8_t **out,
+                            size_t *out_len);
+
 #endif /* CAPNP_JANET_MESSAGE_H */
