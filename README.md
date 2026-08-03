@@ -25,7 +25,8 @@ packs import.
 - Data field readers (`u8`/`u16`/`u32`/`u64`/`f64`/`bool`) with past-end defaults
 - Text, Data, `List(Text)`, primitive lists (`u8`/`u16`/`u32`/`u64`/`f64`)
 - Single-segment builder: structs, Text/Data, lists, nested slots, stream serialize
-- Packed codec (`capnp_pack` / `capnp_unpack`); unpacks official C++ packed frames
+- Packed codec (`capnp_pack` / `capnp_unpack`); **byte-identical** to
+  Cap'n C++ `PackedOutputStream` / `capnp convert binary:packed` (AddressBook golden)
 - Canonical form (`capnp_canonicalize`) — **byte-identical** to
   `capnp convert binary:canonical` on AddressBook
 - Sample parity tests: AddressBook + calculator Expression (C++/pycapnp shapes)
@@ -38,7 +39,7 @@ packs import.
 |---------|---------|-----------|---------------|-------------|
 | Wire format read (struct/list/far/cap) | yes | yes | yes | **yes** |
 | Stream framing | yes | yes | yes | **yes** |
-| Packed codec | yes | yes | yes | **yes** (roundtrip; pack heuristic may differ) |
+| Packed codec | yes | yes | yes | **yes** (byte-identical C++ pack heuristic) |
 | Zero-copy reads from caller buffer | yes | yes | yes | **yes** |
 | Traversal and depth limits | no | yes | yes | **yes** |
 | Schema-evolution reads (defaults past end) | partial | yes | yes | **yes** |

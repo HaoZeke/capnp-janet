@@ -9,8 +9,21 @@ static int word_all_zero(const uint8_t *w) {
          w[5] == 0 && w[6] == 0 && w[7] == 0;
 }
 
-static int word_no_zero_byte(const uint8_t *w) {
-  return w[0] && w[1] && w[2] && w[3] && w[4] && w[5] && w[6] && w[7];
+/* Cap'n C++ PackedOutputStream: after tag 0xff, pack following words
+ * verbatim while each has fewer than two zero bytes (zero or one zero).
+ * A single trailing zero is still a net loss to compress into a tag, so
+ * those words stay in the uncompressed run. */
+static int word_fewer_than_two_zeros(const uint8_t *w) {
+  int z = 0;
+  int k;
+  for (k = 0; k < 8; k++) {
+    if (w[k] == 0) {
+      z++;
+      if (z >= 2)
+        return 0;
+    }
+  }
+  return 1;
 }
 
 int capnp_pack(const uint8_t *in, size_t in_len, uint8_t **out,
@@ -68,10 +81,10 @@ int capnp_pack(const uint8_t *in, size_t in_len, uint8_t **out,
       buf[opos++] = (uint8_t)run;
       w += run;
     } else if (nz == 8) {
-      /* C++ heuristic: following words with no zero byte, up to 255 */
+      /* C++ heuristic: words with 0 or 1 zero byte, up to 255 */
       run = 0;
       while (w + run < nwords && run < 255 &&
-             word_no_zero_byte(in + (w + run) * 8))
+             word_fewer_than_two_zeros(in + (w + run) * 8))
         run++;
       buf[opos++] = (uint8_t)run;
       if (run) {

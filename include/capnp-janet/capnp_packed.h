@@ -11,8 +11,9 @@
  * Applied on top of stream-framed (or flat) word-aligned bytes.
  *
  * Pack: each word → tag byte + nonzero payload bytes; 0x00 / 0xff escapes
- * for zero runs and verbatim runs (C++ heuristic: after 0xff, include up to
- * 255 following words that contain no zero byte).
+ * for zero runs and verbatim runs. After an 0xff tag, Cap'n C++
+ * PackedOutputStream includes up to 255 following words that each contain
+ * fewer than two zero bytes (matches `capnp convert binary:packed`).
  */
 
 /* Pack word-aligned input. *out is malloc'd; caller frees. */

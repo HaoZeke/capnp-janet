@@ -86,6 +86,66 @@ static void test_dense_run(void) {
   free(unpacked);
 }
 
+/*
+ * C++ PackedOutputStream heuristic: after 0xff, keep words with fewer than
+ * two zero bytes in the verbatim run. One trailing zero stays uncompressed.
+ * Input: "bob@exam" (8 nonzero) + "ple.com\0" (one zero) + sparse word.
+ */
+static void test_one_zero_verbatim(void) {
+  uint8_t unp[24];
+  /* Expected: ff + bob@exam + count 01 + ple.com\0 + tag 0x01 + 0x08 */
+  const uint8_t exp[] = {
+      0xff, 'b', 'o', 'b', '@', 'e', 'x', 'a', 'm', 0x01, 'p', 'l', 'e',
+      '.',  'c', 'o', 'm', 0x00, 0x01, 0x08};
+  uint8_t *packed = NULL, *unpacked = NULL;
+  size_t plen = 0, ulen = 0;
+
+  memcpy(unp, "bob@example.com", 15);
+  unp[15] = 0;
+  memset(unp + 16, 0, 8);
+  unp[16] = 0x08;
+
+  CHECK(capnp_pack(unp, sizeof(unp), &packed, &plen) == CAPNP_OK, "pack");
+  CHECK(plen == sizeof(exp) && memcmp(packed, exp, plen) == 0,
+        "one-zero verbatim pack");
+  CHECK(capnp_unpack(packed, plen, &unpacked, &ulen) == CAPNP_OK, "unpack");
+  CHECK(ulen == sizeof(unp) && memcmp(unpacked, unp, ulen) == 0, "roundtrip");
+  free(packed);
+  free(unpacked);
+}
+
+/*
+ * Two zero bytes in a following word end the verbatim run: compress that
+ * word with a normal tag instead.
+ */
+static void test_two_zeros_end_run(void) {
+  uint8_t unp[16];
+  /* Word0 all 0xff → tag ff + 8 bytes; word1 has two zeros → not in run. */
+  const uint8_t exp[] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+                         0x00, /* count 0 */
+                         0x3f, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
+  uint8_t *packed = NULL, *unpacked = NULL;
+  size_t plen = 0, ulen = 0;
+
+  memset(unp, 0xff, 8);
+  unp[8] = 0x01;
+  unp[9] = 0x02;
+  unp[10] = 0x03;
+  unp[11] = 0x04;
+  unp[12] = 0x05;
+  unp[13] = 0x06;
+  unp[14] = 0x00;
+  unp[15] = 0x00;
+
+  CHECK(capnp_pack(unp, sizeof(unp), &packed, &plen) == CAPNP_OK, "pack");
+  CHECK(plen == sizeof(exp) && memcmp(packed, exp, plen) == 0,
+        "two-zero ends run");
+  CHECK(capnp_unpack(packed, plen, &unpacked, &ulen) == CAPNP_OK, "unpack");
+  CHECK(ulen == sizeof(unp) && memcmp(unpacked, unp, ulen) == 0, "roundtrip");
+  free(packed);
+  free(unpacked);
+}
+
 static void test_addressbook_roundtrip(void) {
   const char *src = getenv("CAPNP_JANET_SOURCE_ROOT");
   char path[1024];
@@ -107,24 +167,22 @@ static void test_addressbook_roundtrip(void) {
   CHECK(capnp_unpack(packed, plen, &unpacked, &ulen) == CAPNP_OK, "unpack ab");
   CHECK(ulen == blen && memcmp(unpacked, bin, blen) == 0, "ab bytes equal");
 
-  /*
-   * Official `capnp convert binary:packed` may choose a different valid
-   * encoding (0xff / zero-run heuristics). Require we can *unpack* it.
-   */
+  /* Byte-identical to official `capnp convert binary:packed`. */
   {
     char gpath[1024];
     uint8_t *golden = NULL, *from_gold = NULL;
     size_t glen = 0, gulen = 0;
     snprintf(gpath, sizeof(gpath),
              "%s/test/fixtures/addressbook_alice_bob.packed", src);
-    if (load_file(gpath, &golden, &glen) == 0) {
-      CHECK(capnp_unpack(golden, glen, &from_gold, &gulen) == CAPNP_OK,
-            "unpack official packed");
-      CHECK(gulen == blen && memcmp(from_gold, bin, blen) == 0,
-            "official packed → original");
-      free(from_gold);
-      free(golden);
-    }
+    CHECK(load_file(gpath, &golden, &glen) == 0, "load official packed");
+    CHECK(plen == glen && memcmp(packed, golden, glen) == 0,
+          "pack == official packed golden");
+    CHECK(capnp_unpack(golden, glen, &from_gold, &gulen) == CAPNP_OK,
+          "unpack official packed");
+    CHECK(gulen == blen && memcmp(from_gold, bin, blen) == 0,
+          "official packed → original");
+    free(from_gold);
+    free(golden);
   }
 
   CHECK(capnp_message_from_flat(&m, unpacked, ulen) == CAPNP_OK, "from flat");
@@ -168,6 +226,8 @@ int main(void) {
   test_spec_example();
   test_zero_run();
   test_dense_run();
+  test_one_zero_verbatim();
+  test_two_zeros_end_run();
   test_addressbook_roundtrip();
   test_builder_then_pack();
   return harness_finish();

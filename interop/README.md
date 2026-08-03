@@ -14,8 +14,12 @@
 Assertions:
 
 - **Reader**: decode encode frames (AddressBook / calculator suites)
-- **Packed**: our unpacker accepts official packed; our pack roundtrips
-  (byte-identical pack is not required — valid encodings differ by heuristic)
+- **Packed**: `capnp_pack` is **byte-identical** to Cap'n C++
+  `PackedOutputStream` / `capnp convert binary:packed` on AddressBook and the
+  dense / zero / one-zero-verbatim fixtures in `test/test_packed.c`. Unpack of
+  official packed frames is also required. Heuristic after tag `0xff`: include
+  up to 255 following words that each contain **fewer than two** zero bytes
+  (matches C++ `serialize-packed.c++`).
 - **Canonical**: our `capnp_canonicalize` is **byte-identical** to
   `binary:canonical` on AddressBook
 
