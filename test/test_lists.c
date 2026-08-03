@@ -20,7 +20,7 @@ static void test_list_u32(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  CHECK(capnp_builder_set_list_u32(&b, body.word, 0, 0, items, 3) == CAPNP_OK,
+  CHECK(capnp_builder_set_list_u32(&body, 0, 0, items, 3) == CAPNP_OK,
         "set list u32");
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
@@ -49,7 +49,7 @@ static void test_data_blob(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  CHECK(capnp_builder_set_data(&b, body.word, 0, 0, blob, sizeof(blob)) ==
+  CHECK(capnp_builder_set_data(&body, 0, 0, blob, sizeof(blob)) ==
             CAPNP_OK,
         "set data");
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
@@ -74,7 +74,7 @@ static void test_list_f64(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  CHECK(capnp_builder_set_list_f64(&b, body.word, 0, 0, items, 3) == CAPNP_OK,
+  CHECK(capnp_builder_set_list_f64(&body, 0, 0, items, 3) == CAPNP_OK,
         "set f64");
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
@@ -99,7 +99,7 @@ static void test_copy_flat(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 1, 0, &body);
-  capnp_builder_set_u32(&b, body.word, 0, 99);
+  capnp_builder_set_u32(&body, 0, 99);
   capnp_builder_serialize(&b, &flat, &flen);
   capnp_builder_free(&b);
   CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "m");
@@ -127,7 +127,7 @@ static void test_struct_u64(void) {
   capnp_builder_root(&b, &root);
   /* 1 data word holds one u64 at byte offset 0. */
   capnp_builder_struct(&root, 1, 0, &body);
-  CHECK(capnp_builder_set_u64(&b, body.word, 0, want) == CAPNP_OK, "set u64");
+  CHECK(capnp_builder_set_u64(&body, 0, want) == CAPNP_OK, "set u64");
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
   CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "flat");
@@ -161,7 +161,7 @@ static void test_list_u64(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  CHECK(capnp_builder_set_list_u64(&b, body.word, 0, 0, items, 3) == CAPNP_OK,
+  CHECK(capnp_builder_set_list_u64(&body, 0, 0, items, 3) == CAPNP_OK,
         "set list u64");
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);

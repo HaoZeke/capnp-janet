@@ -21,11 +21,11 @@ static void test_roundtrip_demo(void) {
   capnp_bptr_t root, body;
   CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
   CHECK(capnp_builder_struct(&root, 1, 2, &body) == CAPNP_OK, "struct");
-  CHECK(capnp_builder_set_u32(&b, body.word, 0, 42) == CAPNP_OK, "u32");
-  CHECK(capnp_builder_set_text(&b, body.word, 1, 0, "hello", 5) == CAPNP_OK,
+  CHECK(capnp_builder_set_u32(&body, 0, 42) == CAPNP_OK, "u32");
+  CHECK(capnp_builder_set_text(&body, 1, 0, "hello", 5) == CAPNP_OK,
         "text");
   const char *items[] = {"a", "bb", "ccc"};
-  CHECK(capnp_builder_set_list_text(&b, body.word, 1, 1, items, 3) == CAPNP_OK,
+  CHECK(capnp_builder_set_list_text(&body, 1, 1, items, 3) == CAPNP_OK,
         "list text");
 
   uint8_t *flat = NULL;
@@ -73,8 +73,8 @@ static void test_view_flat(void) {
   capnp_bptr_t root, body;
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 1, 1, &body);
-  capnp_builder_set_u32(&b, body.word, 0, 7);
-  capnp_builder_set_text(&b, body.word, 1, 0, "x", 1);
+  capnp_builder_set_u32(&body, 0, 7);
+  capnp_builder_set_text(&body, 1, 0, "x", 1);
   uint8_t *flat = NULL;
   size_t flat_len = 0;
   capnp_builder_serialize(&b, &flat, &flat_len);
@@ -99,16 +99,16 @@ static void test_composite_list(void) {
   capnp_bptr_t root, body;
   CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
   CHECK(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "outer");
-  size_t first = 0;
-  CHECK(capnp_builder_set_list_struct(&b, body.word, 0, 0, 2, 1, 1, &first) ==
+  capnp_bptr_t first;
+  CHECK(capnp_builder_set_list_struct(&body, 0, 0, 2, 1, 1, &first) ==
             CAPNP_OK,
         "list struct");
   /* elem0: exists=1, name=aa */
-  CHECK(capnp_builder_set_bool(&b, first, 0, 1) == CAPNP_OK, "bool0");
-  CHECK(capnp_builder_set_text(&b, first, 1, 0, "aa", 2) == CAPNP_OK, "t0");
-  size_t e1 = first + 2;
-  CHECK(capnp_builder_set_bool(&b, e1, 0, 0) == CAPNP_OK, "bool1");
-  CHECK(capnp_builder_set_text(&b, e1, 1, 0, "b", 1) == CAPNP_OK, "t1");
+  CHECK(capnp_builder_set_bool(&first, 0, 1) == CAPNP_OK, "bool0");
+  CHECK(capnp_builder_set_text(&first, 1, 0, "aa", 2) == CAPNP_OK, "t0");
+  capnp_bptr_t e1 = capnp_bptr_add(first, 2);
+  CHECK(capnp_builder_set_bool(&e1, 0, 0) == CAPNP_OK, "bool1");
+  CHECK(capnp_builder_set_text(&e1, 1, 0, "b", 1) == CAPNP_OK, "t1");
 
   uint8_t *flat = NULL;
   size_t flat_len = 0;

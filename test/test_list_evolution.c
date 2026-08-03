@@ -26,7 +26,7 @@ static void test_list_bool_roundtrip(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  CHECK(capnp_builder_set_list_bool(&b, body.word, 0, 0, bits, 10) == CAPNP_OK,
+  CHECK(capnp_builder_set_list_bool(&body, 0, 0, bits, 10) == CAPNP_OK,
         "set list bool");
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
@@ -57,7 +57,7 @@ static void test_list_void_length(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  CHECK(capnp_builder_set_list_void(&b, body.word, 0, 0, 42) == CAPNP_OK,
+  CHECK(capnp_builder_set_list_void(&body, 0, 0, 42) == CAPNP_OK,
         "set void list");
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
@@ -84,7 +84,7 @@ static void test_list_void_empty(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  CHECK(capnp_builder_set_list_void(&b, body.word, 0, 0, 0) == CAPNP_OK,
+  CHECK(capnp_builder_set_list_void(&body, 0, 0, 0) == CAPNP_OK,
         "empty void");
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
@@ -108,7 +108,7 @@ static void test_list_upgrade_prim(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  CHECK(capnp_builder_set_list_u32(&b, body.word, 0, 0, items, 2) == CAPNP_OK,
+  CHECK(capnp_builder_set_list_u32(&body, 0, 0, items, 2) == CAPNP_OK,
         "set u32 list");
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
@@ -140,7 +140,7 @@ static void test_list_upgrade_ptr(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  CHECK(capnp_builder_set_list_text(&b, body.word, 0, 0, items, 1) == CAPNP_OK,
+  CHECK(capnp_builder_set_list_text(&body, 0, 0, items, 1) == CAPNP_OK,
         "set List(Text)");
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
@@ -168,7 +168,7 @@ static void test_list_upgrade_bit_refused(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  capnp_builder_set_list_bool(&b, body.word, 0, 0, bits, 3);
+  capnp_builder_set_list_bool(&body, 0, 0, bits, 3);
   capnp_builder_serialize(&b, &flat, &flen);
   capnp_builder_free(&b);
   capnp_message_from_flat(&m, flat, flen);
@@ -183,7 +183,7 @@ static void test_list_upgrade_bit_refused(void) {
 static void test_list_downgrade_composite(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body;
-  size_t first = 0;
+  capnp_bptr_t first;
   uint8_t *flat = NULL;
   size_t flen = 0;
   capnp_message_t m;
@@ -195,13 +195,13 @@ static void test_list_downgrade_composite(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  CHECK(capnp_builder_set_list_struct(&b, body.word, 0, 0, 2, 1, 1, &first) ==
+  CHECK(capnp_builder_set_list_struct(&body, 0, 0, 2, 1, 1, &first) ==
             CAPNP_OK,
         "composite list");
   for (i = 0; i < 2; i++) {
-    size_t eword = first + (size_t)i * 2;
-    capnp_builder_set_u32(&b, eword, 0, 1000 + i);
-    CHECK(capnp_builder_set_text(&b, eword, 1, 0, "hello", 5) == CAPNP_OK,
+    capnp_bptr_t eword = capnp_bptr_add(first, (size_t)i * 2);
+    capnp_builder_set_u32(&eword, 0, 1000 + i);
+    CHECK(capnp_builder_set_text(&eword, 1, 0, "hello", 5) == CAPNP_OK,
           "set text");
   }
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
@@ -241,7 +241,7 @@ static void test_list_upgrade_u8(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  capnp_builder_set_list_u8(&b, body.word, 0, 0, items, 5);
+  capnp_builder_set_list_u8(&body, 0, 0, items, 5);
   capnp_builder_serialize(&b, &flat, &flen);
   capnp_builder_free(&b);
   capnp_message_from_flat(&m, flat, flen);

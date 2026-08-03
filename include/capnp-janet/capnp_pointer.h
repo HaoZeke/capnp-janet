@@ -88,4 +88,14 @@ static inline uint64_t capnp_wp_make_list(int32_t off, int esize,
   return w;
 }
 
+static inline uint64_t capnp_wp_make_far(int two_word_pad, uint32_t word_off,
+                                         uint32_t seg_id) {
+  uint64_t w = 2ull;
+  if (two_word_pad)
+    w |= 4ull;
+  w |= ((uint64_t)(word_off & 0x1fffffffu) << 3);
+  w |= ((uint64_t)seg_id << 32);
+  return w;
+}
+
 #endif /* CAPNP_JANET_POINTER_H */

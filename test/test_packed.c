@@ -206,8 +206,8 @@ static void test_builder_then_pack(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 1, 1, &body);
-  capnp_builder_set_u32(&b, body.word, 0, 42);
-  capnp_builder_set_text(&b, body.word, 1, 0, "hi", 2);
+  capnp_builder_set_u32(&body, 0, 42);
+  capnp_builder_set_text(&body, 1, 0, "hi", 2);
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
   CHECK(capnp_pack(flat, flen, &packed, &plen) == CAPNP_OK, "pack");

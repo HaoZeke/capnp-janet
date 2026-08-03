@@ -114,23 +114,23 @@ static int eval_expr(const capnp_ptr_t *e, double *out) {
   return -1;
 }
 
-/* Write Expression.literal at body word. */
-static int write_literal(capnp_builder_t *b, size_t body, double v) {
-  if (capnp_builder_set_f64(b, body, 0, v))
+/* Write Expression.literal at body. */
+static int write_literal(const capnp_bptr_t *body, double v) {
+  if (capnp_builder_set_f64(body, 0, v))
     return -1;
-  if (capnp_builder_set_u16(b, body, 8, EXPR_LITERAL))
+  if (capnp_builder_set_u16(body, 8, EXPR_LITERAL))
     return -1;
   return 0;
 }
 
 /* Write Expression.call at body; returns params list first-elem body. */
-static int write_call(capnp_builder_t *b, size_t body, uint16_t op,
-                      uint32_t nparams, size_t *params0) {
-  if (capnp_builder_set_u16(b, body, 0, op))
+static int write_call(const capnp_bptr_t *body, uint16_t op, uint32_t nparams,
+                      capnp_bptr_t *params0) {
+  if (capnp_builder_set_u16(body, 0, op))
     return -1;
-  if (capnp_builder_set_u16(b, body, 8, EXPR_CALL))
+  if (capnp_builder_set_u16(body, 8, EXPR_CALL))
     return -1;
-  if (capnp_builder_set_list_struct(b, body, EXPR_D, 0, nparams, EXPR_D, EXPR_P,
+  if (capnp_builder_set_list_struct(body, EXPR_D, 0, nparams, EXPR_D, EXPR_P,
                                     params0))
     return -1;
   return 0;
@@ -140,7 +140,7 @@ static int write_call(capnp_builder_t *b, size_t body, uint16_t op,
 static void test_builder_add_2_3(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body, expr_slot, expr_body;
-  size_t params0;
+  capnp_bptr_t params0;
   uint8_t *flat = NULL;
   size_t flat_len = 0;
   capnp_message_t m;
@@ -151,14 +151,17 @@ static void test_builder_add_2_3(void) {
   CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
   /* EvaluateRequest: 0 data, 1 ptr */
   CHECK(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "req");
-  CHECK(capnp_builder_slot(&b, body.word, 0, 0, &expr_slot) == CAPNP_OK,
+  CHECK(capnp_builder_slot(&body, 0, 0, &expr_slot) == CAPNP_OK,
         "slot");
   CHECK(capnp_builder_struct(&expr_slot, EXPR_D, EXPR_P, &expr_body) ==
             CAPNP_OK,
         "expr");
-  CHECK(write_call(&b, expr_body.word, OP_ADD, 2, &params0) == 0, "call");
-  CHECK(write_literal(&b, params0, 2.0) == 0, "lit2");
-  CHECK(write_literal(&b, params0 + EXPR_D + EXPR_P, 3.0) == 0, "lit3");
+  CHECK(write_call(&expr_body, OP_ADD, 2, &params0) == 0, "call");
+  CHECK(write_literal(&params0, 2.0) == 0, "lit2");
+  {
+    capnp_bptr_t p1 = capnp_bptr_add(params0, EXPR_D + EXPR_P);
+    CHECK(write_literal(&p1, 3.0) == 0, "lit3");
+  }
 
   CHECK(capnp_builder_serialize(&b, &flat, &flat_len) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
@@ -178,7 +181,7 @@ static void test_builder_add_2_3(void) {
 static void test_builder_mul_add(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body, expr_slot, expr_body;
-  size_t outer_params, inner_params;
+  capnp_bptr_t outer_params, inner_params;
   uint8_t *flat = NULL;
   size_t flat_len = 0;
   capnp_message_t m;
@@ -188,18 +191,24 @@ static void test_builder_mul_add(void) {
   capnp_builder_init(&b);
   CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
   CHECK(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "req");
-  CHECK(capnp_builder_slot(&b, body.word, 0, 0, &expr_slot) == CAPNP_OK, "sl");
+  CHECK(capnp_builder_slot(&body, 0, 0, &expr_slot) == CAPNP_OK, "sl");
   CHECK(capnp_builder_struct(&expr_slot, EXPR_D, EXPR_P, &expr_body) ==
             CAPNP_OK,
         "expr");
   /* outer call multiply with 2 params */
-  CHECK(write_call(&b, expr_body.word, OP_MUL, 2, &outer_params) == 0, "mul");
+  CHECK(write_call(&expr_body, OP_MUL, 2, &outer_params) == 0, "mul");
   /* outer_params[0] = call add [2,3] */
-  CHECK(write_call(&b, outer_params, OP_ADD, 2, &inner_params) == 0, "add");
-  CHECK(write_literal(&b, inner_params, 2.0) == 0, "2");
-  CHECK(write_literal(&b, inner_params + EXPR_D + EXPR_P, 3.0) == 0, "3");
+  CHECK(write_call(&outer_params, OP_ADD, 2, &inner_params) == 0, "add");
+  CHECK(write_literal(&inner_params, 2.0) == 0, "2");
+  {
+    capnp_bptr_t t = capnp_bptr_add(inner_params, EXPR_D + EXPR_P);
+    CHECK(write_literal(&t, 3.0) == 0, "3");
+  }
   /* outer_params[1] = 4 */
-  CHECK(write_literal(&b, outer_params + EXPR_D + EXPR_P, 4.0) == 0, "4");
+  {
+    capnp_bptr_t t = capnp_bptr_add(outer_params, EXPR_D + EXPR_P);
+    CHECK(write_literal(&t, 4.0) == 0, "4");
+  }
 
   CHECK(capnp_builder_serialize(&b, &flat, &flat_len) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
@@ -224,7 +233,7 @@ static void test_response_value(void) {
   CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
   /* EvaluateResponse: 1 data word, 0 ptrs */
   CHECK(capnp_builder_struct(&root, 1, 0, &body) == CAPNP_OK, "resp");
-  CHECK(capnp_builder_set_f64(&b, body.word, 0, 5.0) == CAPNP_OK, "5");
+  CHECK(capnp_builder_set_f64(&body, 0, 5.0) == CAPNP_OK, "5");
   CHECK(capnp_builder_serialize(&b, &flat, &flat_len) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
   CHECK(capnp_message_from_flat(&m, flat, flat_len) == CAPNP_OK, "flat");
@@ -293,9 +302,9 @@ static void test_literal_only_request(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 0, 1, &body);
-  capnp_builder_slot(&b, body.word, 0, 0, &expr_slot);
+  capnp_builder_slot(&body, 0, 0, &expr_slot);
   capnp_builder_struct(&expr_slot, EXPR_D, EXPR_P, &expr_body);
-  CHECK(write_literal(&b, expr_body.word, 42.5) == 0, "lit");
+  CHECK(write_literal(&expr_body, 42.5) == 0, "lit");
   CHECK(capnp_builder_serialize(&b, &flat, &flat_len) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
   CHECK(capnp_message_from_flat(&m, flat, flat_len) == CAPNP_OK, "flat");

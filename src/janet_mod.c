@@ -258,11 +258,11 @@ static Janet cfun_build_message(int32_t argc, Janet *argv) {
 
     if (strcmp((const char *)kind, "u16") == 0) {
       int32_t v = janet_unwrap_integer(tup[2]);
-      if (capnp_builder_set_u16(&b, body.word, (uint32_t)off, (uint16_t)v))
+      if (capnp_builder_set_u16(&body, (uint32_t)off, (uint16_t)v))
         janet_panic("capnp/build-message: set-u16 failed");
     } else if (strcmp((const char *)kind, "u32") == 0) {
       int32_t v = janet_unwrap_integer(tup[2]);
-      if (capnp_builder_set_u32(&b, body.word, (uint32_t)off, (uint32_t)v))
+      if (capnp_builder_set_u32(&body, (uint32_t)off, (uint32_t)v))
         janet_panic("capnp/build-message: set-u32 failed");
     } else if (strcmp((const char *)kind, "u64") == 0) {
       /* Number (mantissa-safe ints). */
@@ -271,7 +271,7 @@ static Janet cfun_build_message(int32_t argc, Janet *argv) {
       {
         double dv = janet_unwrap_number(tup[2]);
         uint64_t v = (uint64_t)dv;
-        if (capnp_builder_set_u64(&b, body.word, (uint32_t)off, v))
+        if (capnp_builder_set_u64(&body, (uint32_t)off, v))
           janet_panic("capnp/build-message: set-u64 failed");
       }
     } else if (strcmp((const char *)kind, "f64") == 0) {
@@ -279,19 +279,19 @@ static Janet cfun_build_message(int32_t argc, Janet *argv) {
         janet_panic("capnp/build-message: f64 value must be number");
       {
         double v = janet_unwrap_number(tup[2]);
-        if (capnp_builder_set_f64(&b, body.word, (uint32_t)off, v))
+        if (capnp_builder_set_f64(&body, (uint32_t)off, v))
           janet_panic("capnp/build-message: set-f64 failed");
       }
     } else if (strcmp((const char *)kind, "bool") == 0) {
       int v = janet_truthy(tup[2]);
-      if (capnp_builder_set_bool(&b, body.word, (uint32_t)off, v))
+      if (capnp_builder_set_bool(&body, (uint32_t)off, v))
         janet_panic("capnp/build-message: set-bool failed");
     } else if (strcmp((const char *)kind, "text") == 0) {
       if (!janet_checktype(tup[2], JANET_STRING))
         janet_panic("capnp/build-message: text value must be string");
       const uint8_t *s = janet_unwrap_string(tup[2]);
       int32_t slen = (int32_t)janet_string_length(s);
-      if (capnp_builder_set_text(&b, body.word, (uint16_t)dwords,
+      if (capnp_builder_set_text(&body, (uint16_t)dwords,
                                  (uint16_t)off, (const char *)s,
                                  (size_t)slen))
         janet_panic("capnp/build-message: set-text failed");

@@ -45,7 +45,7 @@ static void test_truncate_defaults(void) {
   capnp_builder_init(&b);
   capnp_builder_root(&b, &root);
   capnp_builder_struct(&root, 2, 0, &body);
-  capnp_builder_set_u32(&b, body.word, 0, 7);
+  capnp_builder_set_u32(&body, 0, 7);
   /* word 1 remains zero */
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);

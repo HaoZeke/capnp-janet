@@ -27,7 +27,7 @@ packs import.
 - `List(Bool)` bit-lists (`capnp_list_get_bool` / `capnp_builder_set_list_bool`)
 - `List(Void)` length-only (`capnp_builder_set_list_void` + `capnp_list_len`)
 - Schema-evolution list upgrade/downgrade views (see below)
-- Single-segment builder: structs, Text/Data, lists, nested slots, stream serialize
+- Multi-segment builder: growable arena, far / double-far pointer writes, stream serialize
 - Packed codec (`capnp_pack` / `capnp_unpack`); **byte-identical** to
   Cap'n C++ `PackedOutputStream` / `capnp convert binary:packed` (AddressBook golden)
 - Canonical form (`capnp_canonicalize`) — **byte-identical** to
@@ -46,7 +46,7 @@ packs import.
 | Zero-copy reads from caller buffer | yes | yes | yes | **yes** |
 | Traversal and depth limits | no | yes | yes | **yes** |
 | Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | **yes** (supported cases below) |
-| Builder / deep copy | limited | yes | yes | **builder + copy_flat + setp deep-copy** (no orphans yet) |
+| Builder / deep copy | limited | yes | yes | **multi-seg builder + far/double-far + copy_flat + setp** (no orphans yet) |
 | Canonical form | no | yes | yes | **yes** (byte-parity tested) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | **yes** (`capnpc-janet` v1: structs/enums + getters) |
 | RPC | no | yes | yes | out of scope for v0.x |

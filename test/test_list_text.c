@@ -29,7 +29,7 @@ int main(void) {
   capnp_builder_init(&b);
   CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
   CHECK(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "struct");
-  CHECK(capnp_builder_set_list_text(&b, body.word, 0, 0, items, 2) == CAPNP_OK,
+  CHECK(capnp_builder_set_list_text(&body, 0, 0, items, 2) == CAPNP_OK,
         "list text");
   CHECK(capnp_builder_serialize(&b, &flat, &flat_len) == CAPNP_OK, "ser");
   capnp_builder_free(&b);

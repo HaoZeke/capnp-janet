@@ -129,6 +129,15 @@ test_list_evolution = executable(
 )
 test('list_evolution', test_list_evolution)
 
+test_multiseg = executable(
+  'test_multiseg',
+  'test/test_multiseg.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+test('multiseg', test_multiseg)
+
+
 test_canonical = executable(
   'test_canonical',
   'test/test_canonical.c',

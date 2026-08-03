@@ -51,7 +51,7 @@ static void test_copy_struct_slot(void) {
   CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "b root");
   /* Outer { person @0 :Person } — 0 data, 1 ptr */
   CHECK(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "outer");
-  CHECK(capnp_builder_slot(&b, body.word, 0, 0, &slot) == CAPNP_OK, "slot");
+  CHECK(capnp_builder_slot(&body, 0, 0, &slot) == CAPNP_OK, "slot");
   CHECK(capnp_builder_copy_ptr(&slot, &alice) == CAPNP_OK, "copy alice");
   CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
   capnp_builder_free(&b);

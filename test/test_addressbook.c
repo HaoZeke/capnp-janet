@@ -117,7 +117,7 @@ static void verify_alice_bob_book(const capnp_ptr_t *book) {
 static void test_builder_alice_bob(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body, phone_slot;
-  size_t people0, phones0, phones1;
+  capnp_bptr_t people0, phones0, phones1;
   uint8_t *flat = NULL;
   size_t flat_len = 0;
   capnp_message_t m;
@@ -127,53 +127,53 @@ static void test_builder_alice_bob(void) {
   CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
   /* AddressBook: 0 data, 1 ptr */
   CHECK(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "book");
-  CHECK(capnp_builder_set_list_struct(&b, body.word, 0, 0, 2, PERSON_D,
+  CHECK(capnp_builder_set_list_struct(&body, 0, 0, 2, PERSON_D,
                                       PERSON_P, &people0) == CAPNP_OK,
         "people list");
 
   /* Alice */
-  CHECK(capnp_builder_set_u32(&b, people0, 0, 123) == CAPNP_OK, "alice id");
-  CHECK(capnp_builder_set_u16(&b, people0, 4, EMP_SCHOOL) == CAPNP_OK,
+  CHECK(capnp_builder_set_u32(&people0, 0, 123) == CAPNP_OK, "alice id");
+  CHECK(capnp_builder_set_u16(&people0, 4, EMP_SCHOOL) == CAPNP_OK,
         "alice emp tag");
-  CHECK(capnp_builder_set_text(&b, people0, PERSON_D, 0, "Alice", 5) ==
+  CHECK(capnp_builder_set_text(&people0, PERSON_D, 0, "Alice", 5) ==
             CAPNP_OK,
         "alice name");
-  CHECK(capnp_builder_set_text(&b, people0, PERSON_D, 1, "alice@example.com",
+  CHECK(capnp_builder_set_text(&people0, PERSON_D, 1, "alice@example.com",
                                17) == CAPNP_OK,
         "alice email");
-  CHECK(capnp_builder_set_text(&b, people0, PERSON_D, 3, "MIT", 3) == CAPNP_OK,
+  CHECK(capnp_builder_set_text(&people0, PERSON_D, 3, "MIT", 3) == CAPNP_OK,
         "alice school");
-  CHECK(capnp_builder_set_list_struct(&b, people0, PERSON_D, 2, 1, PHONE_D,
+  CHECK(capnp_builder_set_list_struct(&people0, PERSON_D, 2, 1, PHONE_D,
                                       PHONE_P, &phones0) == CAPNP_OK,
         "alice phones");
-  CHECK(capnp_builder_set_u16(&b, phones0, 0, PHONE_MOBILE) == CAPNP_OK,
+  CHECK(capnp_builder_set_u16(&phones0, 0, PHONE_MOBILE) == CAPNP_OK,
         "alice type");
-  CHECK(capnp_builder_set_text(&b, phones0, PHONE_D, 0, "555-1212", 8) ==
+  CHECK(capnp_builder_set_text(&phones0, PHONE_D, 0, "555-1212", 8) ==
             CAPNP_OK,
         "alice num");
 
   /* Bob: people0 + PERSON_D+PERSON_P */
   {
-    size_t bob = people0 + PERSON_D + PERSON_P;
-    CHECK(capnp_builder_set_u32(&b, bob, 0, 456) == CAPNP_OK, "bob id");
-    CHECK(capnp_builder_set_u16(&b, bob, 4, EMP_UNEMPLOYED) == CAPNP_OK,
+    capnp_bptr_t bob = capnp_bptr_add(people0, PERSON_D + PERSON_P);
+    CHECK(capnp_builder_set_u32(&bob, 0, 456) == CAPNP_OK, "bob id");
+    CHECK(capnp_builder_set_u16(&bob, 4, EMP_UNEMPLOYED) == CAPNP_OK,
           "bob emp");
-    CHECK(capnp_builder_set_text(&b, bob, PERSON_D, 0, "Bob", 3) == CAPNP_OK,
+    CHECK(capnp_builder_set_text(&bob, PERSON_D, 0, "Bob", 3) == CAPNP_OK,
           "bob name");
-    CHECK(capnp_builder_set_text(&b, bob, PERSON_D, 1, "bob@example.com", 15) ==
+    CHECK(capnp_builder_set_text(&bob, PERSON_D, 1, "bob@example.com", 15) ==
               CAPNP_OK,
           "bob email");
-    CHECK(capnp_builder_set_list_struct(&b, bob, PERSON_D, 2, 2, PHONE_D,
+    CHECK(capnp_builder_set_list_struct(&bob, PERSON_D, 2, 2, PHONE_D,
                                         PHONE_P, &phones1) == CAPNP_OK,
           "bob phones");
-    CHECK(capnp_builder_set_u16(&b, phones1, 0, PHONE_HOME) == CAPNP_OK, "h");
-    CHECK(capnp_builder_set_text(&b, phones1, PHONE_D, 0, "555-4567", 8) ==
+    CHECK(capnp_builder_set_u16(&phones1, 0, PHONE_HOME) == CAPNP_OK, "h");
+    CHECK(capnp_builder_set_text(&phones1, PHONE_D, 0, "555-4567", 8) ==
               CAPNP_OK,
           "hn");
     {
-      size_t p1 = phones1 + PHONE_D + PHONE_P;
-      CHECK(capnp_builder_set_u16(&b, p1, 0, PHONE_WORK) == CAPNP_OK, "w");
-      CHECK(capnp_builder_set_text(&b, p1, PHONE_D, 0, "555-7654", 8) ==
+      capnp_bptr_t p1 = capnp_bptr_add(phones1, PHONE_D + PHONE_P);
+      CHECK(capnp_builder_set_u16(&p1, 0, PHONE_WORK) == CAPNP_OK, "w");
+      CHECK(capnp_builder_set_text(&p1, PHONE_D, 0, "555-7654", 8) ==
                 CAPNP_OK,
             "wn");
     }
@@ -218,7 +218,7 @@ static void test_golden_alice_bob(void) {
 static void test_self_employed_empty_phones(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body;
-  size_t pe, ph;
+  capnp_bptr_t pe, ph;
   uint8_t *flat = NULL;
   size_t flat_len = 0;
   capnp_message_t m;
@@ -229,16 +229,16 @@ static void test_self_employed_empty_phones(void) {
   capnp_builder_init(&b);
   CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
   CHECK(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "book");
-  CHECK(capnp_builder_set_list_struct(&b, body.word, 0, 0, 1, PERSON_D,
+  CHECK(capnp_builder_set_list_struct(&body, 0, 0, 1, PERSON_D,
                                       PERSON_P, &pe) == CAPNP_OK,
         "ppl");
-  CHECK(capnp_builder_set_u32(&b, pe, 0, 1) == CAPNP_OK, "id");
-  CHECK(capnp_builder_set_u16(&b, pe, 4, EMP_SELF) == CAPNP_OK, "self tag");
-  CHECK(capnp_builder_set_text(&b, pe, PERSON_D, 0, "Cara", 4) == CAPNP_OK,
+  CHECK(capnp_builder_set_u32(&pe, 0, 1) == CAPNP_OK, "id");
+  CHECK(capnp_builder_set_u16(&pe, 4, EMP_SELF) == CAPNP_OK, "self tag");
+  CHECK(capnp_builder_set_text(&pe, PERSON_D, 0, "Cara", 4) == CAPNP_OK,
         "name");
-  CHECK(capnp_builder_set_text(&b, pe, PERSON_D, 1, "c@x", 3) == CAPNP_OK,
+  CHECK(capnp_builder_set_text(&pe, PERSON_D, 1, "c@x", 3) == CAPNP_OK,
         "email");
-  CHECK(capnp_builder_set_list_struct(&b, pe, PERSON_D, 2, 0, PHONE_D, PHONE_P,
+  CHECK(capnp_builder_set_list_struct(&pe, PERSON_D, 2, 0, PHONE_D, PHONE_P,
                                       &ph) == CAPNP_OK,
         "0 phones");
   (void)ph;

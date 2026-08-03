@@ -8,7 +8,7 @@
            |
      capnp_message              (segment arena view, resolve, readers)
            |
-     capnp_builder              (single-segment bump builder)
+     capnp_builder              (multi-segment arena + far/double-far)
            |
      janet_mod                  (Janet native module + register for embeds)
            |
@@ -89,3 +89,10 @@ Supported schema-evolution list views match =capnp-fortran= parity tests
 =List(Void)=: =capnp_builder_set_list_void= + =capnp_list_len= only.
 
 Full esize×esize upgrade matrix is an explicit non-goal; see README.
+
+* Builder segment policy
+
+See =capnp_builder.h=: default first segment 1024 words; spill when full
+(=max(need, 2*prev_cap)=); far landing pads grow the target segment; double-far
+when the target segment is at =max_seg_words=. =force_single= grows in place
+(canonicalize).
