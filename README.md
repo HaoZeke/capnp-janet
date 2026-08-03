@@ -24,6 +24,9 @@ packs import.
 - Struct / list / far / double-far / capability pointer resolution
 - Data field readers (`u8`/`u16`/`u32`/`u64`/`f64`/`bool`) with past-end defaults
 - Text, Data, `List(Text)`, primitive lists (`u8`/`u16`/`u32`/`u64`/`f64`)
+- `List(Bool)` bit-lists (`capnp_list_get_bool` / `capnp_builder_set_list_bool`)
+- `List(Void)` length-only (`capnp_builder_set_list_void` + `capnp_list_len`)
+- Schema-evolution list upgrade/downgrade views (see below)
 - Single-segment builder: structs, Text/Data, lists, nested slots, stream serialize
 - Packed codec (`capnp_pack` / `capnp_unpack`); **byte-identical** to
   Cap'n C++ `PackedOutputStream` / `capnp convert binary:packed` (AddressBook golden)
@@ -42,11 +45,46 @@ packs import.
 | Packed codec | yes | yes | yes | **yes** (byte-identical C++ pack heuristic) |
 | Zero-copy reads from caller buffer | yes | yes | yes | **yes** |
 | Traversal and depth limits | no | yes | yes | **yes** |
-| Schema-evolution reads (defaults past end) | partial | yes | yes | **yes** |
+| Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | **yes** (supported cases below) |
 | Builder / deep copy | limited | yes | yes | **builder + copy_flat + setp deep-copy** (no orphans yet) |
 | Canonical form | no | yes | yes | **yes** (byte-parity tested) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | **yes** (`capnpc-janet` v1: structs/enums + getters) |
 | RPC | no | yes | yes | out of scope for v0.x |
+
+## Schema-evolution list views
+
+Cap'n Proto allows a writer and a reader to disagree on whether a list is a
+primitive list or a list of structs that only use field `@0` (encoding.html
+"list upgrades"). This runtime implements the same cases as Cap'n C++ and
+[capnp-fortran](https://github.com/HaoZeke/capnp-fortran) parity tests:
+
+| Writer encoded | Reader asks for | API |
+|----------------|-----------------|-----|
+| `List(UInt8/16/32/64)` | `List(Struct)` with scalar `@0` | `capnp_list_get_struct` then `capnp_get_u*` |
+| `List(pointer)` e.g. `List(Text)` | `List(Struct)` with pointer `@0` | `capnp_list_get_struct` then `capnp_get_text` / `capnp_getp` |
+| `List(Struct)` with data word 0 | `List(UInt*)` field `@0` | `capnp_list_get_u8` / `u16` / `u32` / `u64` / `f64` |
+| `List(Struct)` with pointer 0 | `List(Text)` / pointer list | `capnp_list_get_text` (already accepted composite) |
+
+**Guarantees on upgrade views.** Synthetic structs limit `data_bits` to the
+element width: reading a wider field (e.g. `u64` on a `u32` element view)
+returns the caller default and never spills into the next element.
+
+**Explicit non-goals (refuse with `CAPNP_ERR_KIND` or default, no silent
+partial).** Matching C++/fortran:
+
+- `List(Bool)` and `List(Void)` do **not** upgrade to struct views.
+- Cross-width primitive demotion without a composite (e.g. treat `List(u8)` as
+  `List(u32)`) is not supported; only exact-width prim lists or composite
+  field-`@0` downgrade.
+- `capnp_getp` remains struct-only; for composite first-pointer access use
+  `capnp_list_getp` / `capnp_list_get_struct` then `capnp_getp` on the element
+  (fortran overloads `getp` on lists; the C surface keeps the split).
+- Full matrix of every esize pair is not claimed: implement the fortran
+  `t_list_upgrade_views` / `t_list_downgrade_views` shapes above; anything else
+  is out of scope until a product need lands.
+
+Tests: `test/test_list_evolution.c` (meson target `list_evolution`).
+
 
 ## Install
 

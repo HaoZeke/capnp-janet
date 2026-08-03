@@ -74,3 +74,18 @@ amalgamation, registers =capnp_janet_register=, and =dofile=s generated
 helpers. Prefer (1) when a builder image gains Janet without pulling
 product amalgamation into this repo. Until then, C + codegen smoke is the
 regression gate for the get-u64 path.
+
+* List upgrade and bit/void lists
+
+Supported schema-evolution list views match =capnp-fortran= parity tests
+(=t_list_upgrade_views= / =t_list_downgrade_views=):
+
+- Upgrade: prim (byte/two/four/eight) and pointer lists via =capnp_list_get_struct=
+  (synthetic struct; =data_bits= limited; bit/void refuse =CAPNP_ERR_KIND=).
+- Downgrade: composite =List(Struct)= as =List(u*)= field @0 via =capnp_list_get_u*=;
+  composite as =List(Text)= via =capnp_list_get_text=.
+
+=List(Bool)=: =capnp_list_get_bool= / =capnp_builder_set_list_bool= (LSB-first bits).
+=List(Void)=: =capnp_builder_set_list_void= + =capnp_list_len= only.
+
+Full esize×esize upgrade matrix is an explicit non-goal; see README.

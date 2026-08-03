@@ -35,6 +35,9 @@ typedef struct capnp_ptr {
   int esize;
   uint32_t count; /* elements; for composite, element count after tag */
   size_t step_words; /* for composite lists: words per element */
+  /* Schema-evolution upgrade views (primitive list element as struct): */
+  uint8_t body_byte; /* extra byte offset of data start within the body word */
+  uint16_t data_bits; /* if non-zero, data-section size in bits (field @0 view) */
 } capnp_ptr_t;
 
 /* Zero a message. Free with capnp_message_free. */
@@ -94,7 +97,9 @@ int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
 int capnp_get_data(const capnp_ptr_t *s, uint16_t ptr_index, const uint8_t **out,
                    size_t *len);
 
-/* Primitive list element readers (esize byte/two/four/eight). */
+/* Primitive list element readers (esize byte/two/four/eight).
+ * Also accept composite lists as a schema-evolution *downgrade* to field @0
+ * of each element (same rule as Cap'n C++ / capnp-fortran). */
 uint8_t capnp_list_get_u8(const capnp_ptr_t *list, uint32_t index, uint8_t dflt);
 uint16_t capnp_list_get_u16(const capnp_ptr_t *list, uint32_t index,
                             uint16_t dflt);
@@ -103,6 +108,19 @@ uint32_t capnp_list_get_u32(const capnp_ptr_t *list, uint32_t index,
 uint64_t capnp_list_get_u64(const capnp_ptr_t *list, uint32_t index,
                             uint64_t dflt);
 double capnp_list_get_f64(const capnp_ptr_t *list, uint32_t index, double dflt);
+
+/* List(Bool) bit-list element (esize = CAPNP_SZ_BIT). */
+int capnp_list_get_bool(const capnp_ptr_t *list, uint32_t index, int dflt);
+
+/*
+ * Element i as a struct. Composite lists return the real element. Primitive
+ * (byte/two/four/eight) and pointer lists return the schema-evolution
+ * *upgrade* view: the element is field @0 of a synthetic struct (data_bits
+ * limited so oversize reads yield defaults). Bit and void lists cannot
+ * upgrade (CAPNP_ERR_KIND).
+ */
+int capnp_list_get_struct(const capnp_ptr_t *list, uint32_t index,
+                          capnp_ptr_t *out);
 
 /*
  * Serialize stream-framed message currently viewed/owned by m into malloc

@@ -121,6 +121,14 @@ test_lists = executable(
 )
 test('lists', test_lists)
 
+test_list_evolution = executable(
+  'test_list_evolution',
+  'test/test_list_evolution.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+test('list_evolution', test_list_evolution)
+
 test_canonical = executable(
   'test_canonical',
   'test/test_canonical.c',

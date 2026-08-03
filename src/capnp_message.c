@@ -126,6 +126,9 @@ static int resolve_ptr(capnp_message_t *m, uint32_t seg, size_t word,
 
 static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
                         uint64_t w, int depth, capnp_ptr_t *out) {
+  /* body_byte / data_bits stay 0 for normal objects (full data section). */
+  out->body_byte = 0;
+  out->data_bits = 0;
   if (depth <= 0)
     return CAPNP_ERR_DEPTH;
   if (w == 0) {
@@ -330,20 +333,30 @@ int capnp_getp(const capnp_ptr_t *s, uint16_t ptr_index, capnp_ptr_t *out) {
     out->esize = 0;
     out->count = 0;
     out->step_words = 0;
+    out->body_byte = 0;
+    out->data_bits = 0;
     return CAPNP_OK;
   }
   size_t word = s->word + s->dwords + ptr_index;
   return resolve_ptr(s->msg, s->seg, word, s->msg->depth_limit, out);
 }
 
+/* Data section size in bits. Upgrade views set data_bits to the element
+ * width so oversize field reads return defaults instead of neighbour bytes. */
+static uint32_t data_bit_count(const capnp_ptr_t *s) {
+  if (s->data_bits != 0)
+    return s->data_bits;
+  return (uint32_t)s->dwords * 64u;
+}
+
 static const uint8_t *data_bytes(const capnp_ptr_t *s) {
-  return s->msg->segs[s->seg].data + s->word * CAPNP_WORD_BYTES;
+  return s->msg->segs[s->seg].data + s->word * CAPNP_WORD_BYTES + s->body_byte;
 }
 
 uint8_t capnp_get_u8(const capnp_ptr_t *s, uint32_t byte_offset, uint8_t dflt) {
   if (!s || s->kind != CAPNP_PK_STRUCT)
     return dflt;
-  if (byte_offset >= (uint32_t)s->dwords * CAPNP_WORD_BYTES)
+  if ((byte_offset + 1u) * 8u > data_bit_count(s))
     return dflt;
   return data_bytes(s)[byte_offset];
 }
@@ -352,7 +365,7 @@ uint16_t capnp_get_u16(const capnp_ptr_t *s, uint32_t byte_offset,
                        uint16_t dflt) {
   if (!s || s->kind != CAPNP_PK_STRUCT)
     return dflt;
-  if (byte_offset + 2 > (uint32_t)s->dwords * CAPNP_WORD_BYTES)
+  if ((byte_offset + 2u) * 8u > data_bit_count(s))
     return dflt;
   const uint8_t *p = data_bytes(s) + byte_offset;
   return (uint16_t)(p[0] | (p[1] << 8));
@@ -362,7 +375,7 @@ uint32_t capnp_get_u32(const capnp_ptr_t *s, uint32_t byte_offset,
                        uint32_t dflt) {
   if (!s || s->kind != CAPNP_PK_STRUCT)
     return dflt;
-  if (byte_offset + 4 > (uint32_t)s->dwords * CAPNP_WORD_BYTES)
+  if ((byte_offset + 4u) * 8u > data_bit_count(s))
     return dflt;
   return capnp_load_le32(data_bytes(s) + byte_offset);
 }
@@ -371,7 +384,7 @@ uint64_t capnp_get_u64(const capnp_ptr_t *s, uint32_t byte_offset,
                        uint64_t dflt) {
   if (!s || s->kind != CAPNP_PK_STRUCT)
     return dflt;
-  if (byte_offset + 8 > (uint32_t)s->dwords * CAPNP_WORD_BYTES)
+  if ((byte_offset + 8u) * 8u > data_bit_count(s))
     return dflt;
   return capnp_load_le64(data_bytes(s) + byte_offset);
 }
@@ -379,7 +392,7 @@ uint64_t capnp_get_u64(const capnp_ptr_t *s, uint32_t byte_offset,
 double capnp_get_f64(const capnp_ptr_t *s, uint32_t byte_offset, double dflt) {
   if (!s || s->kind != CAPNP_PK_STRUCT)
     return dflt;
-  if (byte_offset + 8 > (uint32_t)s->dwords * CAPNP_WORD_BYTES)
+  if ((byte_offset + 8u) * 8u > data_bit_count(s))
     return dflt;
   uint64_t bits = capnp_load_le64(data_bytes(s) + byte_offset);
   double v;
@@ -390,9 +403,9 @@ double capnp_get_f64(const capnp_ptr_t *s, uint32_t byte_offset, double dflt) {
 int capnp_get_bool(const capnp_ptr_t *s, uint32_t bit_offset, int dflt) {
   if (!s || s->kind != CAPNP_PK_STRUCT)
     return dflt;
-  uint32_t byte_offset = bit_offset / 8;
-  if (byte_offset >= (uint32_t)s->dwords * CAPNP_WORD_BYTES)
+  if (bit_offset >= data_bit_count(s))
     return dflt;
+  uint32_t byte_offset = bit_offset / 8;
   uint8_t bit = (uint8_t)(1u << (bit_offset % 8));
   return (data_bytes(s)[byte_offset] & bit) != 0;
 }
@@ -457,6 +470,8 @@ int capnp_list_getp(const capnp_ptr_t *list, uint32_t index, capnp_ptr_t *out) {
     out->esize = 0;
     out->count = 0;
     out->step_words = 0;
+    out->body_byte = 0;
+    out->data_bits = 0;
     return CAPNP_OK;
   }
   return CAPNP_ERR_KIND;
@@ -546,48 +561,148 @@ static const uint8_t *list_elem_bytes(const capnp_ptr_t *list, uint32_t index,
          (size_t)index * elem_bytes;
 }
 
+/* Composite list element base (field @0 / first data word). */
+static const uint8_t *composite_elem_data(const capnp_ptr_t *list,
+                                          uint32_t index) {
+  return list->msg->segs[list->seg].data +
+         (list->word + (size_t)index * list->step_words) * CAPNP_WORD_BYTES;
+}
+
 uint8_t capnp_list_get_u8(const capnp_ptr_t *list, uint32_t index,
                           uint8_t dflt) {
-  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_BYTE ||
-      index >= list->count)
+  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
     return dflt;
-  return *list_elem_bytes(list, index, 1);
+  if (list->esize == CAPNP_SZ_BYTE)
+    return *list_elem_bytes(list, index, 1);
+  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
+    return *composite_elem_data(list, index);
+  return dflt;
 }
 
 uint16_t capnp_list_get_u16(const capnp_ptr_t *list, uint32_t index,
                             uint16_t dflt) {
-  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_TWO ||
-      index >= list->count)
+  const uint8_t *p;
+  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
     return dflt;
-  return (uint16_t)(list_elem_bytes(list, index, 2)[0] |
-                    (list_elem_bytes(list, index, 2)[1] << 8));
+  if (list->esize == CAPNP_SZ_TWO) {
+    p = list_elem_bytes(list, index, 2);
+    return (uint16_t)(p[0] | (p[1] << 8));
+  }
+  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1) {
+    p = composite_elem_data(list, index);
+    return (uint16_t)(p[0] | (p[1] << 8));
+  }
+  return dflt;
 }
 
 uint32_t capnp_list_get_u32(const capnp_ptr_t *list, uint32_t index,
                             uint32_t dflt) {
-  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_FOUR ||
-      index >= list->count)
+  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
     return dflt;
-  return capnp_load_le32(list_elem_bytes(list, index, 4));
+  if (list->esize == CAPNP_SZ_FOUR)
+    return capnp_load_le32(list_elem_bytes(list, index, 4));
+  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
+    return capnp_load_le32(composite_elem_data(list, index));
+  return dflt;
 }
 
 uint64_t capnp_list_get_u64(const capnp_ptr_t *list, uint32_t index,
                             uint64_t dflt) {
-  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_EIGHT ||
-      index >= list->count)
+  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
     return dflt;
-  return capnp_load_le64(list_elem_bytes(list, index, 8));
+  if (list->esize == CAPNP_SZ_EIGHT)
+    return capnp_load_le64(list_elem_bytes(list, index, 8));
+  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
+    return capnp_load_le64(composite_elem_data(list, index));
+  return dflt;
 }
 
 double capnp_list_get_f64(const capnp_ptr_t *list, uint32_t index, double dflt) {
   uint64_t bits;
   double v;
-  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_EIGHT ||
-      index >= list->count)
+  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
     return dflt;
-  bits = capnp_load_le64(list_elem_bytes(list, index, 8));
+  if (list->esize == CAPNP_SZ_EIGHT)
+    bits = capnp_load_le64(list_elem_bytes(list, index, 8));
+  else if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
+    bits = capnp_load_le64(composite_elem_data(list, index));
+  else
+    return dflt;
   memcpy(&v, &bits, sizeof(v));
   return v;
+}
+
+int capnp_list_get_bool(const capnp_ptr_t *list, uint32_t index, int dflt) {
+  const uint8_t *base;
+  uint8_t bit;
+  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_BIT ||
+      index >= list->count)
+    return dflt;
+  base = list->msg->segs[list->seg].data + list->word * CAPNP_WORD_BYTES;
+  bit = (uint8_t)(1u << (index % 8u));
+  return (base[index / 8u] & bit) != 0;
+}
+
+int capnp_list_get_struct(const capnp_ptr_t *list, uint32_t index,
+                          capnp_ptr_t *out) {
+  size_t elem_bytes, abs_byte;
+
+  if (!list || !out || list->kind != CAPNP_PK_LIST)
+    return CAPNP_ERR_KIND;
+  if (index >= list->count)
+    return CAPNP_ERR_BOUNDS;
+
+  out->msg = list->msg;
+  out->seg = list->seg;
+  out->esize = 0;
+  out->count = 0;
+  out->step_words = 0;
+  out->body_byte = 0;
+  out->data_bits = 0;
+
+  switch (list->esize) {
+  case CAPNP_SZ_COMPOSITE:
+    out->kind = CAPNP_PK_STRUCT;
+    out->word = list->word + (size_t)index * list->step_words;
+    out->dwords = list->dwords;
+    out->pwords = list->pwords;
+    return CAPNP_OK;
+
+  case CAPNP_SZ_BYTE:
+    elem_bytes = 1;
+    break;
+  case CAPNP_SZ_TWO:
+    elem_bytes = 2;
+    break;
+  case CAPNP_SZ_FOUR:
+    elem_bytes = 4;
+    break;
+  case CAPNP_SZ_EIGHT:
+    elem_bytes = 8;
+    break;
+
+  case CAPNP_SZ_PTR:
+    /* Upgrade: pointer list element is a 0-data / 1-pointer struct. */
+    out->kind = CAPNP_PK_STRUCT;
+    out->word = list->word + index;
+    out->dwords = 0;
+    out->pwords = 1;
+    return CAPNP_OK;
+
+  default:
+    /* VOID and BIT cannot upgrade (encoding.html list-upgrade rules). */
+    return CAPNP_ERR_KIND;
+  }
+
+  /* Primitive data list -> synthetic struct with field @0 = the element. */
+  abs_byte = list->word * CAPNP_WORD_BYTES + (size_t)index * elem_bytes;
+  out->kind = CAPNP_PK_STRUCT;
+  out->word = abs_byte / CAPNP_WORD_BYTES;
+  out->body_byte = (uint8_t)(abs_byte % CAPNP_WORD_BYTES);
+  out->dwords = 1;
+  out->pwords = 0;
+  out->data_bits = (uint16_t)(elem_bytes * 8u);
+  return CAPNP_OK;
 }
 
 int capnp_message_copy_flat(const capnp_message_t *m, uint8_t **out,

@@ -276,6 +276,51 @@ int capnp_builder_set_list_f64(capnp_builder_t *b, size_t body_word,
                        8, items);
 }
 
+int capnp_builder_set_list_bool(capnp_builder_t *b, size_t body_word,
+                                uint16_t dwords, uint16_t ptr_index,
+                                const uint8_t *items, uint32_t nitems) {
+  size_t ptr_word, nbytes, nwords, start;
+  int32_t off;
+  uint64_t w;
+  uint32_t i;
+
+  if (!b)
+    return CAPNP_ERR_ARG;
+  ptr_word = body_word + dwords + ptr_index;
+  if (ptr_word >= b->words)
+    return CAPNP_ERR_BOUNDS;
+  nbytes = ((size_t)nitems + 7u) / 8u;
+  nwords = (nbytes + 7u) / 8u;
+  if (nwords) {
+    if (alloc_words(b, nwords, &start))
+      return CAPNP_ERR_ALLOC;
+    memset(b->data + start * CAPNP_WORD_BYTES, 0, nwords * CAPNP_WORD_BYTES);
+    if (items) {
+      for (i = 0; i < nitems; i++) {
+        if (items[i]) {
+          size_t byte = start * CAPNP_WORD_BYTES + (size_t)(i / 8u);
+          b->data[byte] =
+              (uint8_t)(b->data[byte] | (uint8_t)(1u << (i % 8u)));
+        }
+      }
+    }
+  } else {
+    start = ptr_word + 1;
+  }
+  off = (int32_t)((int64_t)start - (int64_t)ptr_word - 1);
+  w = capnp_wp_make_list(off, CAPNP_SZ_BIT, nitems);
+  capnp_store_le64(b->data + ptr_word * CAPNP_WORD_BYTES, w);
+  return CAPNP_OK;
+}
+
+int capnp_builder_set_list_void(capnp_builder_t *b, size_t body_word,
+                                uint16_t dwords, uint16_t ptr_index,
+                                uint32_t nitems) {
+  /* Void lists have no element payload; only the count is meaningful. */
+  return set_list_prim(b, body_word, dwords, ptr_index, CAPNP_SZ_VOID, nitems,
+                       0, NULL);
+}
+
 int capnp_builder_set_list_text(capnp_builder_t *b, size_t body_word,
                                 uint16_t dwords, uint16_t ptr_index,
                                 const char *const *items, uint32_t nitems) {

@@ -82,6 +82,16 @@ int capnp_builder_set_list_f64(capnp_builder_t *b, size_t body_word,
                                uint16_t dwords, uint16_t ptr_index,
                                const double *items, uint32_t nitems);
 
+/* List(Bool): items[i] non-zero = true. Bits packed LSB-first within each byte. */
+int capnp_builder_set_list_bool(capnp_builder_t *b, size_t body_word,
+                                uint16_t dwords, uint16_t ptr_index,
+                                const uint8_t *items, uint32_t nitems);
+
+/* List(Void): length only; no element payload on the wire. */
+int capnp_builder_set_list_void(capnp_builder_t *b, size_t body_word,
+                                uint16_t dwords, uint16_t ptr_index,
+                                uint32_t nitems);
+
 /*
  * Set pointer slot to List(Struct) composite list.
  * Each element has elem_dwords data words and elem_pwords pointer words.
