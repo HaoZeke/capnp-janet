@@ -45,6 +45,8 @@ install_headers(
   subdir: 'capnp-janet',
 )
 
+test_inc = include_directories('test')
+
 test_wire = executable(
   'test_wire',
   'test/test_wire.c',
@@ -58,6 +60,33 @@ test_list_text = executable(
   dependencies: capnp_janet_dep,
 )
 test('list_text', test_list_text)
+
+# Cap'n C++ / pycapnp sample parity (AddressBook + calculator Expression trees).
+test_addressbook = executable(
+  'test_addressbook',
+  'test/test_addressbook.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+test(
+  'addressbook',
+  test_addressbook,
+  workdir: meson.project_source_root(),
+  env: {'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root()},
+)
+
+test_calculator = executable(
+  'test_calculator',
+  'test/test_calculator.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+test(
+  'calculator',
+  test_calculator,
+  workdir: meson.project_source_root(),
+  env: {'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root()},
+)
 
 janet_dep = dependency('janet', required: get_option('janet'))
 if janet_dep.found()

@@ -150,6 +150,14 @@ static Janet cfun_get_u32(int32_t argc, Janet *argv) {
       (double)capnp_get_u32(&p->ptr, (uint32_t)off, dflt));
 }
 
+static Janet cfun_get_f64(int32_t argc, Janet *argv) {
+  janet_arity(argc, 2, 3);
+  capnp_ptr_wrap *p = get_ptr(argv, 0);
+  int32_t off = janet_getinteger(argv, 1);
+  double dflt = argc > 2 ? janet_getnumber(argv, 2) : 0.0;
+  return janet_wrap_number(capnp_get_f64(&p->ptr, (uint32_t)off, dflt));
+}
+
 static Janet cfun_get_bool(int32_t argc, Janet *argv) {
   janet_arity(argc, 2, 3);
   capnp_ptr_wrap *p = get_ptr(argv, 0);
@@ -241,6 +249,24 @@ static Janet cfun_build_message(int32_t argc, Janet *argv) {
       int32_t v = janet_unwrap_integer(tup[2]);
       if (capnp_builder_set_u32(&b, body.word, (uint32_t)off, (uint32_t)v))
         janet_panic("capnp/build-message: set-u32 failed");
+    } else if (strcmp((const char *)kind, "u64") == 0) {
+      /* Number (mantissa-safe ints). */
+      if (!janet_checktype(tup[2], JANET_NUMBER))
+        janet_panic("capnp/build-message: u64 value must be number");
+      {
+        double dv = janet_unwrap_number(tup[2]);
+        uint64_t v = (uint64_t)dv;
+        if (capnp_builder_set_u64(&b, body.word, (uint32_t)off, v))
+          janet_panic("capnp/build-message: set-u64 failed");
+      }
+    } else if (strcmp((const char *)kind, "f64") == 0) {
+      if (!janet_checktype(tup[2], JANET_NUMBER))
+        janet_panic("capnp/build-message: f64 value must be number");
+      {
+        double v = janet_unwrap_number(tup[2]);
+        if (capnp_builder_set_f64(&b, body.word, (uint32_t)off, v))
+          janet_panic("capnp/build-message: set-f64 failed");
+      }
     } else if (strcmp((const char *)kind, "bool") == 0) {
       int v = janet_truthy(tup[2]);
       if (capnp_builder_set_bool(&b, body.word, (uint32_t)off, v))
@@ -286,6 +312,8 @@ static const JanetReg capnp_cfuns[] = {
      "(capnp/get-u16 struct-ptr byte-offset &opt default)"},
     {"get-u32", cfun_get_u32,
      "(capnp/get-u32 struct-ptr byte-offset &opt default)"},
+    {"get-f64", cfun_get_f64,
+     "(capnp/get-f64 struct-ptr byte-offset &opt default)"},
     {"get-bool", cfun_get_bool,
      "(capnp/get-bool struct-ptr bit-offset &opt default)"},
     {"get-text", cfun_get_text,
@@ -296,8 +324,8 @@ static const JanetReg capnp_cfuns[] = {
      "(capnp/list-get-text list-ptr index)\n\nElement of List(Text)."},
     {"build-message", cfun_build_message,
      "(capnp/build-message dwords pwords fields)\n\n"
-     "Build a framed root struct. fields: array of [:u16|:u32|:bool|:text "
-     "off val]."},
+     "Build a framed root struct. fields: array of "
+     "[:u16|:u32|:u64|:f64|:bool|:text off val]."},
     {NULL, NULL, NULL}};
 
 void capnp_janet_register(JanetTable *env) {

@@ -22,9 +22,11 @@ packs import.
 
 - Stream-framed deserialize (copy) and zero-copy view of caller buffers
 - Struct / list / far / double-far / capability pointer resolution
-- Data field readers (`u8`/`u16`/`u32`/`u64`/`bool`) with past-end defaults
+- Data field readers (`u8`/`u16`/`u32`/`u64`/`f64`/`bool`) with past-end defaults
 - Text and `List(Text)` readers
-- Single-segment builder: structs, Text, `List(Text)`, stream serialize
+- Single-segment builder: structs, Text, `List(Text)`, `List(Struct)`, nested
+  slots, `u16`/`u32`/`u64`/`f64`/`bool`, stream serialize
+- Sample parity tests: AddressBook + calculator Expression (C++/pycapnp shapes)
 - Janet module (`capnp/...`) and plain C API for static embeds
 - Traversal word budget and depth limit (C++ defaults)
 
@@ -97,12 +99,32 @@ Link `libcapnp_janet` (pkg-config: `capnp-janet`).
 Embedders that amalgamate Janet call `capnp_janet_register(env)` after
 `janet_init` (see `src/janet_mod.c`).
 
+## Samples and tests
+
+Wire tests include the classic Cap'n samples (same content as C++/pycapnp):
+
+| Suite | Schema | What |
+|-------|--------|------|
+| `addressbook` | `schema/addressbook.capnp` | Alice/Bob book, phones, employment union; builder + `capnp encode` golden |
+| `calculator` | `schema/calculator.capnp` | Expression trees (literal / call / nested), evaluate in-process; goldens |
+| `wire` / `list_text` | demo shapes | core reader/builder |
+
+Calculator **RPC** (interfaces, pipelining) is out of scope; the schema is a
+serialization-only Expression subset of the official calculator sample.
+
+Regenerate goldens (needs system `capnp`):
+
+```console
+$ ./scripts/gen-sample-fixtures.sh
+```
+
 ## Layout
 
 ```
 src/           C runtime + Janet module
-test/          C wire tests
-schema/        example .capnp (codegen later)
+test/          C wire + sample tests
+test/fixtures/ capnp encode goldens
+schema/        demo + addressbook + calculator
 app/           capnpc-janet plugin (stub)
 interop/       c-capnproto golden-master notes
 docs/orgmode/  architecture notes

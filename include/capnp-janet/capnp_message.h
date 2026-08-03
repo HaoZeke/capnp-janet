@@ -74,6 +74,7 @@ uint32_t capnp_get_u32(const capnp_ptr_t *s, uint32_t byte_offset,
                        uint32_t dflt);
 uint64_t capnp_get_u64(const capnp_ptr_t *s, uint32_t byte_offset,
                        uint64_t dflt);
+double capnp_get_f64(const capnp_ptr_t *s, uint32_t byte_offset, double dflt);
 int capnp_get_bool(const capnp_ptr_t *s, uint32_t bit_offset, int dflt);
 
 /*

@@ -109,6 +109,36 @@ int capnp_builder_set_u32(capnp_builder_t *b, size_t body_word,
   return CAPNP_OK;
 }
 
+int capnp_builder_set_u64(capnp_builder_t *b, size_t body_word,
+                          uint32_t byte_offset, uint64_t value) {
+  if (!b)
+    return CAPNP_ERR_ARG;
+  size_t abs = body_word * CAPNP_WORD_BYTES + byte_offset;
+  if (abs + 8 > b->words * CAPNP_WORD_BYTES)
+    return CAPNP_ERR_BOUNDS;
+  capnp_store_le64(b->data + abs, value);
+  return CAPNP_OK;
+}
+
+int capnp_builder_set_f64(capnp_builder_t *b, size_t body_word,
+                          uint32_t byte_offset, double value) {
+  uint64_t bits = 0;
+  memcpy(&bits, &value, sizeof(bits));
+  return capnp_builder_set_u64(b, body_word, byte_offset, bits);
+}
+
+int capnp_builder_slot(capnp_builder_t *b, size_t body_word, uint16_t dwords,
+                       uint16_t ptr_index, capnp_bptr_t *slot) {
+  if (!b || !slot)
+    return CAPNP_ERR_ARG;
+  size_t pw = body_word + dwords + ptr_index;
+  if (pw >= b->words)
+    return CAPNP_ERR_BOUNDS;
+  slot->b = b;
+  slot->word = pw;
+  return CAPNP_OK;
+}
+
 int capnp_builder_set_bool(capnp_builder_t *b, size_t body_word,
                            uint32_t bit_offset, int value) {
   if (!b)

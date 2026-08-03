@@ -36,8 +36,19 @@ int capnp_builder_set_u16(capnp_builder_t *b, size_t body_word,
                           uint32_t byte_offset, uint16_t value);
 int capnp_builder_set_u32(capnp_builder_t *b, size_t body_word,
                           uint32_t byte_offset, uint32_t value);
+int capnp_builder_set_u64(capnp_builder_t *b, size_t body_word,
+                          uint32_t byte_offset, uint64_t value);
+int capnp_builder_set_f64(capnp_builder_t *b, size_t body_word,
+                          uint32_t byte_offset, double value);
 int capnp_builder_set_bool(capnp_builder_t *b, size_t body_word,
                            uint32_t bit_offset, int value);
+
+/*
+ * Point @slot at an existing pointer word in a struct body so callers can
+ * nest with capnp_builder_struct (AddressBook people[i], Expression trees).
+ */
+int capnp_builder_slot(capnp_builder_t *b, size_t body_word, uint16_t dwords,
+                       uint16_t ptr_index, capnp_bptr_t *slot);
 
 /* Set pointer slot of a struct to Text. */
 int capnp_builder_set_text(capnp_builder_t *b, size_t body_word,
