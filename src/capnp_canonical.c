@@ -4,6 +4,7 @@
  */
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_canonical.h>
+#include <capnp-janet/capnp_copy.h>
 #include <capnp-janet/capnp_pointer.h>
 
 #include <stdlib.h>
@@ -83,7 +84,7 @@ static void composite_trim(const capnp_ptr_t *list, int *nd, int *np) {
   }
 }
 
-static int write_ptr_to_slot(capnp_builder_t *b, size_t slot_word,
+int capnp_copy_ptr_to_word(capnp_builder_t *b, size_t slot_word,
                             const capnp_ptr_t *src, int depth);
 
 static int write_struct_body_data(capnp_builder_t *b, size_t body, int nd,
@@ -133,7 +134,7 @@ static int write_list_to_slot(capnp_builder_t *b, size_t slot_word,
         if (k < el.pwords) {
           if (capnp_getp(&el, (uint16_t)k, &child) != CAPNP_OK)
             return CAPNP_ERR_KIND;
-          if (write_ptr_to_slot(b, cslot, &child, depth + 1))
+          if (capnp_copy_ptr_to_word(b, cslot, &child, depth + 1))
             return CAPNP_ERR_ALLOC;
         } else {
           capnp_store_le64(b->data + cslot * CAPNP_WORD_BYTES, 0);
@@ -161,7 +162,7 @@ static int write_list_to_slot(capnp_builder_t *b, size_t slot_word,
       capnp_ptr_t el;
       if (capnp_list_getp(list, i, &el) != CAPNP_OK)
         return CAPNP_ERR_KIND;
-      if (write_ptr_to_slot(b, list_start + i, &el, depth + 1))
+      if (capnp_copy_ptr_to_word(b, list_start + i, &el, depth + 1))
         return CAPNP_ERR_ALLOC;
     }
     return CAPNP_OK;
@@ -213,7 +214,7 @@ static int write_list_to_slot(capnp_builder_t *b, size_t slot_word,
   }
 }
 
-static int write_ptr_to_slot(capnp_builder_t *b, size_t slot_word,
+int capnp_copy_ptr_to_word(capnp_builder_t *b, size_t slot_word,
                             const capnp_ptr_t *src, int depth) {
   if (depth > 64)
     return CAPNP_ERR_DEPTH;
@@ -250,7 +251,7 @@ static int write_ptr_to_slot(capnp_builder_t *b, size_t slot_word,
       if (k < src->pwords) {
         if (capnp_getp(src, (uint16_t)k, &child) != CAPNP_OK)
           return CAPNP_ERR_KIND;
-        if (write_ptr_to_slot(b, cslot, &child, depth + 1))
+        if (capnp_copy_ptr_to_word(b, cslot, &child, depth + 1))
           return CAPNP_ERR_ALLOC;
       } else {
         capnp_store_le64(b->data + cslot * CAPNP_WORD_BYTES, 0);
@@ -288,7 +289,7 @@ int capnp_canonicalize(const capnp_message_t *m, uint8_t **out,
     capnp_builder_free(&b);
     return CAPNP_ERR_ALLOC;
   }
-  if (write_ptr_to_slot(&b, 0, &root, 0)) {
+  if (capnp_copy_ptr_to_word(&b, 0, &root, 0)) {
     capnp_builder_free(&b);
     return CAPNP_ERR_ALLOC;
   }

@@ -45,6 +45,7 @@ install_headers(
   'include/capnp-janet/capnp_builder.h',
   'include/capnp-janet/capnp_packed.h',
   'include/capnp-janet/capnp_canonical.h',
+  'include/capnp-janet/capnp_copy.h',
   'include/capnp-janet/capnp_janet.h',
   subdir: 'capnp-janet',
 )
@@ -144,6 +145,19 @@ test(
   env: {
     'CAPNP_JANET_BUILD': meson.project_build_root(),
   },
+)
+
+test_copy = executable(
+  'test_copy',
+  'test/test_copy.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+test(
+  'copy',
+  test_copy,
+  workdir: meson.project_source_root(),
+  env: {'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root()},
 )
 
 janet_dep = dependency('janet', required: get_option('janet'))

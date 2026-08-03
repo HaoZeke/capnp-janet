@@ -1,4 +1,5 @@
 #include <capnp-janet/capnp_builder.h>
+#include <capnp-janet/capnp_copy.h>
 #include <capnp-janet/capnp_pointer.h>
 
 #include <stdlib.h>
@@ -342,6 +343,12 @@ int capnp_builder_set_list_struct(capnp_builder_t *b, size_t body_word,
   if (first_elem_body)
     *first_elem_body = tag_word + 1;
   return CAPNP_OK;
+}
+
+int capnp_builder_copy_ptr(capnp_bptr_t *slot, const capnp_ptr_t *src) {
+  if (!slot || !slot->b)
+    return CAPNP_ERR_ARG;
+  return capnp_copy_ptr_to_word(slot->b, slot->word, src, 0);
 }
 
 int capnp_builder_serialize(const capnp_builder_t *b, uint8_t **out,

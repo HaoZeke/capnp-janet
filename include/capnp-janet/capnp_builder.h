@@ -99,6 +99,12 @@ size_t capnp_builder_ptr_word(size_t body_word, uint16_t dwords,
                               uint16_t ptr_index);
 
 /*
+ * Deep-copy a resolved pointer (struct/list/text/null) from any message into
+ * @slot (like C++ set() / capnp-fortran cross-message setp). Preorder layout.
+ */
+int capnp_builder_copy_ptr(capnp_bptr_t *slot, const capnp_ptr_t *src);
+
+/*
  * Stream-frame the single segment into *out (malloc). Caller frees.
  * *out_len is total framed length.
  */

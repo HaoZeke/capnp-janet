@@ -42,7 +42,7 @@ packs import.
 | Zero-copy reads from caller buffer | yes | yes | yes | **yes** |
 | Traversal and depth limits | no | yes | yes | **yes** |
 | Schema-evolution reads (defaults past end) | partial | yes | yes | **yes** |
-| Builder / deep copy | limited | yes | yes | **builder + copy_flat** (no orphans/setp-clone yet) |
+| Builder / deep copy | limited | yes | yes | **builder + copy_flat + setp deep-copy** (no orphans yet) |
 | Canonical form | no | yes | yes | **yes** (byte-parity tested) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | **yes** (`capnpc-janet` v1: structs/enums + getters) |
 | RPC | no | yes | yes | out of scope for v0.x |
