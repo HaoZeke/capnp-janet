@@ -12,6 +12,8 @@
 #include <janet.h>
 void capnp_janet_register(JanetTable *env);
 void capnp_janet_env(JanetTable *env);
+/* Fill an unmarshal registry so make-image / .jimage packs resolve capnp/*. */
+void capnp_janet_lookup_into(JanetTable *lookup);
 #endif
 
 #endif /* CAPNP_JANET_H */

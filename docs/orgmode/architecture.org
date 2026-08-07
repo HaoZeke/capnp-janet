@@ -40,8 +40,17 @@ abstract lifetime. =message-from-buffer= copies so the buffer may be reused.
 
 Packs never receive parallel C DTO tables. Host builds a Cap'n =ShellView=
 (or other schema type) with c-capnproto or this builder; the pack opens the
-message with =capnp/*= and decides. Generated accessors (v0.3) will name
-fields; until then packs use pointer/data indices from the schema.
+message with =capnp/*= and decides. Named readers live in =janet/policy.janet=
+(compiled into pack images). =capnpc-janet= will emit that file from schema.
+
+** Compiled images (=.jimage=)
+
+=make-image= / =janet -c= freeze top-level PEGs and functions (Janet for
+Mortals ch. 2). Native =capnp/*= CFUNS cannot sit inside the image; the host
+re-registers them then unmarshals with =janet_env_lookup= /
+=capnp_janet_lookup_into= so bytecode calls resolve. Pure law libs (no
+Cap'n) unmarshal with core lookup only. The optional =capnp.so= module is
+for the Janet CLI compile path: =(import capnp)= then =janet -c=.
 
 * Embed sketch (policyd)
 

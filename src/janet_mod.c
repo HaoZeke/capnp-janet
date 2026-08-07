@@ -351,3 +351,13 @@ void capnp_janet_register(JanetTable *env) {
 }
 
 void capnp_janet_env(JanetTable *env) { capnp_janet_register(env); }
+
+void capnp_janet_lookup_into(JanetTable *lookup) {
+  JanetTable *tmp;
+
+  if (!lookup)
+    return;
+  tmp = janet_table(32);
+  capnp_janet_register(tmp);
+  janet_env_lookup_into(lookup, tmp, NULL, 1);
+}

@@ -189,6 +189,11 @@ if janet_dep.found()
   )
 endif
 
+install_data(
+  'janet/policy.janet',
+  install_dir: get_option('datadir') / 'capnp-janet' / 'janet',
+)
+
 pkg = import('pkgconfig')
 pkg.generate(
   capnp_janet_lib,

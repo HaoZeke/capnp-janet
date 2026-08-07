@@ -34,6 +34,7 @@ packs import.
   `capnp convert binary:canonical` on AddressBook
 - Sample parity tests: AddressBook + calculator Expression (C++/pycapnp shapes)
 - Janet module (`capnp/...` including `get-u64`) and plain C API for static embeds
+- `capnp_janet_lookup_into` + `janet/policy.janet` for compiled `.jimage` packs
 - Traversal word budget and depth limit (C++ defaults)
 
 ## Parity
