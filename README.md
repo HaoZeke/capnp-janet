@@ -1,9 +1,11 @@
 # capnp-janet
 
 A native Cap'n Proto serialization runtime for [Janet](https://janet-lang.org),
-plus a C library embedders can link without the Janet VM. Same family as
-[capnp-fortran](https://github.com/HaoZeke/capnp-fortran) and
-[c-capnproto](https://github.com/HaoZeke/c-capnproto): wire-format first,
+plus a C library embedders can link without the Janet VM. Docs:
+<https://capnp-janet.rgoswami.me/> (org-mode source in `docs/orgmode/`).
+Same family as
+[capnp-fortran](https://capnp-fortran.rgoswami.me) and
+[c-capnproto](https://c-capnproto.rgoswami.me): wire-format first,
 zero-copy segment views, schema evolution defaults, and a path to a
 `capnpc-janet` schema compiler plugin.
 

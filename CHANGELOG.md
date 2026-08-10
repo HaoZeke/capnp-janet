@@ -8,6 +8,11 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+### Added
+
+- Sphinx docs from `docs/orgmode/` via ox-rst (`emacs --batch -l docs/export.el`).
+  Generated RST is not tracked.
+
 ### Fixed
 
 - Builder empty struct pointer is B=-1 (`0xFFFFFFFC`), matching
