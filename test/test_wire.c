@@ -145,6 +145,12 @@ static void test_schema_evolution_default(void) {
   capnp_builder_serialize(&b, &flat, &flat_len);
   capnp_builder_free(&b);
 
+  CHECK(flat_len >= 16, "empty framed size");
+  CHECK(flat[8] == 0xfc && flat[9] == 0xff && flat[10] == 0xff &&
+            flat[11] == 0xff && flat[12] == 0 && flat[13] == 0 &&
+            flat[14] == 0 && flat[15] == 0,
+        "empty struct B=-1");
+
   capnp_message_t m;
   capnp_message_from_flat(&m, flat, flat_len);
   free(flat);

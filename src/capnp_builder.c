@@ -290,16 +290,13 @@ int capnp_builder_struct(capnp_bptr_t *ptr, uint16_t dwords, uint16_t pwords,
   if (!ptr || !ptr->b)
     return CAPNP_ERR_ARG;
   if (n == 0) {
-    body_seg = ptr->seg;
-    body_word = ptr->word + 1;
-    rc = write_struct_ptr(ptr->b, ptr->seg, ptr->word, body_seg, body_word, 0,
-                          0);
-    if (rc)
-      return rc;
+    /* encoding.html: zero-size struct is A=0 B=-1 C=D=0 (0xFFFFFFFC),
+     * not offset 0 (that is a null pointer). */
+    store_w(ptr->b, ptr->seg, ptr->word, capnp_wp_make_struct(-1, 0, 0));
     if (body_out) {
       body_out->b = ptr->b;
-      body_out->seg = body_seg;
-      body_out->word = body_word;
+      body_out->seg = ptr->seg;
+      body_out->word = ptr->word;
     }
     return CAPNP_OK;
   }
