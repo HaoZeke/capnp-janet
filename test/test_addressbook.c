@@ -131,33 +131,31 @@ static void test_builder_alice_bob(void) {
                                       PERSON_P, &people0) == CAPNP_OK,
         "people list");
 
-  /* Alice */
+  /* Alice: schema / C++ text-encoder order (name, email, phones, school). */
   CHECK(capnp_builder_set_u32(&people0, 0, 123) == CAPNP_OK, "alice id");
-  CHECK(capnp_builder_set_u16(&people0, 4, EMP_SCHOOL) == CAPNP_OK,
-        "alice emp tag");
   CHECK(capnp_builder_set_text(&people0, PERSON_D, 0, "Alice", 5) ==
             CAPNP_OK,
         "alice name");
   CHECK(capnp_builder_set_text(&people0, PERSON_D, 1, "alice@example.com",
                                17) == CAPNP_OK,
         "alice email");
-  CHECK(capnp_builder_set_text(&people0, PERSON_D, 3, "MIT", 3) == CAPNP_OK,
-        "alice school");
   CHECK(capnp_builder_set_list_struct(&people0, PERSON_D, 2, 1, PHONE_D,
                                       PHONE_P, &phones0) == CAPNP_OK,
         "alice phones");
-  CHECK(capnp_builder_set_u16(&phones0, 0, PHONE_MOBILE) == CAPNP_OK,
-        "alice type");
   CHECK(capnp_builder_set_text(&phones0, PHONE_D, 0, "555-1212", 8) ==
             CAPNP_OK,
         "alice num");
+  CHECK(capnp_builder_set_u16(&phones0, 0, PHONE_MOBILE) == CAPNP_OK,
+        "alice type");
+  CHECK(capnp_builder_set_u16(&people0, 4, EMP_SCHOOL) == CAPNP_OK,
+        "alice emp tag");
+  CHECK(capnp_builder_set_text(&people0, PERSON_D, 3, "MIT", 3) == CAPNP_OK,
+        "alice school");
 
   /* Bob: people0 + PERSON_D+PERSON_P */
   {
     capnp_bptr_t bob = capnp_bptr_add(people0, PERSON_D + PERSON_P);
     CHECK(capnp_builder_set_u32(&bob, 0, 456) == CAPNP_OK, "bob id");
-    CHECK(capnp_builder_set_u16(&bob, 4, EMP_UNEMPLOYED) == CAPNP_OK,
-          "bob emp");
     CHECK(capnp_builder_set_text(&bob, PERSON_D, 0, "Bob", 3) == CAPNP_OK,
           "bob name");
     CHECK(capnp_builder_set_text(&bob, PERSON_D, 1, "bob@example.com", 15) ==
@@ -166,21 +164,40 @@ static void test_builder_alice_bob(void) {
     CHECK(capnp_builder_set_list_struct(&bob, PERSON_D, 2, 2, PHONE_D,
                                         PHONE_P, &phones1) == CAPNP_OK,
           "bob phones");
-    CHECK(capnp_builder_set_u16(&phones1, 0, PHONE_HOME) == CAPNP_OK, "h");
     CHECK(capnp_builder_set_text(&phones1, PHONE_D, 0, "555-4567", 8) ==
               CAPNP_OK,
           "hn");
+    CHECK(capnp_builder_set_u16(&phones1, 0, PHONE_HOME) == CAPNP_OK, "h");
     {
       capnp_bptr_t p1 = capnp_bptr_add(phones1, PHONE_D + PHONE_P);
-      CHECK(capnp_builder_set_u16(&p1, 0, PHONE_WORK) == CAPNP_OK, "w");
       CHECK(capnp_builder_set_text(&p1, PHONE_D, 0, "555-7654", 8) ==
                 CAPNP_OK,
             "wn");
+      CHECK(capnp_builder_set_u16(&p1, 0, PHONE_WORK) == CAPNP_OK, "w");
     }
+    CHECK(capnp_builder_set_u16(&bob, 4, EMP_UNEMPLOYED) == CAPNP_OK,
+          "bob emp");
   }
 
   CHECK(capnp_builder_serialize(&b, &flat, &flat_len) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
+
+  {
+    const char *src = getenv("CAPNP_JANET_SOURCE_ROOT");
+    char path[1024];
+    uint8_t *want = NULL;
+    size_t want_len = 0;
+    if (!src || !src[0])
+      src = ".";
+    snprintf(path, sizeof(path), "%s/test/fixtures/addressbook_alice_bob.bin",
+             src);
+    CHECK(load_file(path, &want, &want_len) == 0, "load encode golden");
+    if (want) {
+      CHECK(flat_len == want_len && memcmp(flat, want, flat_len) == 0,
+            "schema-order encode == capnp encode");
+      free(want);
+    }
+  }
 
   CHECK(capnp_message_from_flat(&m, flat, flat_len) == CAPNP_OK, "from_flat");
   free(flat);

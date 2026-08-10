@@ -7,8 +7,9 @@ plus a C library embedders can link without the Janet VM. Same family as
 zero-copy segment views, schema evolution defaults, and a path to a
 `capnpc-janet` schema compiler plugin.
 
-**Status:** early (`0.1.0-dev`). Reader + small builder land first. Codegen
-and full parity track the table below.
+**Status:** `0.2.0-dev`. Reader, multi-segment builder, packed and
+canonical codecs, and `capnpc-janet` v1. Wire encode of AddressBook
+matches official `capnp encode` when fields are set in schema order.
 
 ## Why this exists
 
@@ -44,10 +45,10 @@ packs import.
 | Stream framing | yes | yes | yes | **yes** |
 | Packed codec | yes | yes | yes | **yes** (byte-identical C++ pack heuristic) |
 | Zero-copy reads from caller buffer | yes | yes | yes | **yes** |
-| Traversal and depth limits | no | yes | yes | **yes** |
+| Traversal and depth limits | yes (0.2+) | yes | yes | **yes** |
 | Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | **yes** (supported cases below) |
 | Builder / deep copy | limited | yes | yes | **multi-seg builder + far/double-far + copy_flat + setp** (no orphans yet) |
-| Canonical form | no | yes | yes | **yes** (byte-parity tested) |
+| Canonical form | yes (0.3.0) | yes | yes | **yes** (byte-parity tested) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | **yes** (`capnpc-janet` v1: structs/enums + getters) |
 | RPC | no | yes | yes | out of scope for v0.x |
 
@@ -174,10 +175,11 @@ docs/orgmode/  architecture notes
 
 ## Roadmap
 
-1. **v0.1** — reader + minimal builder + C/Janet API + wire tests
-2. **v0.2** — packed + canonical + primitive lists + samples
-3. **v0.3** — `capnpc-janet` plugin (structs/enums/getters) (**this tree**)
-4. **v0.4** — orphans, cross-message setp clone, c-capnproto golden-master, richer codegen (unions/defaults)
+1. **v0.1** — reader + minimal builder + C/Janet API + wire tests (done)
+2. **v0.2** — packed + canonical + primitive lists + samples + schema-order
+   AddressBook encode (this tree)
+3. **v0.3** — `capnpc-janet` plugin (structs/enums/getters) (landed v1)
+4. **v0.4** — orphans, c-capnproto golden-master, richer codegen (unions/defaults)
 5. Dynamic API as needed; RPC remains out of scope
 
 ## Related
