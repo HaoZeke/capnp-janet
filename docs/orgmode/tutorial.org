@@ -1,0 +1,65 @@
+#+title: Tutorial
+#+options: toc:2 num:nil
+
+* Build
+
+#+begin_src console
+$ pixi install
+$ pixi run configure
+$ pixi run build
+$ pixi run test
+#+end_src
+
+Bare Meson: =meson setup build && meson compile -C build && meson test -C build=.
+
+* Janet: demo buffer
+
+The in-tree demo builder writes a struct with a =UInt32=, a =Text=, and
+a =List(Text)=. After =(import capnp)= (or after the host calls
+=capnp_janet_register=):
+
+#+begin_src janet
+(import capnp)
+
+(def buf (capnp/build-demo 42 "hello" ["a" "bb"]))
+(def msg (capnp/message-from-buffer buf))
+(def root (capnp/root msg))
+(print (capnp/get-u32 root 0))        # 42
+(print (capnp/get-text root 0))       # hello
+(def items (capnp/getp root 1))
+(print (capnp/list-get-text items 1)) # bb
+#+end_src
+
+=message-from-buffer= copies so the Janet buffer may be reused.
+=message-view-buffer= aliases the caller's buffer and keeps it GC-marked
+for the view lifetime.
+
+* AddressBook
+
+=test/test_addressbook.c= sets fields in schema order and =memcmp=s
+=test/fixtures/addressbook_alice_bob.bin= from official =capnp encode=.
+Regenerate goldens with =./scripts/gen-sample-fixtures.sh= (needs
+=capnp= on =PATH=).
+
+Schema: =schema/addressbook.capnp= (Alice / Bob, phones, employment
+union). Packed and canonical goldens sit next to the unpacked =.bin=.
+
+* C embed
+
+#+begin_src c
+#include <capnp-janet/capnp_message.h>
+#include <capnp-janet/capnp_janet.h>
+
+/* after janet_init(env): */
+capnp_janet_register(env);
+
+capnp_message_t msg;
+capnp_message_view_flat(&msg, bytes, len);
+capnp_ptr_t root;
+capnp_root(&msg, &root);
+uint32_t id = capnp_get_u32(&root, 0, 0);
+#+end_src
+
+Link =libcapnp_janet= (pkg-config: =capnp-janet=). Compiled =.jimage=
+packs cannot store the native =capnp/*= CFUNS; the host re-registers
+them, then unmarshals. See [[file:architecture.org][architecture]].
