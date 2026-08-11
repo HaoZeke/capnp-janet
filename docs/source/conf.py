@@ -43,6 +43,7 @@ html_theme_options = {
     "globaltoc_expand_depth": 1,
     "nav_links": [
         {"title": "Install", "url": "install", "summary": "pixi, Meson, embed"},
+        {"title": "Tutorial", "url": "tutorial", "summary": "First buffer and AddressBook"},
         {"title": "Architecture", "url": "architecture", "summary": "C core, Janet module, packs"},
         {"title": "Wire", "url": "wire", "summary": "Packed, canonical, evolution"},
         {
