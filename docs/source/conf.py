@@ -17,6 +17,7 @@ myst_enable_extensions = ["colon_fence", "deflist"]
 
 html_theme = "shibuya"
 html_static_path = ["_static"]
+html_extra_path = ["llms.txt"]
 html_title = "capnp-janet documentation"
 html_baseurl = "https://capnp-janet.rgoswami.me/"
 

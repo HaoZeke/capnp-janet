@@ -1,0 +1,26 @@
+{
+  "$schema": "https://context7.com/schema/context7.json",
+  "url": "https://context7.com/haozeke/capnp-janet",
+  "public_key": "pk_AJ7U5Y56IXKa8IgfEfaSl",
+  "projectTitle": "capnp-janet",
+  "description": "Native Cap'n Proto runtime for Janet plus a C library embedders can link without the Janet VM. Packed and canonical codecs are byte-identical with official capnp. Includes capnpc-janet.",
+  "excludeFolders": [
+    "src",
+    "test",
+    "app",
+    "include",
+    "schema",
+    "scripts",
+    "janet"
+  ],
+  "excludeFiles": [
+    "CHANGELOG.md"
+  ],
+  "rules": [
+    "capnp_get_u32(const capnp_ptr_t *p, uint32_t off, uint32_t dflt) returns uint32_t. It is not an out-parameter API.",
+    "Allocate and set fields in schema declaration order for official capnp encode byte parity.",
+    "Both a Janet module (import capnp) and a plain C API (capnp-janet/capnp_message.h) exist. Embedders do not need the Janet VM.",
+    "Packed and canonical forms are byte-identical with Cap'n C++ / capnp convert on AddressBook goldens.",
+    "Sibling runtimes: HaoZeke/c-capnproto and HaoZeke/capnp-fortran."
+  ]
+}

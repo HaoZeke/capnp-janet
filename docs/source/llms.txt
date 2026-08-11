@@ -1,0 +1,56 @@
+# capnp-janet
+
+> Native Cap'n Proto runtime for Janet, plus a C library embedders can link without the Janet VM.
+
+Docs: https://capnp-janet.rgoswami.me/
+Repo: https://github.com/HaoZeke/capnp-janet
+Context7: /haozeke/capnp-janet
+
+`capnp_get_u32` returns `uint32_t`. It is not an out-parameter. AddressBook encode matches official `capnp encode` in schema order.
+
+## Docs
+
+- [Install](https://capnp-janet.rgoswami.me/install.html): pixi, Meson, C embed, Janet module
+- [Tutorial](https://capnp-janet.rgoswami.me/tutorial.html): first buffer, AddressBook, register
+- [Architecture](https://capnp-janet.rgoswami.me/architecture.html): C layers, zero-copy, .jimage packs
+- [Wire](https://capnp-janet.rgoswami.me/wire.html): packed, canonical, list evolution
+
+## Siblings
+
+- [c-capnproto](https://c-capnproto.rgoswami.me/): C runtime and capnpc-c
+- [capnp-fortran](https://capnp-fortran.rgoswami.me/): F2018 runtime, plugin, RPC
+
+## Install
+
+```sh
+git clone https://github.com/HaoZeke/capnp-janet.git
+cd capnp-janet
+pixi install && pixi run configure && pixi run build && pixi run test
+```
+
+## First message (Janet)
+
+```janet
+(import capnp)
+
+(def buf (capnp/build-demo 42 "hello" ["a" "bb"]))
+(def msg (capnp/message-from-buffer buf))
+(def root (capnp/root msg))
+(print (capnp/get-u32 root 0))
+(print (capnp/get-text root 0))
+(def items (capnp/getp root 1))
+(print (capnp/list-get-text items 1))
+```
+
+## C embed (no Janet VM)
+
+```c
+#include <capnp-janet/capnp_message.h>
+
+capnp_message_t msg;
+capnp_message_view_flat(&msg, bytes, len);
+capnp_ptr_t root;
+capnp_root(&msg, &root);
+const char *s; size_t n;
+capnp_get_text(&root, 0, &s, &n);
+```
