@@ -1,0 +1,57 @@
+#+title: capnp-janet
+#+options: toc:nil num:nil title:nil
+
+#+begin_export rst
+capnp-janet
+===========
+
+Native Cap'n Proto runtime for `Janet <https://janet-lang.org>`_, plus a
+C library embedders can link without the Janet VM.
+#+end_export
+
+Same family as [[https://capnp-fortran.rgoswami.me][capnp-fortran]] and
+[[https://c-capnproto.rgoswami.me][c-capnproto]]: wire-format first,
+zero-copy segment views, schema evolution defaults, and
+=capnpc-janet= v1.
+
+Status: =0.2.0-dev=. Reader, multi-segment builder, packed and
+canonical codecs. Wire encode of AddressBook matches official
+=capnp encode= when fields are set in schema order.
+
+* New here?
+
+#+begin_export rst
+.. list-table::
+   :header-rows: 1
+   :widths: 55 45
+
+   * - Goal
+     - Go to
+   * - pixi / Meson / embed
+     - :doc:`install`
+   * - C layers and Janet packs
+     - :doc:`architecture`
+   * - Packed, canonical, list evolution
+     - :doc:`wire`
+#+end_export
+
+* Why this exists
+
+GrokOS (and other Cap'n-first systems) need policy packs that *read Cap'n
+messages directly* -- not C DTO tables projected field-by-field. Janet is
+the pack VM; Cap'n remains the only host<->pack surface.
+
+#+begin_export rst
+.. toctree::
+   :maxdepth: 1
+   :caption: How-to
+
+   install
+
+.. toctree::
+   :maxdepth: 1
+   :caption: Explanation
+
+   architecture
+   wire
+#+end_export

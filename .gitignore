@@ -16,3 +16,6 @@ coverage-report/
 *.gcov
 __pycache__/
 .mesonpy*
+
+# Sphinx / ox-rst
+docs/build/

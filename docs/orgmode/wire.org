@@ -1,0 +1,44 @@
+#+title: Wire format
+#+options: toc:2 num:nil
+
+* Packed and canonical
+
+Packed is byte-identical to Cap'n C++ =PackedOutputStream= /
+=capnp convert binary:packed= (AddressBook golden), including the C++
+=0xFF= extra-word heuristic.
+
+Canonical form (=capnp_canonicalize=) is byte-identical to
+=capnp convert binary:canonical= on AddressBook.
+
+Empty struct writes B=-1 (=0xFFFFFFFC=), same as
+[[https://c-capnproto.rgoswami.me][c-capnproto]] and
+[[https://capnp-fortran.rgoswami.me][capnp-fortran]].
+
+* Schema-order encode
+
+=test/test_addressbook.c= sets fields in schema order and =memcmp=s
+=addressbook_alice_bob.bin= from official =capnp encode=.
+
+* List evolution
+
+Same cases as Cap'n C++ and capnp-fortran:
+
+| Writer encoded | Reader asks for | API |
+|----------------+-----------------+-----|
+| =List(UInt8/16/32/64)= | =List(Struct)= with scalar =@0= | =capnp_list_get_struct= then =capnp_get_u*= |
+| =List(pointer)= e.g. =List(Text)= | =List(Struct)= with pointer =@0= | =capnp_list_get_struct= then =capnp_get_text= / =capnp_getp= |
+| =List(Struct)= with data word 0 | =List(UInt*)= field =@0= | =capnp_list_get_u8= / =u16= / =u32= / =u64= / =f64= |
+| =List(Struct)= with pointer 0 | =List(Text)= / pointer list | =capnp_list_get_text= |
+
+=List(Bool)= and =List(Void)= do not upgrade to struct views.
+Tests: =test/test_list_evolution.c=.
+
+* Samples
+
+| Suite | Schema | What |
+|-------+--------+------|
+| =addressbook= | =schema/addressbook.capnp= | Alice/Bob, phones, employment union |
+| =calculator= | =schema/calculator.capnp= | Expression trees (serialization only) |
+| =wire= / =list_text= | demo shapes | core reader/builder |
+
+Calculator *RPC* (interfaces, pipelining) is out of scope.
