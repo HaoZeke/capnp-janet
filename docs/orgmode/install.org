@@ -1,6 +1,16 @@
 #+title: Install
 #+options: toc:2 num:nil
 
+* jpm
+
+#+begin_src console
+$ jpm install https://github.com/HaoZeke/capnp-janet.git
+# after it is listed on janet-lang/pkgs:
+$ jpm install capnp
+#+end_src
+
+Then =(import capnp)=. Needs a system Janet with =jpm= and a C11 compiler.
+
 * pixi
 
 #+begin_src console

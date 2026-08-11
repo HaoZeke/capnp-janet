@@ -92,6 +92,14 @@ Tests: `test/test_list_evolution.c` (meson target `list_evolution`).
 
 ## Install
 
+Janet + jpm (native module `(import capnp)`):
+
+```console
+$ jpm install https://github.com/HaoZeke/capnp-janet.git
+# after janet-lang/pkgs lists it:
+$ jpm install capnp
+```
+
 Toolchain via [pixi](https://pixi.sh) (conda-forge):
 
 ```console
