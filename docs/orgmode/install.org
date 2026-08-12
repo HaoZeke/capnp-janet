@@ -11,6 +11,14 @@ $ jpm install capnp
 
 Then =(import capnp)=. Needs a system Janet with =jpm= and a C11 compiler.
 
+* bundle (Janet 1.36+)
+
+Same =project.janet=, via =bundle/init.janet= and =spork/declare-cc=.
+
+#+begin_src console
+$ janet --install .
+#+end_src
+
 * pixi
 
 #+begin_src console

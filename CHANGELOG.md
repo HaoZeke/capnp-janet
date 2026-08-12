@@ -10,6 +10,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Added
 
+- Janet bundle config (`bundle/info.jdn`, `bundle/init.janet`) so
+  `janet --install .` wraps the existing `project.janet` via
+  `jpm-shim-env`, same shape as jhydro.
 - Sphinx docs from `docs/orgmode/` via ox-rst (`emacs --batch -l docs/export.el`).
   Generated RST is not tracked.
 

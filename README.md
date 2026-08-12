@@ -100,6 +100,12 @@ $ jpm install https://github.com/HaoZeke/capnp-janet.git
 $ jpm install capnp
 ```
 
+Janet 1.36+ bundle installer (same `project.janet`, needs `spork`):
+
+```console
+$ janet --install .
+```
+
 Toolchain via [pixi](https://pixi.sh) (conda-forge):
 
 ```console
