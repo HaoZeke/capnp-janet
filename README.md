@@ -53,7 +53,7 @@ packs import.
 | Builder / deep copy | limited | yes | yes | **multi-seg builder + far/double-far + copy_flat + setp** (no orphans yet) |
 | Canonical form | yes (0.3.0) | yes | yes | **yes** (byte-parity tested) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | **yes** (`capnpc-janet` v1: structs/enums + getters) |
-| RPC levels 1-4 | no | L1-L2 (no L4) | L1-L2 (no L4) | **L1-L4** (C vat, `include/capnp-janet/capnp_rpc.h`; L3 both halves, hosting and vines, with `Accept.embargo`, over `schema/rpc-threeparty.capnp`; L4 `Join`, which upstream C++ lacks) |
+| RPC levels 1-4 | no | L1-L2 (no L4) | L1-L2 (no L4) | **L1-L4** (C vat, `include/capnp-janet/capnp_rpc.h`; L3 both halves with `Accept.embargo`, over `schema/rpc-threeparty.capnp`, tested as a three-vat handoff; L4 `Join`, which upstream C++ lacks) |
 
 ## Schema-evolution list views
 

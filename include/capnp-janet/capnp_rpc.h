@@ -107,6 +107,11 @@ typedef struct capnp_rpc_question {
 typedef struct capnp_rpc_provision {
   int used;
   uint64_t nonce;
+  /* The capability itself, not this connection's id for it: the
+   * recipient may well arrive on another connection, where that id means
+   * nothing. */
+  void *server;
+  capnp_rpc_dispatch_fn dispatch;
   int export_id;
   /* The introducer's Provide question, which is how a later Disembargo
    * names this arrangement (rpc.capnp, Disembargo.context.provide). */
@@ -168,11 +173,27 @@ typedef struct capnp_rpc_join {
   int eids[CAPNP_RPC_MAX_JOIN_PARTS];
 } capnp_rpc_join_t;
 
+/* What a vat knows across all its connections.
+ *
+ * A level 3 handoff is arranged on one connection and claimed on
+ * another: the introducer sends `Provide` over its own, and the
+ * recipient arrives on hers. Holding the arrangement on the connection
+ * would make it claimable only by the introducer, which is no handoff at
+ * all. Connections given no vat get one to themselves, which is what a
+ * two-party deployment wants.
+ */
+typedef struct capnp_rpc_vat {
+  capnp_rpc_provision_t provisions[CAPNP_RPC_MAX_PROVISIONS];
+} capnp_rpc_vat_t;
+
 typedef struct capnp_rpc_conn {
   capnp_rpc_export_t exports[CAPNP_RPC_MAX_EXPORTS];
   capnp_rpc_answer_t answers[CAPNP_RPC_MAX_ANSWERS];
   capnp_rpc_question_t questions[CAPNP_RPC_MAX_QUESTIONS];
-  capnp_rpc_provision_t provisions[CAPNP_RPC_MAX_PROVISIONS];
+  /* Shared with this vat's other connections when one is attached;
+   * otherwise `own_vat` below. */
+  capnp_rpc_vat_t *vat;
+  capnp_rpc_vat_t own_vat;
   capnp_rpc_introduction_t introductions[CAPNP_RPC_MAX_INTRODUCTIONS];
   uint32_t next_question_id;
   capnp_rpc_join_t joins[CAPNP_RPC_MAX_JOINS];
@@ -237,6 +258,26 @@ int capnp_rpc_pending_provisions(capnp_rpc_conn_t *c, uint64_t *out, int cap);
  * into `out` (may be NULL) and returns how many are held. */
 /* Accepts claimed but still embargoed, awaiting Disembargo.provide. */
 int capnp_rpc_embargoed_accepts(capnp_rpc_conn_t *c);
+
+/* Share level 3 arrangements with this vat's other connections. Call
+ * after capnp_rpc_init and before any Provide; `vat` must outlive the
+ * connection. */
+void capnp_rpc_set_vat(capnp_rpc_conn_t *c, capnp_rpc_vat_t *vat);
+
+/* Ask the peer to hold `imported_cap` for a third vat, and return the
+ * question id, which is also what a later Disembargo.provide names. The
+ * nonce is the whole of the arrangement: the recipient presents it in an
+ * Accept, and the host matches on it alone. */
+uint32_t capnp_rpc_send_provide(capnp_rpc_conn_t *c, uint32_t imported_cap,
+                                const char *recipient_host,
+                                uint16_t recipient_port, uint64_t nonce);
+
+/* Claim a capability a third vat provided for us. Returns the question
+ * id; the answer carries the capability. */
+uint32_t capnp_rpc_send_accept(capnp_rpc_conn_t *c, uint64_t nonce, int embargo);
+
+/* Lift the embargo on the Accept this vat arranged with Provide. */
+int capnp_rpc_send_disembargo_provide(capnp_rpc_conn_t *c, uint32_t provide_qid);
 
 int capnp_rpc_pending_introductions(capnp_rpc_conn_t *c,
                                     capnp_rpc_introduction_t *out, int cap);

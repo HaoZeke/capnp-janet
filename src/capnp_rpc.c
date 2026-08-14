@@ -84,6 +84,11 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define PROVIDE_PW 2
 #define ACCEPT_DW 1
 #define ACCEPT_PW 1
+/* RecipientId: vat @ptr0, nonce @0 (u64). ProvisionId: nonce @0. */
+#define RECIPIENT_DW 1
+#define RECIPIENT_PW 1
+#define PROVISION_DW 1
+#define PROVISION_PW 0
 #define RECIPIENT_NONCE_OFF 0
 #define PROVISION_NONCE_OFF 0
 /* JoinKeyPart: joinId @0 (u32), partCount @4 (u16), partNum @6 (u16). */
@@ -119,6 +124,12 @@ void capnp_rpc_init(capnp_rpc_conn_t *c, capnp_rpc_send_fn send, void *send_ctx)
   memset(c, 0, sizeof(*c));
   c->send = send;
   c->send_ctx = send_ctx;
+  c->vat = &c->own_vat;
+}
+
+void capnp_rpc_set_vat(capnp_rpc_conn_t *c, capnp_rpc_vat_t *vat)
+{
+  c->vat = vat != NULL ? vat : &c->own_vat;
 }
 
 void capnp_rpc_set_bootstrap(capnp_rpc_conn_t *c, void *server,
@@ -542,17 +553,20 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   uint32_t qid = capnp_get_u32(call, QUESTIONID_OFF, 0);
   int eid, rc;
 
+  memset(&params, 0, sizeof params);
+  /* The cap table describes the message, not the dispatch: a call this
+   * vat cannot route still told us where a third party's capability
+   * lives. */
+  if (capnp_getp(call, 1, &params_payload) == CAPNP_OK) {
+    (void)capnp_getp(&params_payload, 0, &params);
+    note_introductions(c, &params_payload);
+  }
+
   if (capnp_getp(call, 0, &target) != CAPNP_OK)
     return send_return_exception(c, qid, "call has no target");
   eid = resolve_target(c, &target);
   if (eid < 0)
     return send_return_exception(c, qid, "no such export");
-
-  memset(&params, 0, sizeof params);
-  if (capnp_getp(call, 1, &params_payload) == CAPNP_OK) {
-    (void)capnp_getp(&params_payload, 0, &params);
-    note_introductions(c, &params_payload);
-  }
 
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
@@ -821,6 +835,110 @@ static int begin_message(capnp_builder_t *b, uint16_t tag, uint16_t dw,
   if (capnp_builder_struct(&slot, dw, pw, body_out))
     return CAPNP_ERR_ALLOC;
   return CAPNP_OK;
+}
+
+uint32_t capnp_rpc_send_provide(capnp_rpc_conn_t *c, uint32_t imported_cap,
+                                const char *recipient_host,
+                                uint16_t recipient_port, uint64_t nonce)
+{
+  capnp_builder_t b;
+  capnp_bptr_t provide, slot, target, recipient, vat;
+  capnp_rpc_question_t *q;
+  uint32_t qid = 0;
+  int rc;
+
+  if (recipient_host == NULL)
+    return (uint32_t)-1;
+  q = question_claim(c, &qid);
+  if (q == NULL)
+    return (uint32_t)-1;
+  capnp_builder_init(&b);
+  rc = begin_message(&b, CAPNP_RPC_MSG_PROVIDE, PROVIDE_DW, PROVIDE_PW, &provide);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&provide, QUESTIONID_OFF, qid);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_slot(&provide, PROVIDE_DW, 0, &slot);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&slot, TARGET_DW, TARGET_PW, &target);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u16(&target, TARGET_TAG_OFF, TARGET_TAG_IMPORTEDCAP);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&target, TARGET_IMPORTEDCAP_OFF, imported_cap);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_slot(&provide, PROVIDE_DW, 1, &slot);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&slot, RECIPIENT_DW, RECIPIENT_PW, &recipient);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u64(&recipient, RECIPIENT_NONCE_OFF, nonce);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_slot(&recipient, RECIPIENT_DW, 0, &slot);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&slot, VATID_DW, VATID_PW, &vat);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_text(&vat, VATID_DW, 0, recipient_host,
+                                strlen(recipient_host));
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u16(&vat, VATID_PORT_OFF, recipient_port);
+  if (rc == CAPNP_OK)
+    rc = flush(c, &b);
+  capnp_builder_free(&b);
+  if (rc != CAPNP_OK) {
+    q->used = 0;
+    return (uint32_t)-1;
+  }
+  return qid;
+}
+
+uint32_t capnp_rpc_send_accept(capnp_rpc_conn_t *c, uint64_t nonce, int embargo)
+{
+  capnp_builder_t b;
+  capnp_bptr_t accept, slot, provision;
+  capnp_rpc_question_t *q;
+  uint32_t qid = 0;
+  int rc;
+
+  q = question_claim(c, &qid);
+  if (q == NULL)
+    return (uint32_t)-1;
+  capnp_builder_init(&b);
+  rc = begin_message(&b, CAPNP_RPC_MSG_ACCEPT, ACCEPT_DW, ACCEPT_PW, &accept);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&accept, QUESTIONID_OFF, qid);
+  if (rc == CAPNP_OK && embargo)
+    rc = capnp_builder_set_bool(&accept, ACCEPT_EMBARGO_BIT, 1);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_slot(&accept, ACCEPT_DW, 0, &slot);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&slot, PROVISION_DW, PROVISION_PW, &provision);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u64(&provision, PROVISION_NONCE_OFF, nonce);
+  if (rc == CAPNP_OK)
+    rc = flush(c, &b);
+  capnp_builder_free(&b);
+  if (rc != CAPNP_OK) {
+    q->used = 0;
+    return (uint32_t)-1;
+  }
+  return qid;
+}
+
+int capnp_rpc_send_disembargo_provide(capnp_rpc_conn_t *c, uint32_t provide_qid)
+{
+  capnp_builder_t b;
+  capnp_bptr_t dis;
+  int rc;
+
+  capnp_builder_init(&b);
+  rc = begin_message(&b, CAPNP_RPC_MSG_DISEMBARGO, DISEMBARGO_DW, DISEMBARGO_PW,
+                     &dis);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u16(&dis, DIS_CTX_TAG_OFF, DIS_CTX_PROVIDE);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&dis, DIS_CTX_VALUE_OFF, provide_qid);
+  if (rc == CAPNP_OK)
+    rc = flush(c, &b);
+  capnp_builder_free(&b);
+  return rc;
 }
 
 uint32_t capnp_rpc_send_bootstrap(capnp_rpc_conn_t *c)
@@ -1095,12 +1213,14 @@ static int handle_provide(capnp_rpc_conn_t *c, const capnp_ptr_t *provide)
   nonce = capnp_get_u64(&recipient, RECIPIENT_NONCE_OFF, 0);
 
   for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++) {
-    if (!c->provisions[i].used) {
-      c->provisions[i].used = 1;
-      c->provisions[i].nonce = nonce;
-      c->provisions[i].export_id = eid;
-      c->provisions[i].question_id = qid;
-      c->provisions[i].embargoed = 0;
+    if (!c->vat->provisions[i].used) {
+      c->vat->provisions[i].used = 1;
+      c->vat->provisions[i].nonce = nonce;
+      c->vat->provisions[i].server = c->exports[eid].server;
+      c->vat->provisions[i].dispatch = c->exports[eid].dispatch;
+      c->vat->provisions[i].export_id = eid;
+      c->vat->provisions[i].question_id = qid;
+      c->vat->provisions[i].embargoed = 0;
       /* The recipient holds a reference once it accepts. */
       c->exports[eid].refcount++;
       return send_empty_return(c, qid);
@@ -1132,18 +1252,24 @@ static int handle_accept(capnp_rpc_conn_t *c, const capnp_ptr_t *accept)
 
   embargo = capnp_get_bool(accept, ACCEPT_EMBARGO_BIT, 0);
   for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++) {
-    if (c->provisions[i].used && !c->provisions[i].embargoed &&
-        c->provisions[i].nonce == nonce) {
-      eid = c->provisions[i].export_id;
+    if (c->vat->provisions[i].used && !c->vat->provisions[i].embargoed &&
+        c->vat->provisions[i].nonce == nonce) {
+      /* Export it here: the id the introducer used belongs to its own
+       * connection and means nothing on this one. */
+      eid = capnp_rpc_export(c, c->vat->provisions[i].server,
+                             c->vat->provisions[i].dispatch);
+      if (eid < 0)
+        return send_return_exception(c, qid, "accept: export table full");
+      c->vat->provisions[i].export_id = eid;
       if (embargo) {
         /* Claimed, but the Return waits: the recipient has pipelined
          * calls in flight through the introducer, and answering now
          * would let a later call overtake them. The introducer lifts it
          * with Disembargo.provide. */
-        c->provisions[i].embargoed = 1;
-        c->provisions[i].accept_question_id = qid;
+        c->vat->provisions[i].embargoed = 1;
+        c->vat->provisions[i].accept_question_id = qid;
       } else {
-        c->provisions[i].used = 0;
+        c->vat->provisions[i].used = 0;
       }
       break;
     }
@@ -1176,13 +1302,13 @@ static int release_provide_embargo(capnp_rpc_conn_t *c, uint32_t provide_qid)
   for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++) {
     uint32_t qid;
     int eid;
-    if (!c->provisions[i].used || !c->provisions[i].embargoed)
+    if (!c->vat->provisions[i].used || !c->vat->provisions[i].embargoed)
       continue;
-    if (c->provisions[i].question_id != provide_qid)
+    if (c->vat->provisions[i].question_id != provide_qid)
       continue;
-    qid = c->provisions[i].accept_question_id;
-    eid = c->provisions[i].export_id;
-    memset(&c->provisions[i], 0, sizeof c->provisions[i]);
+    qid = c->vat->provisions[i].accept_question_id;
+    eid = c->vat->provisions[i].export_id;
+    memset(&c->vat->provisions[i], 0, sizeof c->vat->provisions[i]);
 
     capnp_builder_init(&b);
     rc = begin_return(&b, qid, &ret, &payload);
@@ -1204,7 +1330,7 @@ int capnp_rpc_embargoed_accepts(capnp_rpc_conn_t *c)
 {
   int i, n = 0;
   for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++)
-    if (c->provisions[i].used && c->provisions[i].embargoed)
+    if (c->vat->provisions[i].used && c->vat->provisions[i].embargoed)
       n++;
   return n;
 }
@@ -1213,9 +1339,9 @@ int capnp_rpc_pending_provisions(capnp_rpc_conn_t *c, uint64_t *out, int cap)
 {
   int i, n = 0;
   for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++) {
-    if (c->provisions[i].used) {
+    if (c->vat->provisions[i].used) {
       if (out && n < cap)
-        out[n] = c->provisions[i].nonce;
+        out[n] = c->vat->provisions[i].nonce;
       n++;
     }
   }
