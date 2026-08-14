@@ -63,6 +63,16 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 /* Bootstrap / Join / Release: questionId or id @0 (u32). */
 #define QUESTIONID_OFF 0
 #define RELEASE_REFCOUNT_OFF 4
+/* Provide: questionId @0 (u32), target @ptr0, recipient @ptr1.
+ * Accept: questionId @0 (u32), provision @ptr0, embargo @32 (bit).
+ * RecipientId (rpc-threeparty.capnp): vat @ptr0, nonce @0 (u64).
+ * ProvisionId: nonce @0 (u64). */
+#define PROVIDE_DW 1
+#define PROVIDE_PW 2
+#define ACCEPT_DW 1
+#define ACCEPT_PW 1
+#define RECIPIENT_NONCE_OFF 0
+#define PROVISION_NONCE_OFF 0
 /* JoinKeyPart: joinId @0 (u32), partCount @4 (u16), partNum @6 (u16). */
 #define JKP_JOINID_OFF 0
 #define JKP_PARTCOUNT_OFF 4
@@ -896,6 +906,114 @@ int capnp_rpc_stream_finish(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s)
   return s->have_failure ? CAPNP_ERR_ARG : CAPNP_OK;
 }
 
+
+/* --- level 3: three-party handoff ---------------------------------- */
+
+/* Answer a question with empty results: the introducer is not waiting for
+ * a value, only for confirmation that the arrangement is recorded. */
+static int send_empty_return(capnp_rpc_conn_t *c, uint32_t qid)
+{
+  capnp_builder_t b;
+  capnp_bptr_t ret, payload;
+  int rc;
+  capnp_builder_init(&b);
+  rc = begin_return(&b, qid, &ret, &payload);
+  if (rc == CAPNP_OK)
+    rc = flush_answer(c, &b, qid);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+/* `Provide`: hold the target for whoever presents this nonce. */
+static int handle_provide(capnp_rpc_conn_t *c, const capnp_ptr_t *provide)
+{
+  capnp_ptr_t target, recipient;
+  uint32_t qid;
+  uint64_t nonce;
+  int eid, i;
+
+  if (provide->kind != CAPNP_PK_STRUCT)
+    return CAPNP_OK;
+  qid = capnp_get_u32(provide, QUESTIONID_OFF, 0);
+  if (capnp_getp(provide, 0, &target) != CAPNP_OK)
+    return send_return_exception(c, qid, "provide: no target");
+  eid = resolve_target(c, &target);
+  if (eid < 0)
+    return send_return_exception(c, qid, "provide: no such capability");
+  if (capnp_getp(provide, 1, &recipient) != CAPNP_OK ||
+      recipient.kind != CAPNP_PK_STRUCT)
+    return send_return_exception(c, qid, "provide: no recipient");
+  nonce = capnp_get_u64(&recipient, RECIPIENT_NONCE_OFF, 0);
+
+  for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++) {
+    if (!c->provisions[i].used) {
+      c->provisions[i].used = 1;
+      c->provisions[i].nonce = nonce;
+      c->provisions[i].export_id = eid;
+      /* The recipient holds a reference once it accepts. */
+      c->exports[eid].refcount++;
+      return send_empty_return(c, qid);
+    }
+  }
+  return send_return_exception(c, qid, "provide: table full");
+}
+
+/* `Accept`: claim a capability a third vat provided for us.
+ *
+ * A nonce is single-use. Leaving it claimable would let anyone who learns
+ * it take the capability again later. */
+static int handle_accept(capnp_rpc_conn_t *c, const capnp_ptr_t *accept)
+{
+  capnp_builder_t b;
+  capnp_bptr_t ret, payload;
+  capnp_ptr_t provision;
+  uint32_t qid;
+  uint64_t nonce;
+  int i, eid = -1, rc;
+
+  if (accept->kind != CAPNP_PK_STRUCT)
+    return CAPNP_OK;
+  qid = capnp_get_u32(accept, QUESTIONID_OFF, 0);
+  if (capnp_getp(accept, 0, &provision) != CAPNP_OK ||
+      provision.kind != CAPNP_PK_STRUCT)
+    return send_return_exception(c, qid, "accept: no provision");
+  nonce = capnp_get_u64(&provision, PROVISION_NONCE_OFF, 0);
+
+  for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++) {
+    if (c->provisions[i].used && c->provisions[i].nonce == nonce) {
+      eid = c->provisions[i].export_id;
+      c->provisions[i].used = 0;
+      break;
+    }
+  }
+  if (eid < 0)
+    return send_return_exception(c, qid, "accept: no such provision");
+
+  capnp_builder_init(&b);
+  rc = begin_return(&b, qid, &ret, &payload);
+  if (rc == CAPNP_OK)
+    rc = write_cap_table(&payload, eid);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_cap(&payload, PAYLOAD_DW, 0, 0);
+  if (rc == CAPNP_OK)
+    rc = flush_answer(c, &b, qid);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+int capnp_rpc_pending_provisions(capnp_rpc_conn_t *c, uint64_t *out, int cap)
+{
+  int i, n = 0;
+  for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++) {
+    if (c->provisions[i].used) {
+      if (out && n < cap)
+        out[n] = c->provisions[i].nonce;
+      n++;
+    }
+  }
+  return n;
+}
+
 int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
 {
   capnp_message_t m;
@@ -938,6 +1056,12 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
   case CAPNP_RPC_MSG_RETURN:
     handle_return(c, &body, data, len);
     break;
+  case CAPNP_RPC_MSG_PROVIDE:
+    rc = handle_provide(c, &body);
+    break;
+  case CAPNP_RPC_MSG_ACCEPT:
+    rc = handle_accept(c, &body);
+    break;
   case CAPNP_RPC_MSG_RESOLVE:
     /* Promise resolution. Replying unimplemented is the spec-defined
      * signal that this vat does not adopt resolutions: the sender keeps
@@ -946,9 +1070,7 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
     rc = send_unimplemented(c, &root);
     break;
   default:
-    /* Provide and Accept name a third vat, which a two-party connection
-     * cannot; the obsolete save/delete messages are gone from the
-     * protocol. */
+    /* The obsolete save/delete messages. */
     rc = send_unimplemented(c, &root);
     break;
   }

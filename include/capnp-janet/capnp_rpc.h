@@ -31,6 +31,7 @@ extern "C" {
 #define CAPNP_RPC_MAX_ANSWERS 64
 #define CAPNP_RPC_MAX_ANSWER_BYTES 8192
 #define CAPNP_RPC_MAX_QUESTIONS 64
+#define CAPNP_RPC_MAX_PROVISIONS 32
 #define CAPNP_RPC_MAX_JOINS 8
 /* Outstanding unacknowledged calls a stream may hold. */
 #define CAPNP_RPC_STREAM_MAX_WINDOW 64
@@ -94,6 +95,18 @@ typedef struct capnp_rpc_question {
   size_t reply_len;
 } capnp_rpc_question_t;
 
+/* A capability promised to a third vat, awaiting its Accept.
+ *
+ * Level 3: the introducer told us to expect someone, and the nonce is
+ * the whole of the arrangement. Matching on it alone is what lets the
+ * recipient claim the capability without us having to trust her account
+ * of who sent her. */
+typedef struct capnp_rpc_provision {
+  int used;
+  uint64_t nonce;
+  int export_id;
+} capnp_rpc_provision_t;
+
 /* Client-side flow control for `-> stream` methods: a bounded window of
  * unacknowledged stream calls. The wire carries ordinary Call/Return
  * pairs; the window is policy, as in capnp-C++. After any stream call
@@ -130,6 +143,7 @@ typedef struct capnp_rpc_conn {
   capnp_rpc_export_t exports[CAPNP_RPC_MAX_EXPORTS];
   capnp_rpc_answer_t answers[CAPNP_RPC_MAX_ANSWERS];
   capnp_rpc_question_t questions[CAPNP_RPC_MAX_QUESTIONS];
+  capnp_rpc_provision_t provisions[CAPNP_RPC_MAX_PROVISIONS];
   uint32_t next_question_id;
   capnp_rpc_join_t joins[CAPNP_RPC_MAX_JOINS];
   void *bootstrap;
@@ -184,6 +198,10 @@ int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id);
  * capnp_message_free. */
 int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
                              capnp_message_t *msg_out, capnp_ptr_t *out);
+
+/* Nonces of capabilities held for a third vat, for tests and shutdown
+ * accounting. Writes up to `cap` entries and returns how many exist. */
+int capnp_rpc_pending_provisions(capnp_rpc_conn_t *c, uint64_t *out, int cap);
 
 /* --- stream flow control ------------------------------------------- */
 
