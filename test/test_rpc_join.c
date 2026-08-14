@@ -313,6 +313,38 @@ static void send_provide(capnp_rpc_conn_t *c, uint32_t qid, uint32_t export_id,
   capnp_builder_free(&b);
 }
 
+/* Read a checked-in golden frame. Missing means a broken tree. */
+static uint8_t *load_frame(const char *name, size_t *len)
+{
+  const char *src = getenv("CAPNP_JANET_SOURCE_ROOT");
+  char path[1024];
+  FILE *f;
+  long sz;
+  uint8_t *buf;
+  if (!src || !src[0])
+    src = ".";
+  snprintf(path, sizeof(path), "%s/test/fixtures/%s", src, name);
+  f = fopen(path, "rb");
+  CHECK(f != NULL, "golden frame opens");
+  if (!f)
+    return NULL;
+  if (fseek(f, 0, SEEK_END) || (sz = ftell(f)) < 0 || fseek(f, 0, SEEK_SET)) {
+    fclose(f);
+    CHECK(0, "golden frame seeks");
+    return NULL;
+  }
+  buf = malloc((size_t)sz);
+  if (!buf || fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+    free(buf);
+    fclose(f);
+    CHECK(0, "golden frame reads");
+    return NULL;
+  }
+  fclose(f);
+  *len = (size_t)sz;
+  return buf;
+}
+
 /* Carol -> us: claim the capability held under `nonce`. */
 static void send_accept(capnp_rpc_conn_t *c, uint32_t qid, uint64_t nonce)
 {
@@ -538,14 +570,24 @@ int main(void)
     outbox_clear(&out);
   }
 
-  /* An Accept with an unknown nonce is refused. */
+  /* An Accept with an unknown nonce is refused, even while a different
+   * arrangement is standing: matching is on the nonce, not on there
+   * being something to hand over. */
   {
     uint32_t ansid;
     int exc, cap;
+    send_provide(&c, 19, 0, 0xc0ffeeULL);
+    outbox_clear(&out);
     send_accept(&c, 20, 0xdeadbeefULL);
     CHECK(out.n == 1, "unknown nonce answered");
     read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
     CHECK(exc, "unknown nonce refused");
+    CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == 1,
+          "the standing arrangement is untouched");
+    outbox_clear(&out);
+    send_accept(&c, 21, 0xc0ffeeULL);
+    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
+    CHECK(!exc, "the arranged nonce is claimable");
     outbox_clear(&out);
   }
 
@@ -576,6 +618,50 @@ int main(void)
     /* Claiming one leaves the other standing. */
     CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == 1, "the other stands");
     outbox_clear(&out);
+  }
+
+  /* Level 3 driven by frames the reference `capnp` CLI encoded.
+   *
+   * Everything above builds its own Provide and Accept, so it shows the
+   * vat agrees with this library's builder and nothing more: a layout
+   * both sides share but the wire format does not would pass all of it.
+   * These bytes come from the reference implementation
+   * (scripts/gen-rpc-frames.sh): hold export 0 for whoever presents
+   * 0xfeedface (question 42), then claim it (question 43). */
+  {
+    uint8_t *frame;
+    size_t len = 0;
+    uint32_t ansid;
+    int exc, cap;
+    int before = capnp_rpc_pending_provisions(&c, NULL, 0);
+
+    frame = load_frame("rpc-provide.bin", &len);
+    if (frame) {
+      CHECK(capnp_rpc_handle(&c, frame, len) == CAPNP_OK, "reference Provide handled");
+      free(frame);
+      CHECK(out.n == 1, "reference Provide answered");
+      read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
+      CHECK(ansid == 42, "reference Provide answerId");
+      CHECK(!exc, "reference Provide accepted");
+      /* The nonce the vat recorded is the one the CLI wrote. */
+      CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == before + 1,
+            "reference Provide recorded");
+      outbox_clear(&out);
+    }
+
+    frame = load_frame("rpc-accept.bin", &len);
+    if (frame) {
+      CHECK(capnp_rpc_handle(&c, frame, len) == CAPNP_OK, "reference Accept handled");
+      free(frame);
+      CHECK(out.n == 1, "reference Accept answered");
+      read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
+      CHECK(ansid == 43, "reference Accept answerId");
+      CHECK(!exc, "reference Accept succeeded");
+      CHECK(cap, "reference Accept got the capability");
+      CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == before,
+            "reference Accept consumed the arrangement");
+      outbox_clear(&out);
+    }
   }
 
   if (g_failures != 0) {

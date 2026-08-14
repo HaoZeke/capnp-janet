@@ -185,7 +185,11 @@ test_rpc_join = executable(
   dependencies: capnp_janet_dep,
   include_directories: test_inc,
 )
-test('rpc_join', test_rpc_join)
+test(
+  'rpc_join',
+  test_rpc_join,
+  env: {'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root()},
+)
 
 test_rpc_client = executable(
   'test_rpc_client',
