@@ -17,6 +17,8 @@
 
 /* rpc.capnp shapes, matching capnp_rpc.c. */
 #define MESSAGE_DW 1
+#define CAPDESC_DW 1
+#define CAPDESC_PW 1
 #define MESSAGE_PW 1
 #define JOIN_DW 1
 #define JOIN_PW 2
@@ -191,6 +193,100 @@ static void send_pipelined_call(capnp_rpc_conn_t *c, uint32_t qid,
   capnp_rpc_handle(c, flat, len);
   free(flat);
   capnp_builder_free(&b);
+}
+
+/* Alice -> us: a Call whose params name a capability hosted by a third
+ * vat, with a vine we can use in the meantime. This is the receiving
+ * half of the introduction; the Provide/Accept cases are the hosting
+ * half. */
+static void send_call_with_third_party_cap(capnp_rpc_conn_t *c, uint32_t qid,
+                                           uint32_t target_export,
+                                           const char *host, uint16_t port,
+                                           uint64_t nonce, uint32_t vine_id)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, call, target, payload, cd, content;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+
+  capnp_builder_init(&b);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  CHECK(capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK, "msg");
+  CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_CALL) == CAPNP_OK, "call tag");
+  CHECK(capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot) == CAPNP_OK, "msg slot");
+  CHECK(capnp_builder_struct(&slot, CALL_DW, CALL_PW, &call) == CAPNP_OK, "call");
+  CHECK(capnp_builder_set_u32(&call, 0, qid) == CAPNP_OK, "call qid");
+
+  CHECK(capnp_builder_slot(&call, CALL_DW, 0, &slot) == CAPNP_OK, "target slot");
+  CHECK(capnp_builder_struct(&slot, TARGET_DW, TARGET_PW, &target) == CAPNP_OK, "target");
+  CHECK(capnp_builder_set_u16(&target, 4, 0) == CAPNP_OK, "importedCap tag");
+  CHECK(capnp_builder_set_u32(&target, 0, target_export) == CAPNP_OK, "export");
+
+  CHECK(capnp_builder_slot(&call, CALL_DW, 1, &slot) == CAPNP_OK, "params slot");
+  CHECK(capnp_builder_struct(&slot, PAYLOAD_DW, PAYLOAD_PW, &payload) == CAPNP_OK, "payload");
+  CHECK(capnp_builder_slot(&payload, PAYLOAD_DW, 0, &slot) == CAPNP_OK, "content slot");
+  CHECK(capnp_builder_struct(&slot, 1, 0, &content) == CAPNP_OK, "content");
+  CHECK(capnp_builder_set_list_struct(&payload, PAYLOAD_DW, 1, 1, CAPDESC_DW,
+                                      CAPDESC_PW, &cd) == CAPNP_OK, "capTable");
+  CHECK(capnp_rpc_write_third_party_cap(c, &cd, host, port, nonce, vine_id) == CAPNP_OK,
+        "third-party descriptor");
+
+  CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
+  capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+}
+
+/* The introducer can also hand us the descriptor in an answer, not only
+ * in a call's params. */
+static void send_return_with_third_party_cap(capnp_rpc_conn_t *c, uint32_t qid,
+                                             const char *host, uint16_t port,
+                                             uint64_t nonce, uint32_t vine_id)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, ret, payload, content, cd;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+
+  capnp_builder_init(&b);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  CHECK(capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK, "msg");
+  CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RETURN) == CAPNP_OK, "return tag");
+  CHECK(capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot) == CAPNP_OK, "msg slot");
+  CHECK(capnp_builder_struct(&slot, RETURN_DW, RETURN_PW, &ret) == CAPNP_OK, "return");
+  CHECK(capnp_builder_set_u32(&ret, 0, qid) == CAPNP_OK, "answerId");
+  CHECK(capnp_builder_set_u16(&ret, 6, 0) == CAPNP_OK, "results tag");
+  CHECK(capnp_builder_slot(&ret, RETURN_DW, 0, &slot) == CAPNP_OK, "results slot");
+  CHECK(capnp_builder_struct(&slot, PAYLOAD_DW, PAYLOAD_PW, &payload) == CAPNP_OK, "payload");
+  CHECK(capnp_builder_slot(&payload, PAYLOAD_DW, 0, &slot) == CAPNP_OK, "content slot");
+  CHECK(capnp_builder_struct(&slot, 1, 0, &content) == CAPNP_OK, "content");
+  CHECK(capnp_builder_set_list_struct(&payload, PAYLOAD_DW, 1, 1, CAPDESC_DW,
+                                      CAPDESC_PW, &cd) == CAPNP_OK, "capTable");
+  CHECK(capnp_rpc_write_third_party_cap(c, &cd, host, port, nonce, vine_id) == CAPNP_OK,
+        "third-party descriptor");
+
+  CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
+  capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+}
+
+/* Whether a frame is a Release naming `id`. */
+static int is_release_of(const uint8_t *data, size_t len, uint32_t id)
+{
+  capnp_message_t m;
+  capnp_ptr_t root, rel;
+  int match = 0;
+  if (capnp_message_from_flat(&m, data, len) != CAPNP_OK)
+    return 0;
+  /* The root is the Message itself, as in read_join_reply above. */
+  if (capnp_root(&m, &root) == CAPNP_OK &&
+      capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_RELEASE &&
+      capnp_getp(&root, 0, &rel) == CAPNP_OK) {
+    match = capnp_get_u32(&rel, 0, 0) == id && capnp_get_u32(&rel, 4, 0) == 1;
+  }
+  capnp_message_free(&m);
+  return match;
 }
 
 static void send_finish(capnp_rpc_conn_t *c, uint32_t qid)
@@ -617,6 +713,71 @@ int main(void)
     CHECK(!exc, "first claim succeeded");
     /* Claiming one leaves the other standing. */
     CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == 1, "the other stands");
+    outbox_clear(&out);
+  }
+
+  /* Level 3, receiving half: a payload that names a third party's
+   * capability is recorded as an introduction, and the vine survives
+   * until the pickup is finished. */
+  {
+    capnp_rpc_introduction_t got[4];
+    int i, released;
+
+    CHECK(capnp_rpc_pending_introductions(&c, NULL, 0) == 0, "no introductions yet");
+    send_call_with_third_party_cap(&c, 50, 0, "10.0.0.7", 5000, 0xabcdefULL, 77);
+    CHECK(capnp_rpc_pending_introductions(&c, got, 4) == 1, "one introduction held");
+    CHECK(got[0].nonce == 0xabcdefULL, "introduction nonce");
+    CHECK(got[0].vine_id == 77, "introduction vine");
+    CHECK(got[0].port == 5000, "introduction port");
+    CHECK(strcmp(got[0].host, "10.0.0.7") == 0, "introduction host");
+
+    /* Nothing is released while the pickup is outstanding: the vine is
+     * the only way to reach the capability until then. */
+    for (i = 0; i < out.n; i++)
+      CHECK(!is_release_of(out.data[i], out.len[i], 77), "vine not released early");
+    outbox_clear(&out);
+
+    CHECK(capnp_rpc_introduction_done(&c, 0xabcdefULL) == 0, "pickup finished");
+    released = 0;
+    for (i = 0; i < out.n; i++)
+      released = released || is_release_of(out.data[i], out.len[i], 77);
+    CHECK(released, "vine released on pickup");
+    CHECK(capnp_rpc_pending_introductions(&c, NULL, 0) == 0, "introduction cleared");
+    outbox_clear(&out);
+
+    /* Finishing an introduction nobody handed us is refused, even while
+     * another is outstanding: the nonce picks the arrangement, not the
+     * fact that there is one. */
+    send_call_with_third_party_cap(&c, 51, 0, "10.0.0.8", 5001, 0x99ULL, 78);
+    outbox_clear(&out);
+    CHECK(capnp_rpc_introduction_done(&c, 0xabcdefULL) == -1, "unknown nonce refused");
+    CHECK(capnp_rpc_pending_introductions(&c, NULL, 0) == 1, "the other stands");
+    CHECK(capnp_rpc_introduction_done(&c, 0x99ULL) == 0, "the arranged nonce finishes");
+    outbox_clear(&out);
+  }
+
+  /* The same descriptor in an answer is recorded too. */
+  {
+    capnp_rpc_introduction_t got[4];
+    uint32_t qid = capnp_rpc_send_bootstrap(&c);
+    outbox_clear(&out);
+    send_return_with_third_party_cap(&c, qid, "10.0.0.9", 5002, 0x77ULL, 80);
+    CHECK(capnp_rpc_pending_introductions(&c, got, 4) == 1, "answer introduction held");
+    CHECK(got[0].nonce == 0x77ULL, "answer introduction nonce");
+    CHECK(got[0].vine_id == 80, "answer introduction vine");
+    CHECK(strcmp(got[0].host, "10.0.0.9") == 0, "answer introduction host");
+    CHECK(capnp_rpc_introduction_done(&c, 0x77ULL) == 0, "answer pickup finished");
+    outbox_clear(&out);
+  }
+
+  /* A host too long to store is refused rather than truncated: a
+   * truncated address names a different vat. */
+  {
+    char host[CAPNP_RPC_MAX_HOST + 8];
+    memset(host, 'h', sizeof host - 1);
+    host[sizeof host - 1] = '\0';
+    send_call_with_third_party_cap(&c, 52, 0, host, 5000, 0xfeedULL, 79);
+    CHECK(capnp_rpc_pending_introductions(&c, NULL, 0) == 0, "overlong host refused");
     outbox_clear(&out);
   }
 

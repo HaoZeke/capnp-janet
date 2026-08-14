@@ -45,6 +45,19 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define CAPDESC_TAG_OFF 0
 #define CAPDESC_SENDERHOSTED_OFF 4
 #define CAPDESC_TAG_SENDERHOSTED 1
+#define CAPDESC_TAG_THIRDPARTYHOSTED 5
+/* ThirdPartyCapDescriptor: id @ptr0, vineId @0 (u32).
+ * ThirdPartyCapId (rpc-threeparty.capnp): vat @ptr0, nonce @0 (u64).
+ * VatId: host @ptr0, port @0 (u16). */
+#define TPCD_DW 1
+#define TPCD_PW 1
+#define TPCD_VINEID_OFF 0
+#define TPCID_DW 1
+#define TPCID_PW 1
+#define TPCID_NONCE_OFF 0
+#define VATID_DW 1
+#define VATID_PW 1
+#define VATID_PORT_OFF 0
 /* Call: questionId @0, methodId @4 (u16), interfaceId @8 (u64);
  * target @ptr0, params @ptr1. */
 #define CALL_DW 3
@@ -396,6 +409,127 @@ static int handle_bootstrap(capnp_rpc_conn_t *c, const capnp_ptr_t *boot)
   return rc;
 }
 
+/* --- level 3: introductions handed to us ---------------------------- */
+
+/* Record every `thirdPartyHosted` entry in an incoming cap table.
+ *
+ * The descriptor says where the capability really lives and hands us a
+ * vine, an ordinary import through the introducer. Calls on the vine
+ * work right away, which is the fallback the spec gives receivers that
+ * cannot reach a third party; the vine must therefore outlive the
+ * pickup. Dialling the third vat belongs to the network layer, so the
+ * arrangement is recorded and handed over rather than acted on here.
+ */
+static void note_introductions(capnp_rpc_conn_t *c, const capnp_ptr_t *payload)
+{
+  capnp_ptr_t table;
+  uint32_t n, i;
+  int j;
+
+  if (payload->kind != CAPNP_PK_STRUCT)
+    return;
+  if (capnp_getp(payload, 1, &table) != CAPNP_OK)
+    return;
+  n = capnp_list_len(&table);
+  for (i = 0; i < n; i++) {
+    capnp_ptr_t desc, tpcd, id, vat;
+    const char *host = NULL;
+    size_t host_len = 0;
+
+    if (capnp_list_get_struct(&table, i, &desc) != CAPNP_OK)
+      continue;
+    if (capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0) != CAPDESC_TAG_THIRDPARTYHOSTED)
+      continue;
+    if (capnp_getp(&desc, 0, &tpcd) != CAPNP_OK || tpcd.kind != CAPNP_PK_STRUCT)
+      continue;
+    if (capnp_getp(&tpcd, 0, &id) != CAPNP_OK || id.kind != CAPNP_PK_STRUCT)
+      continue;
+    if (capnp_getp(&id, 0, &vat) != CAPNP_OK || vat.kind != CAPNP_PK_STRUCT)
+      continue;
+    if (capnp_get_text(&vat, 0, &host, &host_len) != CAPNP_OK || host == NULL)
+      continue;
+    /* A host that will not fit is refused rather than truncated: a
+     * truncated address names a different vat. */
+    if (host_len >= CAPNP_RPC_MAX_HOST)
+      continue;
+
+    for (j = 0; j < CAPNP_RPC_MAX_INTRODUCTIONS; j++) {
+      if (c->introductions[j].used)
+        continue;
+      c->introductions[j].used = 1;
+      c->introductions[j].nonce = capnp_get_u64(&id, TPCID_NONCE_OFF, 0);
+      c->introductions[j].vine_id = capnp_get_u32(&tpcd, TPCD_VINEID_OFF, 0);
+      c->introductions[j].port = (uint16_t)capnp_get_u16(&vat, VATID_PORT_OFF, 0);
+      memcpy(c->introductions[j].host, host, host_len);
+      c->introductions[j].host[host_len] = '\0';
+      break;
+    }
+  }
+}
+
+int capnp_rpc_pending_introductions(capnp_rpc_conn_t *c,
+                                    capnp_rpc_introduction_t *out, int cap)
+{
+  int i, n = 0;
+  for (i = 0; i < CAPNP_RPC_MAX_INTRODUCTIONS; i++) {
+    if (!c->introductions[i].used)
+      continue;
+    if (out != NULL && n < cap)
+      out[n] = c->introductions[i];
+    n++;
+  }
+  return n;
+}
+
+int capnp_rpc_introduction_done(capnp_rpc_conn_t *c, uint64_t nonce)
+{
+  int i;
+  for (i = 0; i < CAPNP_RPC_MAX_INTRODUCTIONS; i++) {
+    if (!c->introductions[i].used || c->introductions[i].nonce != nonce)
+      continue;
+    /* Releasing the vine is what tells the introducer it may close the
+     * Provide it opened on our behalf. */
+    capnp_rpc_send_release(c, c->introductions[i].vine_id, 1);
+    memset(&c->introductions[i], 0, sizeof c->introductions[i]);
+    return 0;
+  }
+  return -1;
+}
+
+int capnp_rpc_write_third_party_cap(capnp_rpc_conn_t *c, capnp_bptr_t *cd,
+                                    const char *host, uint16_t port,
+                                    uint64_t nonce, uint32_t vine_id)
+{
+  capnp_bptr_t slot, tpcd, id, vat;
+
+  (void)c;
+  if (cd == NULL || host == NULL)
+    return CAPNP_ERR_ARG;
+  if (capnp_builder_set_u16(cd, CAPDESC_TAG_OFF, CAPDESC_TAG_THIRDPARTYHOSTED))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_slot(cd, CAPDESC_DW, 0, &slot))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_struct(&slot, TPCD_DW, TPCD_PW, &tpcd))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_set_u32(&tpcd, TPCD_VINEID_OFF, vine_id))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_slot(&tpcd, TPCD_DW, 0, &slot))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_struct(&slot, TPCID_DW, TPCID_PW, &id))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_set_u64(&id, TPCID_NONCE_OFF, nonce))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_slot(&id, TPCID_DW, 0, &slot))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_struct(&slot, VATID_DW, VATID_PW, &vat))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_set_text(&vat, VATID_DW, 0, host, strlen(host)))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_set_u16(&vat, VATID_PORT_OFF, port))
+    return CAPNP_ERR_ALLOC;
+  return CAPNP_OK;
+}
+
 static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
 {
   capnp_builder_t b;
@@ -411,8 +545,10 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
     return send_return_exception(c, qid, "no such export");
 
   memset(&params, 0, sizeof params);
-  if (capnp_getp(call, 1, &params_payload) == CAPNP_OK)
+  if (capnp_getp(call, 1, &params_payload) == CAPNP_OK) {
     (void)capnp_getp(&params_payload, 0, &params);
+    note_introductions(c, &params_payload);
+  }
 
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
@@ -839,6 +975,11 @@ static void handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
     return;
   q->answered = 1;
   q->failed = capnp_get_u16(ret, RETURN_TAG_OFF, 0) != RETURN_TAG_RESULTS;
+  if (!q->failed) {
+    capnp_ptr_t results;
+    if (capnp_getp(ret, 0, &results) == CAPNP_OK)
+      note_introductions(c, &results);
+  }
   memcpy(q->reply, frame, len);
   q->reply_len = len;
 }
