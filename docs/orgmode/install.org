@@ -73,8 +73,8 @@ Lists come from a decoded message, such as the shipped =capnp encode= golden:
               (capnp/root (capnp/message-from-buffer
                             (slurp "test/fixtures/addressbook_alice_bob.bin")))
               0))
-(print (capnp/list-len people))                        # 2
-(print (capnp/get-text (capnp/list-getp people 0) 0))  # Alice
+(print (length people))                 # 2
+(print (:text (in people 0) 0))         # Alice
 #+end_src
 
 Embedders that amalgamate Janet call =capnp_janet_register(env)= after

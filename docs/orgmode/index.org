@@ -37,15 +37,24 @@ of =[kind byte-offset value]= fields:
 #+end_src
 
 Lists come out of a decoded message, such as the shipped =capnp encode=
-golden:
+golden. A list pointer carries Janet's =length=, index and iteration
+protocols, so it answers to the same forms as an array:
 
 #+begin_src janet
-(def root (capnp/root (capnp/message-from-buffer
-                        (slurp "test/fixtures/addressbook_alice_bob.bin"))))
-(def people (capnp/getp root 0))
-(print (capnp/list-len people))       # 2
-(print (capnp/get-text (capnp/list-getp people 0) 0)) # Alice
+(def msg (capnp/message-from-buffer
+           (slurp "test/fixtures/addressbook_alice_bob.bin")))
+(def people (capnp/getp (:root msg) 0))
+
+(length people)                       # 2
+(:text (in people 0) 0)               # "Alice"
+(map |(string (:text $ 0)) people)    # @["Alice" "Bob"]
+(each p people (print (:u32 p 0)))
 #+end_src
+
+=(:verb receiver ...)= reaches the same accessors as the =capnp/=
+functions: =:kind=, =:ptr=, =:u16=, =:u32=, =:u64=, =:f64=, =:bool=,
+=:text=, and =:text-at= for an element of a =List(Text)=. A message
+answers to =:root=.
 
 C embed (no Janet VM):
 

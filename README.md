@@ -156,20 +156,32 @@ it back. `build-message` takes an array of `[kind byte-offset value]` fields:
 (print (capnp/get-text root 0))      # hello
 ```
 
-Lists come out of a decoded message. Reading the AddressBook golden that
-`capnp encode` produced:
+Lists come out of a decoded message. A list pointer carries Janet's
+`length`, index and iteration protocols, so it answers to the same forms
+as an array rather than to a parallel set of functions:
 
 ```janet
 (import capnp)
 
-(def root (capnp/root (capnp/message-from-buffer
-                        (slurp "test/fixtures/addressbook_alice_bob.bin"))))
-(def people (capnp/getp root 0))
-(print (capnp/list-len people))                    # 2
-(def alice (capnp/list-getp people 0))
-(print (capnp/get-u32 alice 0))                    # 123
-(print (capnp/get-text alice 0))                   # Alice
+(def msg (capnp/message-from-buffer
+           (slurp "test/fixtures/addressbook_alice_bob.bin")))
+(def people (capnp/getp (:root msg) 0))
+
+(length people)                       # 2
+(:text (in people 0) 0)               # "Alice"
+(:u32 (people 1) 0)                   # 456
+(get people 99)                       # nil
+
+(map |(string (:text $ 0)) people)    # @["Alice" "Bob"]
+(seq [p :in people] (:u32 p 0))       # @[123 456]
+(each p people (print (:text p 0)))
 ```
+
+`(:verb receiver ...)` reaches the same accessors as the `capnp/` functions:
+`:kind`, `:ptr`, `:u16`, `:u32`, `:u64`, `:f64`, `:bool`, `:text`, and
+`:text-at` for an element of a `List(Text)`. A message answers to `:root`.
+The long forms (`capnp/get-u32`, `capnp/list-len`, `capnp/list-getp`, …)
+remain and behave identically.
 
 Embedders that amalgamate Janet call `capnp_janet_register(env)` after
 `janet_init` (see `src/janet_mod.c`).

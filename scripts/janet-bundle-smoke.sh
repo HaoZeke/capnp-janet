@@ -61,4 +61,39 @@ janet -e '
 (assert (= "Alice" (string (capnp/get-text alice 0))) "golden Alice name")
 (print "capnp encode golden decodes ok")'
 
+# The abstract types carry get/next/length/tostring, so a message and a
+# pointer answer to the same forms as a built-in structure. Without those
+# slots every one of these raises, and callers fall back to the
+# capnp/list-* functions.
+janet -e '
+(import capnp)
+(def msg (capnp/message-from-buffer
+           (slurp "test/fixtures/addressbook_alice_bob.bin")))
+(def root (:root msg))
+(assert (= :struct (capnp/kind root)) "method call on a message")
+(def people (capnp/getp root 0))
+(assert (= 2 (length people)) "length protocol")
+(assert (= "Alice" (string (:text (in people 0) 0))) "index protocol")
+(assert (= "Bob" (string (:text (people 1) 0))) "call-as-index protocol")
+(assert (nil? (get people 99)) "out-of-range reads nil")
+(assert (deep= @["Alice" "Bob"] (map |(string (:text $ 0)) people))
+        "map over a list pointer")
+(assert (deep= @[123 456] (seq [p :in people] (:u32 p 0)))
+        "seq over a list pointer")
+(var n 0)
+(each p people (set n (+ n 1)) (assert (= :struct (capnp/kind p)) "each element"))
+(assert (= 2 n) "each visited every element")
+(assert (string/find "list 2" (string people)) "tostring shows the length")
+(print "sequence and method protocols ok")'
+
+# build-message accepts any indexed value, so a tuple literal works and
+# callers are not forced into @[...] for a constant field list.
+janet -e '
+(import capnp)
+(def buf (capnp/build-message 1 1 [[:u32 0 7] [:text 0 "tuple"]]))
+(def root (:root (capnp/message-from-buffer buf)))
+(assert (= 7 (:u32 root 0)) "tuple-literal build-message u32")
+(assert (= "tuple" (string (:text root 0))) "tuple-literal build-message text")
+(print "tuple-literal build-message ok")'
+
 echo "ok janet-bundle-smoke"

@@ -5,6 +5,7 @@
 #include <capnp-janet/capnp_message.h>
 
 #include <janet.h>
+#include <stdio.h>
 #include <string.h>
 
 typedef struct {
@@ -40,16 +41,46 @@ static int ptr_gcmark(void *p, size_t len) {
   return 0;
 }
 
+/* Protocol hooks, so a message and a pointer behave like built-in data
+ * structures: (:root msg), (length people), (in people 0) and every
+ * iteration form that rests on next. Defined below the CFUNs they
+ * dispatch to. */
+static int msg_get(void *p, Janet key, Janet *out);
+static void msg_tostring(void *p, JanetBuffer *buffer);
+static int ptr_get(void *p, Janet key, Janet *out);
+static Janet ptr_next(void *p, Janet key);
+static size_t ptr_length(void *p, size_t len);
+static void ptr_tostring(void *p, JanetBuffer *buffer);
+
 static const JanetAbstractType msg_type = {
     .name = "capnp/message",
     .gc = msg_gc,
     .gcmark = msg_gcmark,
+    .get = msg_get,
+    .tostring = msg_tostring,
 };
 
 static const JanetAbstractType ptr_type = {
     .name = "capnp/ptr",
     .gcmark = ptr_gcmark,
+    .get = ptr_get,
+    .tostring = ptr_tostring,
+    .next = ptr_next,
+    .length = ptr_length,
 };
+
+static const char *ptr_kind_name(const capnp_ptr_t *p) {
+  switch (p->kind) {
+  case CAPNP_PK_STRUCT:
+    return "struct";
+  case CAPNP_PK_LIST:
+    return "list";
+  case CAPNP_PK_CAP:
+    return "cap";
+  default:
+    return "null";
+  }
+}
 
 static Janet make_ptr(Janet msg_abs, const capnp_ptr_t *p) {
   capnp_ptr_wrap *w = janet_abstract(&ptr_type, sizeof(capnp_ptr_wrap));
@@ -103,21 +134,7 @@ static Janet cfun_root(int32_t argc, Janet *argv) {
 static Janet cfun_kind(int32_t argc, Janet *argv) {
   janet_fixarity(argc, 1);
   capnp_ptr_wrap *p = get_ptr(argv, 0);
-  const char *k = "null";
-  switch (p->ptr.kind) {
-  case CAPNP_PK_STRUCT:
-    k = "struct";
-    break;
-  case CAPNP_PK_LIST:
-    k = "list";
-    break;
-  case CAPNP_PK_CAP:
-    k = "cap";
-    break;
-  default:
-    break;
-  }
-  return janet_ckeywordv(k);
+  return janet_ckeywordv(ptr_kind_name(&p->ptr));
 }
 
 static Janet cfun_getp(int32_t argc, Janet *argv) {
@@ -229,7 +246,7 @@ static Janet cfun_build_message(int32_t argc, Janet *argv) {
   int32_t pwords = janet_getinteger(argv, 1);
   if (dwords < 0 || dwords > 0xffff || pwords < 0 || pwords > 0xffff)
     janet_panic("capnp/build-message: bad dwords/pwords");
-  JanetArray *fields = janet_getarray(argv, 2);
+  JanetView fields = janet_getindexed(argv, 2);
 
   capnp_builder_t b;
   capnp_builder_init(&b);
@@ -240,11 +257,11 @@ static Janet cfun_build_message(int32_t argc, Janet *argv) {
     janet_panic("capnp/build-message: struct alloc failed");
   }
 
-  for (int32_t i = 0; i < fields->count; i++) {
-    if (!janet_checktype(fields->data[i], JANET_TUPLE))
-      janet_panicf("capnp/build-message: field %d must be tuple", i);
-    const Janet *tup = janet_unwrap_tuple(fields->data[i]);
-    int32_t tlen = janet_tuple_length(tup);
+  for (int32_t i = 0; i < fields.len; i++) {
+    const Janet *tup;
+    int32_t tlen;
+    if (!janet_indexed_view(fields.items[i], &tup, &tlen))
+      janet_panicf("capnp/build-message: field %d must be indexed", i);
     if (tlen < 3)
       janet_panicf("capnp/build-message: field %d needs [kind off val]", i);
     if (!janet_checktype(tup[0], JANET_KEYWORD))
@@ -311,6 +328,96 @@ static Janet cfun_build_message(int32_t argc, Janet *argv) {
   janet_buffer_push_bytes(out, flat, (int32_t)flat_len);
   free(flat);
   return janet_wrap_buffer(out);
+}
+
+/* Method tables back the (:verb receiver ...) call form. The receiver is
+ * already argv[0] of each CFUN, so they need no wrappers. */
+static const JanetMethod msg_methods[] = {
+    {"root", cfun_root},
+    {NULL, NULL},
+};
+
+static const JanetMethod ptr_methods[] = {
+    {"kind", cfun_kind},
+    {"ptr", cfun_getp},
+    {"u16", cfun_get_u16},
+    {"u32", cfun_get_u32},
+    {"u64", cfun_get_u64},
+    {"f64", cfun_get_f64},
+    {"bool", cfun_get_bool},
+    {"text", cfun_get_text},
+    {"text-at", cfun_list_get_text},
+    {NULL, NULL},
+};
+
+static int msg_get(void *p, Janet key, Janet *out) {
+  (void)p;
+  if (!janet_checktype(key, JANET_KEYWORD))
+    return 0;
+  return janet_getmethod(janet_unwrap_keyword(key), msg_methods, out);
+}
+
+static void msg_tostring(void *p, JanetBuffer *buffer) {
+  capnp_msg_wrap *w = (capnp_msg_wrap *)p;
+  janet_buffer_push_cstring(buffer, w->view_buf ? "view" : "owned");
+}
+
+/* Keyword keys dispatch methods; an integer key indexes a list, which is
+ * what makes (in lst i), (each x lst ...) and the rest of the sequence
+ * forms work without a wrapper layer in Janet. */
+static int ptr_get(void *p, Janet key, Janet *out) {
+  capnp_ptr_wrap *w = (capnp_ptr_wrap *)p;
+  if (janet_checktype(key, JANET_KEYWORD))
+    return janet_getmethod(janet_unwrap_keyword(key), ptr_methods, out);
+  if (!janet_checktype(key, JANET_NUMBER))
+    return 0;
+  if (w->ptr.kind != CAPNP_PK_LIST)
+    janet_panicf("capnp/ptr: cannot index a %s, only a list",
+                 ptr_kind_name(&w->ptr));
+  int32_t i = (int32_t)janet_unwrap_number(key);
+  int32_t n = (int32_t)capnp_list_len(&w->ptr);
+  if (i < 0 || i >= n)
+    return 0; /* out of range reads as nil, as for a Janet array */
+  capnp_ptr_t el;
+  if (capnp_list_getp(&w->ptr, (uint32_t)i, &el) != CAPNP_OK)
+    janet_panicf("capnp/ptr: element %d unreadable", (int)i);
+  *out = make_ptr(w->message_abs, &el);
+  return 1;
+}
+
+static Janet ptr_next(void *p, Janet key) {
+  capnp_ptr_wrap *w = (capnp_ptr_wrap *)p;
+  /* A non-list has no elements to walk, so iteration exposes the method
+   * table instead, matching how Janet's own abstract types behave. */
+  if (w->ptr.kind != CAPNP_PK_LIST)
+    return janet_nextmethod(ptr_methods, key);
+  int32_t n = (int32_t)capnp_list_len(&w->ptr);
+  if (janet_checktype(key, JANET_NIL))
+    return n > 0 ? janet_wrap_number(0) : janet_wrap_nil();
+  if (!janet_checktype(key, JANET_NUMBER))
+    return janet_wrap_nil();
+  int32_t i = (int32_t)janet_unwrap_number(key) + 1;
+  return i < n ? janet_wrap_number(i) : janet_wrap_nil();
+}
+
+static size_t ptr_length(void *p, size_t len) {
+  (void)len;
+  capnp_ptr_wrap *w = (capnp_ptr_wrap *)p;
+  if (w->ptr.kind != CAPNP_PK_LIST)
+    janet_panicf("capnp/ptr: length needs a list, got a %s",
+                 ptr_kind_name(&w->ptr));
+  return (size_t)capnp_list_len(&w->ptr);
+}
+
+static void ptr_tostring(void *p, JanetBuffer *buffer) {
+  capnp_ptr_wrap *w = (capnp_ptr_wrap *)p;
+  if (w->ptr.kind == CAPNP_PK_LIST) {
+    char tmp[48];
+    snprintf(tmp, sizeof tmp, "list %u", (unsigned)capnp_list_len(&w->ptr));
+    janet_buffer_push_cstring(buffer, tmp);
+  } else {
+    janet_buffer_push_cstring(buffer, ptr_kind_name(&w->ptr));
+  }
 }
 
 static const JanetReg capnp_cfuns[] = {
