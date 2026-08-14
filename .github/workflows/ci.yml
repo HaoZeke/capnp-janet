@@ -16,3 +16,26 @@ jobs:
       - run: pixi run configure
       - run: pixi run build
       - run: pixi run test
+      # test_codegen.sh exits 0 when the capnp CLI is missing. capnproto is a
+      # default-environment dependency so that skip means a real failure.
+      - name: codegen test ran rather than skipped
+        run: pixi run -- capnp --version
+
+  janet:
+    name: janet module
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.8.3
+        with:
+          environments: janet
+      # The meson C tests never load the Janet module, so the CFUN
+      # registration is only covered by installing the bundle the way
+      # janet-lang/pkgs consumers do.
+      - name: bundle install and API smoke
+        run: pixi run -e janet -- bash scripts/janet-bundle-smoke.sh
+      - name: meson build with the Janet module enabled
+        run: |
+          pixi run -e janet -- meson setup build-janet -Djanet=enabled
+          pixi run -e janet -- meson compile -C build-janet
+          test -f build-janet/capnp.so

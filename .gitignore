@@ -2,6 +2,9 @@
 /build-*/
 /.pixi/
 /dist/
+# jpm / declare-cc object cache
+/_build/
+/jpm_tree/
 *.o
 *.a
 *.so

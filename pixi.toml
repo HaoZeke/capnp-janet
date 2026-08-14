@@ -9,9 +9,12 @@ c-compiler = "*"
 meson = ">=1.4"
 ninja = "*"
 pkg-config = "*"
+# test/test_codegen.sh drives capnpc-janet through the capnp CLI, and skips
+# itself when the CLI is absent. Keep it here so the skip never fires in CI.
+capnproto = ">=1.0"
 
 [feature.janet.dependencies]
-# janet package on conda-forge when available; otherwise system janet
+janet = ">=1.36"
 pkg-config = "*"
 
 [feature.docs]
