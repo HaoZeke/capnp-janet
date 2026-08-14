@@ -1,0 +1,13 @@
+prefix=@prefix@
+exec_prefix=@exec_prefix@
+libdir=@libdir@
+bindir=@bindir@
+includedir=@includedir@
+codegen=${bindir}/capnpc-janet
+
+Name: capnp-janet
+Description: Native Cap'n Proto runtime for Janet (and C embedders)
+URL: https://capnp-janet.rgoswami.me
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lcapnp_janet
+Cflags: -I${includedir}

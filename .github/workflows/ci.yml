@@ -44,3 +44,16 @@ jobs:
           pixi run -e janet -- meson setup build-janet -Djanet=enabled
           pixi run -e janet -- meson compile -C build-janet
           test -f build-janet/capnp.so
+
+  packaging:
+    name: downstream consumption
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.8.3
+        with:
+          environments: default
+      # Install rules that nothing exercises are how a broken Config.cmake
+      # or a stale .pc reaches users. This builds a consumer four ways.
+      - name: CMake, find_package, pkg-config and meson subproject
+        run: pixi run -- bash scripts/packaging-smoke.sh
