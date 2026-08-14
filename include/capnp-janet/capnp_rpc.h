@@ -28,6 +28,8 @@ extern "C" {
 #endif
 
 #define CAPNP_RPC_MAX_EXPORTS 64
+#define CAPNP_RPC_MAX_ANSWERS 64
+#define CAPNP_RPC_MAX_ANSWER_BYTES 8192
 #define CAPNP_RPC_MAX_JOINS 8
 #define CAPNP_RPC_MAX_JOIN_PARTS 16
 
@@ -59,6 +61,19 @@ typedef int (*capnp_rpc_dispatch_fn)(void *server, uint64_t interface_id,
 /* Send one framed message to the peer. Return 0 on success. */
 typedef int (*capnp_rpc_send_fn)(void *ctx, const uint8_t *data, size_t len);
 
+/* A Return already sent, kept until the peer sends `Finish`.
+ *
+ * Promise pipelining is the reason: a caller may address a capability
+ * inside an answer before it has seen the answer, so the answer has to
+ * still be here when the pipelined call arrives.
+ */
+typedef struct capnp_rpc_answer {
+  int used;
+  uint32_t question_id;
+  uint8_t frame[CAPNP_RPC_MAX_ANSWER_BYTES];
+  size_t len;
+} capnp_rpc_answer_t;
+
 typedef struct capnp_rpc_export {
   int used;
   int refcount;
@@ -86,6 +101,7 @@ typedef struct capnp_rpc_join {
 
 typedef struct capnp_rpc_conn {
   capnp_rpc_export_t exports[CAPNP_RPC_MAX_EXPORTS];
+  capnp_rpc_answer_t answers[CAPNP_RPC_MAX_ANSWERS];
   capnp_rpc_join_t joins[CAPNP_RPC_MAX_JOINS];
   void *bootstrap;
   capnp_rpc_dispatch_fn bootstrap_dispatch;

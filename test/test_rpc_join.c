@@ -137,6 +137,133 @@ static join_reply_t read_join_reply(const uint8_t *data, size_t len)
   return out;
 }
 
+
+/* rpc.capnp shapes for the L1 messages. */
+#define PROMISED_ANSWER_DW 1
+#define PROMISED_ANSWER_PW 1
+#define PA_OP_DW 1
+#define PA_OP_PW 0
+#define CALL_DW 3
+#define CALL_PW 3
+#define FINISH_DW 1
+#define FINISH_PW 0
+#define DIS_DW 1
+#define DIS_PW 1
+
+/* A call whose target is `promisedAnswer`: the answer to
+ * `answer_qid`, optionally walked by getPointerField ops. */
+static void send_pipelined_call(capnp_rpc_conn_t *c, uint32_t qid,
+                                uint32_t answer_qid, const uint16_t *ops,
+                                uint32_t nops)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, call, target, pa, op;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  uint32_t i;
+
+  capnp_builder_init(&b);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  CHECK(capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK, "msg");
+  CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_CALL) == CAPNP_OK, "call tag");
+  CHECK(capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot) == CAPNP_OK, "msg slot");
+  CHECK(capnp_builder_struct(&slot, CALL_DW, CALL_PW, &call) == CAPNP_OK, "call");
+  CHECK(capnp_builder_set_u32(&call, 0, qid) == CAPNP_OK, "call qid");
+
+  CHECK(capnp_builder_slot(&call, CALL_DW, 0, &slot) == CAPNP_OK, "target slot");
+  CHECK(capnp_builder_struct(&slot, TARGET_DW, TARGET_PW, &target) == CAPNP_OK, "target");
+  CHECK(capnp_builder_set_u16(&target, 4, 1) == CAPNP_OK, "promisedAnswer tag");
+  CHECK(capnp_builder_slot(&target, TARGET_DW, 0, &slot) == CAPNP_OK, "pa slot");
+  CHECK(capnp_builder_struct(&slot, PROMISED_ANSWER_DW, PROMISED_ANSWER_PW, &pa) == CAPNP_OK, "pa");
+  CHECK(capnp_builder_set_u32(&pa, 0, answer_qid) == CAPNP_OK, "pa qid");
+  if (nops > 0) {
+    CHECK(capnp_builder_set_list_struct(&pa, PROMISED_ANSWER_DW, 0, nops,
+                                        PA_OP_DW, PA_OP_PW, &op) == CAPNP_OK, "ops");
+    for (i = 0; i < nops; i++) {
+      capnp_bptr_t e = op;
+      e.word += (size_t)i * (PA_OP_DW + PA_OP_PW);
+      CHECK(capnp_builder_set_u16(&e, 0, 1) == CAPNP_OK, "op tag");
+      CHECK(capnp_builder_set_u16(&e, 2, ops[i]) == CAPNP_OK, "op field");
+    }
+  }
+
+  CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
+  capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+}
+
+static void send_finish(capnp_rpc_conn_t *c, uint32_t qid)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, fin;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  capnp_builder_init(&b);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  CHECK(capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK, "msg");
+  CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_FINISH) == CAPNP_OK, "finish tag");
+  CHECK(capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot) == CAPNP_OK, "slot");
+  CHECK(capnp_builder_struct(&slot, FINISH_DW, FINISH_PW, &fin) == CAPNP_OK, "finish");
+  CHECK(capnp_builder_set_u32(&fin, 0, qid) == CAPNP_OK, "finish qid");
+  CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
+  CHECK(capnp_rpc_handle(c, flat, len) == CAPNP_OK, "handle finish");
+  free(flat);
+  capnp_builder_free(&b);
+}
+
+static void send_disembargo(capnp_rpc_conn_t *c, uint16_t which, uint32_t id)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, dis, target;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  capnp_builder_init(&b);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  CHECK(capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK, "msg");
+  CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_DISEMBARGO) == CAPNP_OK, "dis tag");
+  CHECK(capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot) == CAPNP_OK, "slot");
+  CHECK(capnp_builder_struct(&slot, DIS_DW, DIS_PW, &dis) == CAPNP_OK, "dis");
+  CHECK(capnp_builder_slot(&dis, DIS_DW, 0, &slot) == CAPNP_OK, "dis target slot");
+  CHECK(capnp_builder_struct(&slot, TARGET_DW, TARGET_PW, &target) == CAPNP_OK, "dis target");
+  CHECK(capnp_builder_set_u16(&target, 4, 0) == CAPNP_OK, "importedCap");
+  CHECK(capnp_builder_set_u32(&target, 0, 0) == CAPNP_OK, "export 0");
+  /* `context` is a group: it shares Disembargo's data section. */
+  CHECK(capnp_builder_set_u16(&dis, 4, which) == CAPNP_OK, "ctx tag");
+  CHECK(capnp_builder_set_u32(&dis, 0, id) == CAPNP_OK, "ctx id");
+  CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
+  CHECK(capnp_rpc_handle(c, flat, len) == CAPNP_OK, "handle disembargo");
+  free(flat);
+  capnp_builder_free(&b);
+}
+
+/* Return union tag and, for results, the first u32 of the content. */
+typedef struct {
+  uint32_t answer_id;
+  uint16_t which;
+  uint32_t value;
+} return_info_t;
+
+static return_info_t read_return(const uint8_t *data, size_t len)
+{
+  capnp_message_t m;
+  capnp_ptr_t root, ret, payload, content;
+  return_info_t out;
+  memset(&out, 0, sizeof out);
+  CHECK(capnp_message_from_flat(&m, data, len) == CAPNP_OK, "from_flat");
+  CHECK(capnp_root(&m, &root) == CAPNP_OK, "root");
+  CHECK(capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_RETURN, "is return");
+  CHECK(capnp_getp(&root, 0, &ret) == CAPNP_OK, "ret");
+  out.answer_id = capnp_get_u32(&ret, 0, 0);
+  out.which = capnp_get_u16(&ret, 6, 0);
+  if (out.which == 0 && capnp_getp(&ret, 0, &payload) == CAPNP_OK &&
+      capnp_getp(&payload, 0, &content) == CAPNP_OK &&
+      content.kind == CAPNP_PK_STRUCT)
+    out.value = capnp_get_u32(&content, 0, 0);
+  capnp_message_free(&m);
+  return out;
+}
+
 /* Bootstrap once so the vat holds a live export (id 0). */
 static void bootstrap_once(capnp_rpc_conn_t *c, outbox_t *o)
 {
@@ -228,6 +355,62 @@ int main(void)
     CHECK(!a.succeeded, "!a.succeeded");
   }
   outbox_clear(&out);
+
+
+  /* Promise pipelining: a call addressed to an answer reaches the
+   * capability inside it. */
+  send_pipelined_call(&c, 2, 1, NULL, 0);
+  CHECK(out.n == 1, "pipelined call answered");
+  {
+    return_info_t r = read_return(out.data[0], out.len[0]);
+    CHECK(r.answer_id == 2, "pipelined answerId");
+    CHECK(r.which == 0, "pipelined returned results");
+    CHECK(r.value == 1, "pipelined call reached the server");
+  }
+  outbox_clear(&out);
+
+  /* A transform op that walks past the capability does not resolve. */
+  {
+    uint16_t ops[1];
+    ops[0] = 0;
+    send_pipelined_call(&c, 3, 1, ops, 1);
+    CHECK(out.n == 1, "walked-past call answered");
+    {
+      return_info_t r = read_return(out.data[0], out.len[0]);
+      CHECK(r.which != 0, "walking past the cap does not resolve");
+    }
+    outbox_clear(&out);
+  }
+
+  /* Finish drops the answer, so later pipelining fails. */
+  send_finish(&c, 1);
+  send_pipelined_call(&c, 4, 1, NULL, 0);
+  CHECK(out.n == 1, "post-finish call answered");
+  {
+    return_info_t r = read_return(out.data[0], out.len[0]);
+    CHECK(r.which != 0, "the answer it named is gone");
+  }
+  outbox_clear(&out);
+
+  /* Disembargo: senderLoopback is echoed as receiverLoopback. */
+  send_disembargo(&c, 0, 12345);
+  CHECK(out.n == 1, "disembargo echoed");
+  {
+    capnp_message_t m;
+    capnp_ptr_t root, dis;
+    CHECK(capnp_message_from_flat(&m, out.data[0], out.len[0]) == CAPNP_OK, "reply");
+    CHECK(capnp_root(&m, &root) == CAPNP_OK, "reply root");
+    CHECK(capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_DISEMBARGO, "is disembargo");
+    CHECK(capnp_getp(&root, 0, &dis) == CAPNP_OK, "dis body");
+    CHECK(capnp_get_u16(&dis, 4, 0) == 1, "receiverLoopback");
+    CHECK(capnp_get_u32(&dis, 0, 0) == 12345, "same id echoed");
+    capnp_message_free(&m);
+  }
+  outbox_clear(&out);
+
+  /* receiverLoopback is absorbed: echoing it would bounce forever. */
+  send_disembargo(&c, 1, 999);
+  CHECK(out.n == 0, "receiverLoopback absorbed");
 
   if (g_failures != 0) {
     fprintf(stderr, "%d failure(s)\n", g_failures);

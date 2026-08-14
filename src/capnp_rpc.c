@@ -10,6 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
+/* Defined below, beside the rest of the answer table. */
+static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
+
 /* rpc.capnp struct shapes: data words, pointer words. */
 #define MESSAGE_DW 1
 #define MESSAGE_PW 1
@@ -28,6 +31,12 @@
 #define RETURN_ANSWERID_OFF 0
 #define RETURN_TAG_OFF 6
 #define RETURN_TAG_RESULTS 0
+#define RETURN_TAG_EXCEPTION 1
+/* Exception: reason @ptr0, type @0 (u16 enum). */
+#define EXCEPTION_DW 1
+#define EXCEPTION_PW 2
+#define EXCEPTION_TYPE_OFF 0
+#define EXCEPTION_TYPE_FAILED 0
 /* MessageTarget: importedCap @0 (u32), union tag at byte 4. */
 #define TARGET_IMPORTEDCAP_OFF 0
 #define TARGET_TAG_OFF 4
@@ -43,6 +52,22 @@
 #define JKP_JOINID_OFF 0
 #define JKP_PARTCOUNT_OFF 4
 #define JKP_PARTNUM_OFF 6
+/* PromisedAnswer: questionId @0 (u32), transform @ptr0.
+ * PromisedAnswer.Op: union tag @0 (u16), getPointerField @2 (u16). */
+#define PA_QUESTIONID_OFF 0
+#define PA_OP_TAG_OFF 0
+#define PA_OP_GETPTRFIELD_OFF 2
+#define PA_OP_TAG_GETPTRFIELD 1
+/* Disembargo: target @ptr0; context is a group sharing the data section,
+ * union tag @4 (u16), the loopback id @0 (u32). */
+#define DIS_CTX_TAG_OFF 4
+#define DIS_CTX_VALUE_OFF 0
+#define DIS_CTX_SENDER_LOOPBACK 0
+#define DIS_CTX_RECEIVER_LOOPBACK 1
+#define DISEMBARGO_DW 1
+#define DISEMBARGO_PW 1
+/* MessageTarget union tags. */
+#define TARGET_TAG_PROMISEDANSWER 1
 /* JoinResult: joinId @0 (u32), succeeded @32 (bit). */
 #define JR_JOINID_OFF 0
 #define JR_SUCCEEDED_BIT 32
@@ -88,17 +113,104 @@ int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
 /* Resolve a MessageTarget to a local export index, or -1 when it names
  * nothing this vat hosts. Shared by Call and Join, which address
  * capabilities the same way. */
+static int resolve_promised_answer(capnp_rpc_conn_t *c,
+                                   const capnp_ptr_t *promised);
+
 static int resolve_target(capnp_rpc_conn_t *c, const capnp_ptr_t *target)
 {
   uint32_t id;
+  uint16_t which;
   if (target->kind != CAPNP_PK_STRUCT)
     return -1;
-  if (capnp_get_u16(target, TARGET_TAG_OFF, 0) != TARGET_TAG_IMPORTEDCAP)
+  which = capnp_get_u16(target, TARGET_TAG_OFF, 0);
+  if (which == TARGET_TAG_PROMISEDANSWER) {
+    capnp_ptr_t pa;
+    if (capnp_getp(target, 0, &pa) != CAPNP_OK)
+      return -1;
+    return resolve_promised_answer(c, &pa);
+  }
+  if (which != TARGET_TAG_IMPORTEDCAP)
     return -1;
   id = capnp_get_u32(target, TARGET_IMPORTEDCAP_OFF, 0);
   if (id >= CAPNP_RPC_MAX_EXPORTS)
     return -1;
   return c->exports[id].used ? (int)id : -1;
+}
+
+/* Promise pipelining: the caller addressed a capability inside an answer,
+ * identified by walking the transform ops into that answer's results and
+ * reading the capTable entry the resulting pointer names. */
+static int resolve_promised_answer(capnp_rpc_conn_t *c,
+                                   const capnp_ptr_t *promised)
+{
+  capnp_rpc_answer_t *a;
+  capnp_message_t stored;
+  capnp_ptr_t root, ret, payload, cursor, table, desc, ops;
+  uint32_t qid;
+  int i, n, eid = -1;
+
+  if (promised->kind != CAPNP_PK_STRUCT)
+    return -1;
+  qid = capnp_get_u32(promised, PA_QUESTIONID_OFF, 0);
+  a = answer_find(c, qid);
+  if (a == NULL)
+    return -1;
+  if (capnp_message_from_flat(&stored, a->frame, a->len) != CAPNP_OK)
+    return -1;
+
+  if (capnp_root(&stored, &root) != CAPNP_OK)
+    goto out;
+  if (capnp_get_u16(&root, MESSAGE_TAG_OFF, 0) != CAPNP_RPC_MSG_RETURN)
+    goto out;
+  if (capnp_getp(&root, 0, &ret) != CAPNP_OK)
+    goto out;
+  if (capnp_get_u16(&ret, RETURN_TAG_OFF, 0) != RETURN_TAG_RESULTS)
+    goto out;
+  if (capnp_getp(&ret, 0, &payload) != CAPNP_OK)
+    goto out;
+  if (capnp_getp(&payload, 0, &cursor) != CAPNP_OK)
+    goto out;
+
+  if (capnp_getp(promised, 0, &ops) == CAPNP_OK) {
+    n = (int)capnp_list_len(&ops);
+    for (i = 0; i < n; i++) {
+      capnp_ptr_t op, next;
+      if (capnp_list_get_struct(&ops, (uint32_t)i, &op) != CAPNP_OK)
+        goto out;
+      if (capnp_get_u16(&op, PA_OP_TAG_OFF, 0) != PA_OP_TAG_GETPTRFIELD)
+        continue;
+      /* The peer chooses the transform, so a step into something with no
+       * pointer section is an unresolvable target, not a fault. */
+      if (cursor.kind != CAPNP_PK_STRUCT)
+        goto out;
+      if (capnp_getp(&cursor, capnp_get_u16(&op, PA_OP_GETPTRFIELD_OFF, 0),
+                     &next) != CAPNP_OK)
+        goto out;
+      cursor = next;
+    }
+  }
+
+  if (cursor.kind != CAPNP_PK_CAP)
+    goto out;
+  /* The pointer holds a capTable index; the descriptor beside it says
+   * which export the caller is naming. */
+  if (capnp_getp(&payload, 1, &table) != CAPNP_OK)
+    goto out;
+  if (cursor.count >= capnp_list_len(&table))
+    goto out;
+  if (capnp_list_get_struct(&table, cursor.count, &desc) != CAPNP_OK)
+    goto out;
+  if (capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0) != CAPDESC_TAG_SENDERHOSTED)
+    goto out;
+  {
+    uint32_t id = capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0);
+    if (id < CAPNP_RPC_MAX_EXPORTS && c->exports[id].used)
+      eid = (int)id;
+  }
+
+out:
+  capnp_message_free(&stored);
+  return eid;
 }
 
 /* Start a Return message: root Message, its Return, and its Payload. */
@@ -144,6 +256,47 @@ static int write_cap_table(const capnp_bptr_t *payload, int eid)
   return CAPNP_OK;
 }
 
+static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid)
+{
+  int i;
+  for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++)
+    if (c->answers[i].used && c->answers[i].question_id == qid)
+      return &c->answers[i];
+  return NULL;
+}
+
+static void answer_drop(capnp_rpc_conn_t *c, uint32_t qid)
+{
+  capnp_rpc_answer_t *a = answer_find(c, qid);
+  if (a)
+    a->used = 0;
+}
+
+/* Send a Return and keep it until `Finish`, so a call pipelined against
+ * this answer can still find the capability it names. */
+static int flush_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid)
+{
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  int rc, i;
+  if (capnp_builder_serialize(b, &flat, &len))
+    return CAPNP_ERR_ALLOC;
+  if (len <= CAPNP_RPC_MAX_ANSWER_BYTES) {
+    for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++) {
+      if (!c->answers[i].used) {
+        c->answers[i].used = 1;
+        c->answers[i].question_id = qid;
+        memcpy(c->answers[i].frame, flat, len);
+        c->answers[i].len = len;
+        break;
+      }
+    }
+  }
+  rc = c->send(c->send_ctx, flat, len);
+  free(flat);
+  return rc;
+}
+
 static int flush(capnp_rpc_conn_t *c, capnp_builder_t *b)
 {
   uint8_t *flat = NULL;
@@ -156,6 +309,43 @@ static int flush(capnp_rpc_conn_t *c, capnp_builder_t *b)
   return rc;
 }
 
+/* Answer a question with an exception. A call the vat cannot route still
+ * has to be answered, or the caller waits forever. */
+static int send_return_exception(capnp_rpc_conn_t *c, uint32_t qid,
+                                 const char *reason)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, ret, slot, exc;
+  int rc;
+
+  capnp_builder_init(&b);
+  rc = capnp_builder_root(&b, &root);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u16(&msg, MESSAGE_TAG_OFF, CAPNP_RPC_MSG_RETURN);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&slot, RETURN_DW, RETURN_PW, &ret);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&ret, RETURN_ANSWERID_OFF, qid);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u16(&ret, RETURN_TAG_OFF, RETURN_TAG_EXCEPTION);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_slot(&ret, RETURN_DW, 0, &slot);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&slot, EXCEPTION_DW, EXCEPTION_PW, &exc);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u16(&exc, EXCEPTION_TYPE_OFF, EXCEPTION_TYPE_FAILED);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_text(&exc, EXCEPTION_DW, 0, reason, strlen(reason));
+  if (rc == CAPNP_OK)
+    rc = flush(c, &b);
+  capnp_builder_free(&b);
+  return rc;
+}
+
 static int handle_bootstrap(capnp_rpc_conn_t *c, const capnp_ptr_t *boot)
 {
   capnp_builder_t b;
@@ -164,10 +354,10 @@ static int handle_bootstrap(capnp_rpc_conn_t *c, const capnp_ptr_t *boot)
   int eid, rc;
 
   if (c->bootstrap == NULL)
-    return CAPNP_ERR_ARG;
+    return send_return_exception(c, qid, "no bootstrap capability");
   eid = capnp_rpc_export(c, c->bootstrap, c->bootstrap_dispatch);
   if (eid < 0)
-    return CAPNP_ERR_ALLOC;
+    return send_return_exception(c, qid, "export table full");
 
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
@@ -176,7 +366,7 @@ static int handle_bootstrap(capnp_rpc_conn_t *c, const capnp_ptr_t *boot)
   if (rc == CAPNP_OK)
     rc = capnp_builder_set_cap(&payload, PAYLOAD_DW, 0, 0);
   if (rc == CAPNP_OK)
-    rc = flush(c, &b);
+    rc = flush_answer(c, &b, qid);
   capnp_builder_free(&b);
   return rc;
 }
@@ -190,10 +380,10 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   int eid, rc;
 
   if (capnp_getp(call, 0, &target) != CAPNP_OK)
-    return CAPNP_ERR_KIND;
+    return send_return_exception(c, qid, "call has no target");
   eid = resolve_target(c, &target);
   if (eid < 0)
-    return CAPNP_ERR_ARG;
+    return send_return_exception(c, qid, "no such export");
 
   memset(&params, 0, sizeof params);
   if (capnp_getp(call, 1, &params_payload) == CAPNP_OK)
@@ -215,7 +405,7 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
                                     &results);
   }
   if (rc == CAPNP_OK)
-    rc = flush(c, &b);
+    rc = flush_answer(c, &b, qid);
   capnp_builder_free(&b);
   return rc;
 }
@@ -345,6 +535,55 @@ static int handle_join(capnp_rpc_conn_t *c, const capnp_ptr_t *join)
   return CAPNP_OK;
 }
 
+/* A Disembargo with `senderLoopback` is echoed back as `receiverLoopback`
+ * carrying the same id. That reflection is what lets the sender know every
+ * call it had already sent through a promise has arrived, so it can stop
+ * routing new ones the long way round. */
+static int handle_disembargo(capnp_rpc_conn_t *c, const capnp_ptr_t *dis)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, out;
+  capnp_ptr_t target;
+  uint32_t id;
+  int rc;
+
+  if (dis->kind != CAPNP_PK_STRUCT)
+    return CAPNP_OK;
+  /* receiverLoopback is the reply to an embargo we raised, and this vat
+   * raises none; accept it without echoing to avoid a loop. */
+  if (capnp_get_u16(dis, DIS_CTX_TAG_OFF, 0) != DIS_CTX_SENDER_LOOPBACK)
+    return CAPNP_OK;
+  id = capnp_get_u32(dis, DIS_CTX_VALUE_OFF, 0);
+
+  capnp_builder_init(&b);
+  rc = capnp_builder_root(&b, &root);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u16(&msg, MESSAGE_TAG_OFF, CAPNP_RPC_MSG_DISEMBARGO);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&slot, DISEMBARGO_DW, DISEMBARGO_PW, &out);
+  /* Echo the target back untouched: the sender matches on it. */
+  if (rc == CAPNP_OK && capnp_getp(dis, 0, &target) == CAPNP_OK &&
+      target.kind != CAPNP_PK_NULL) {
+    capnp_bptr_t tslot;
+    if (capnp_builder_slot(&out, DISEMBARGO_DW, 0, &tslot) == CAPNP_OK)
+      (void)capnp_builder_copy_ptr(&tslot, &target);
+  }
+  /* `context` is a group, so it shares Disembargo's own data section
+   * rather than living behind a pointer. */
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u16(&out, DIS_CTX_TAG_OFF, DIS_CTX_RECEIVER_LOOPBACK);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&out, DIS_CTX_VALUE_OFF, id);
+  if (rc == CAPNP_OK)
+    rc = flush(c, &b);
+  capnp_builder_free(&b);
+  return rc;
+}
+
 /* Echo a message we did not understand, per the spec. */
 static int send_unimplemented(capnp_rpc_conn_t *c, const capnp_ptr_t *orig)
 {
@@ -395,14 +634,18 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
     rc = handle_call(c, &body);
     break;
   case CAPNP_RPC_MSG_FINISH:
-    /* Nothing is retained per answer yet, so a Finish only needs to be
-     * accepted rather than acted on. */
+    /* The caller is done with the answer, so the results it might have
+     * pipelined against can go. */
+    answer_drop(c, capnp_get_u32(&body, QUESTIONID_OFF, 0));
     break;
   case CAPNP_RPC_MSG_RELEASE:
     handle_release(c, &body);
     break;
   case CAPNP_RPC_MSG_JOIN:
     rc = handle_join(c, &body);
+    break;
+  case CAPNP_RPC_MSG_DISEMBARGO:
+    rc = handle_disembargo(c, &body);
     break;
   default:
     /* Provide and Accept name a third vat, which a two-party connection
