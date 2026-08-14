@@ -187,6 +187,14 @@ test_rpc_join = executable(
 )
 test('rpc_join', test_rpc_join)
 
+test_rpc_client = executable(
+  'test_rpc_client',
+  'test/test_rpc_client.c',
+  dependencies: capnp_janet_dep,
+  include_directories: test_inc,
+)
+test('rpc_client', test_rpc_client)
+
 janet_dep = dependency('janet', required: get_option('janet'))
 if janet_dep.found()
   shared_module(

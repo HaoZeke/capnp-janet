@@ -30,7 +30,10 @@ extern "C" {
 #define CAPNP_RPC_MAX_EXPORTS 64
 #define CAPNP_RPC_MAX_ANSWERS 64
 #define CAPNP_RPC_MAX_ANSWER_BYTES 8192
+#define CAPNP_RPC_MAX_QUESTIONS 64
 #define CAPNP_RPC_MAX_JOINS 8
+/* Outstanding unacknowledged calls a stream may hold. */
+#define CAPNP_RPC_STREAM_MAX_WINDOW 64
 #define CAPNP_RPC_MAX_JOIN_PARTS 16
 
 /* rpc.capnp Message union tags. */
@@ -81,6 +84,30 @@ typedef struct capnp_rpc_export {
   capnp_rpc_dispatch_fn dispatch;
 } capnp_rpc_export_t;
 
+/* A question this vat asked, from send until its Return arrives. */
+typedef struct capnp_rpc_question {
+  int used;
+  uint32_t question_id;
+  int answered;
+  int failed;
+  uint8_t reply[CAPNP_RPC_MAX_ANSWER_BYTES];
+  size_t reply_len;
+} capnp_rpc_question_t;
+
+/* Client-side flow control for `-> stream` methods: a bounded window of
+ * unacknowledged stream calls. The wire carries ordinary Call/Return
+ * pairs; the window is policy, as in capnp-C++. After any stream call
+ * fails, later sends fail immediately and the failure surfaces at finish,
+ * which is the streaming error-propagation rule. */
+typedef struct capnp_rpc_stream {
+  int window;
+  int nout;
+  uint32_t qids[CAPNP_RPC_STREAM_MAX_WINDOW];
+  int failed;
+  uint32_t first_failure;
+  int have_failure;
+} capnp_rpc_stream_t;
+
 /* One in-flight Join, keyed by the sender's joinId.
  *
  * A Join asks whether several capabilities are the same object. Each part
@@ -102,6 +129,8 @@ typedef struct capnp_rpc_join {
 typedef struct capnp_rpc_conn {
   capnp_rpc_export_t exports[CAPNP_RPC_MAX_EXPORTS];
   capnp_rpc_answer_t answers[CAPNP_RPC_MAX_ANSWERS];
+  capnp_rpc_question_t questions[CAPNP_RPC_MAX_QUESTIONS];
+  uint32_t next_question_id;
   capnp_rpc_join_t joins[CAPNP_RPC_MAX_JOINS];
   void *bootstrap;
   capnp_rpc_dispatch_fn bootstrap_dispatch;
@@ -120,6 +149,49 @@ int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
 
 /* Handle one framed message. 0 when handled, non-zero on a bad frame. */
 int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
+
+/* --- client side -------------------------------------------------- */
+
+/* Write a call's parameter struct. */
+typedef void (*capnp_rpc_fill_fn)(void *ctx, const capnp_bptr_t *params);
+
+/* Ask for the peer's bootstrap capability. Returns the questionId, or
+ * (uint32_t)-1 when the question table is full. */
+uint32_t capnp_rpc_send_bootstrap(capnp_rpc_conn_t *c);
+
+/* Call a method on an imported capability. `fill` may be NULL. */
+uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
+                             uint64_t interface_id, uint16_t method_id,
+                             capnp_rpc_fill_fn fill, void *fill_ctx);
+
+/* Tell the peer we are done with an answer, and drop our copy. */
+int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id);
+
+/* Drop `count` references to an import. */
+int capnp_rpc_send_release(capnp_rpc_conn_t *c, uint32_t import_id,
+                           uint32_t count);
+
+int capnp_rpc_is_answered(capnp_rpc_conn_t *c, uint32_t question_id);
+int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id);
+
+/* Results of an answered question. Returns CAPNP_OK and fills `msg_out`
+ * / `out` on success. The caller frees `msg_out` with
+ * capnp_message_free. */
+int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
+                             capnp_message_t *msg_out, capnp_ptr_t *out);
+
+/* --- stream flow control ------------------------------------------- */
+
+void capnp_rpc_stream_init(capnp_rpc_stream_t *s, int window);
+
+/* Send one stream call, blocking only when the window is full. */
+int capnp_rpc_stream_send(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s,
+                          uint32_t imported_cap, uint64_t interface_id,
+                          uint16_t method_id, capnp_rpc_fill_fn fill,
+                          void *fill_ctx);
+
+/* Wait for every outstanding call. CAPNP_OK when all succeeded. */
+int capnp_rpc_stream_finish(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s);
 
 #ifdef __cplusplus
 }

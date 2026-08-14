@@ -45,6 +45,21 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define CAPDESC_TAG_OFF 0
 #define CAPDESC_SENDERHOSTED_OFF 4
 #define CAPDESC_TAG_SENDERHOSTED 1
+/* Call: questionId @0, methodId @4 (u16), interfaceId @8 (u64);
+ * target @ptr0, params @ptr1. */
+#define CALL_DW 3
+#define CALL_PW 3
+#define CALL_QUESTIONID_OFF 0
+#define CALL_METHODID_OFF 4
+#define CALL_INTERFACEID_OFF 8
+#define BOOTSTRAP_DW 1
+#define BOOTSTRAP_PW 1
+#define FINISH_DW 1
+#define FINISH_PW 0
+#define RELEASE_DW 1
+#define RELEASE_PW 0
+#define TARGET_DW 1
+#define TARGET_PW 1
 /* Bootstrap / Join / Release: questionId or id @0 (u32). */
 #define QUESTIONID_OFF 0
 #define RELEASE_REFCOUNT_OFF 4
@@ -608,6 +623,277 @@ static int send_unimplemented(capnp_rpc_conn_t *c, const capnp_ptr_t *orig)
   return rc;
 }
 
+
+/* --- client side -------------------------------------------------- */
+
+static capnp_rpc_question_t *question_claim(capnp_rpc_conn_t *c,
+                                            uint32_t *qid_out)
+{
+  int i;
+  for (i = 0; i < CAPNP_RPC_MAX_QUESTIONS; i++) {
+    if (!c->questions[i].used) {
+      memset(&c->questions[i], 0, sizeof c->questions[i]);
+      c->questions[i].used = 1;
+      c->questions[i].question_id = c->next_question_id++;
+      *qid_out = c->questions[i].question_id;
+      return &c->questions[i];
+    }
+  }
+  return NULL;
+}
+
+static capnp_rpc_question_t *question_find(capnp_rpc_conn_t *c, uint32_t qid)
+{
+  int i;
+  for (i = 0; i < CAPNP_RPC_MAX_QUESTIONS; i++)
+    if (c->questions[i].used && c->questions[i].question_id == qid)
+      return &c->questions[i];
+  return NULL;
+}
+
+/* Build a Message with one struct in its union slot. */
+static int begin_message(capnp_builder_t *b, uint16_t tag, uint16_t dw,
+                         uint16_t pw, capnp_bptr_t *body_out)
+{
+  capnp_bptr_t root, msg, slot;
+  if (capnp_builder_root(b, &root))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_set_u16(&msg, MESSAGE_TAG_OFF, tag))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot))
+    return CAPNP_ERR_ALLOC;
+  if (capnp_builder_struct(&slot, dw, pw, body_out))
+    return CAPNP_ERR_ALLOC;
+  return CAPNP_OK;
+}
+
+uint32_t capnp_rpc_send_bootstrap(capnp_rpc_conn_t *c)
+{
+  capnp_builder_t b;
+  capnp_bptr_t boot;
+  capnp_rpc_question_t *q;
+  uint32_t qid = 0;
+  int rc;
+
+  q = question_claim(c, &qid);
+  if (q == NULL)
+    return (uint32_t)-1;
+  capnp_builder_init(&b);
+  rc = begin_message(&b, CAPNP_RPC_MSG_BOOTSTRAP, BOOTSTRAP_DW, BOOTSTRAP_PW,
+                     &boot);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&boot, QUESTIONID_OFF, qid);
+  if (rc == CAPNP_OK)
+    rc = flush(c, &b);
+  capnp_builder_free(&b);
+  if (rc != CAPNP_OK) {
+    q->used = 0;
+    return (uint32_t)-1;
+  }
+  return qid;
+}
+
+uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
+                             uint64_t interface_id, uint16_t method_id,
+                             capnp_rpc_fill_fn fill, void *fill_ctx)
+{
+  capnp_builder_t b;
+  capnp_bptr_t call, slot, target, payload, params;
+  capnp_rpc_question_t *q;
+  uint32_t qid = 0;
+  int rc;
+
+  q = question_claim(c, &qid);
+  if (q == NULL)
+    return (uint32_t)-1;
+  capnp_builder_init(&b);
+  rc = begin_message(&b, CAPNP_RPC_MSG_CALL, CALL_DW, CALL_PW, &call);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&call, CALL_QUESTIONID_OFF, qid);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u16(&call, CALL_METHODID_OFF, method_id);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u64(&call, CALL_INTERFACEID_OFF, interface_id);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_slot(&call, CALL_DW, 0, &slot);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&slot, TARGET_DW, TARGET_PW, &target);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u16(&target, TARGET_TAG_OFF, TARGET_TAG_IMPORTEDCAP);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&target, TARGET_IMPORTEDCAP_OFF, imported_cap);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_slot(&call, CALL_DW, 1, &slot);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&slot, PAYLOAD_DW, PAYLOAD_PW, &payload);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_slot(&payload, PAYLOAD_DW, 0, &slot);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_struct(&slot, 1, 1, &params);
+  if (rc == CAPNP_OK && fill)
+    fill(fill_ctx, &params);
+  if (rc == CAPNP_OK)
+    rc = flush(c, &b);
+  capnp_builder_free(&b);
+  if (rc != CAPNP_OK) {
+    q->used = 0;
+    return (uint32_t)-1;
+  }
+  return qid;
+}
+
+int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id)
+{
+  capnp_builder_t b;
+  capnp_bptr_t fin;
+  capnp_rpc_question_t *q = question_find(c, question_id);
+  int rc;
+  if (q)
+    q->used = 0;
+  capnp_builder_init(&b);
+  rc = begin_message(&b, CAPNP_RPC_MSG_FINISH, FINISH_DW, FINISH_PW, &fin);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&fin, QUESTIONID_OFF, question_id);
+  if (rc == CAPNP_OK)
+    rc = flush(c, &b);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+int capnp_rpc_send_release(capnp_rpc_conn_t *c, uint32_t import_id,
+                           uint32_t count)
+{
+  capnp_builder_t b;
+  capnp_bptr_t rel;
+  int rc;
+  capnp_builder_init(&b);
+  rc = begin_message(&b, CAPNP_RPC_MSG_RELEASE, RELEASE_DW, RELEASE_PW, &rel);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&rel, QUESTIONID_OFF, import_id);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_u32(&rel, RELEASE_REFCOUNT_OFF, count);
+  if (rc == CAPNP_OK)
+    rc = flush(c, &b);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+int capnp_rpc_is_answered(capnp_rpc_conn_t *c, uint32_t question_id)
+{
+  capnp_rpc_question_t *q = question_find(c, question_id);
+  return q && q->answered;
+}
+
+int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id)
+{
+  capnp_rpc_question_t *q = question_find(c, question_id);
+  return q && q->answered && q->failed;
+}
+
+int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
+                             capnp_message_t *msg_out, capnp_ptr_t *out)
+{
+  capnp_rpc_question_t *q = question_find(c, question_id);
+  capnp_ptr_t root, ret, payload;
+
+  if (q == NULL || !q->answered || q->failed)
+    return CAPNP_ERR_ARG;
+  if (capnp_message_from_flat(msg_out, q->reply, q->reply_len) != CAPNP_OK)
+    return CAPNP_ERR_FRAMING;
+  if (capnp_root(msg_out, &root) != CAPNP_OK ||
+      capnp_get_u16(&root, MESSAGE_TAG_OFF, 0) != CAPNP_RPC_MSG_RETURN ||
+      capnp_getp(&root, 0, &ret) != CAPNP_OK ||
+      capnp_get_u16(&ret, RETURN_TAG_OFF, 0) != RETURN_TAG_RESULTS ||
+      capnp_getp(&ret, 0, &payload) != CAPNP_OK ||
+      capnp_getp(&payload, 0, out) != CAPNP_OK) {
+    capnp_message_free(msg_out);
+    return CAPNP_ERR_KIND;
+  }
+  return CAPNP_OK;
+}
+
+/* Record a Return against the question that asked it. A Return naming a
+ * question this vat never asked is dropped: recording it would let a peer
+ * plant answers that later pipelining would trust. */
+static void handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
+                          const uint8_t *frame, size_t len)
+{
+  capnp_rpc_question_t *q;
+  if (ret->kind != CAPNP_PK_STRUCT)
+    return;
+  q = question_find(c, capnp_get_u32(ret, RETURN_ANSWERID_OFF, 0));
+  if (q == NULL || len > CAPNP_RPC_MAX_ANSWER_BYTES)
+    return;
+  q->answered = 1;
+  q->failed = capnp_get_u16(ret, RETURN_TAG_OFF, 0) != RETURN_TAG_RESULTS;
+  memcpy(q->reply, frame, len);
+  q->reply_len = len;
+}
+
+/* --- stream flow control ------------------------------------------- */
+
+void capnp_rpc_stream_init(capnp_rpc_stream_t *s, int window)
+{
+  memset(s, 0, sizeof *s);
+  if (window < 1)
+    window = 1;
+  if (window > CAPNP_RPC_STREAM_MAX_WINDOW)
+    window = CAPNP_RPC_STREAM_MAX_WINDOW;
+  s->window = window;
+}
+
+/* Retire the oldest outstanding call. A call that never answered, or
+ * answered with an exception, marks the stream failed. */
+static void stream_retire_oldest(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s)
+{
+  uint32_t qid;
+  int i;
+  if (s->nout == 0)
+    return;
+  qid = s->qids[0];
+  for (i = 1; i < s->nout; i++)
+    s->qids[i - 1] = s->qids[i];
+  s->nout--;
+  if (!capnp_rpc_is_answered(c, qid) || capnp_rpc_is_failed(c, qid)) {
+    s->failed = 1;
+    if (!s->have_failure) {
+      s->have_failure = 1;
+      s->first_failure = qid;
+    }
+  }
+  capnp_rpc_send_finish(c, qid);
+}
+
+int capnp_rpc_stream_send(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s,
+                          uint32_t imported_cap, uint64_t interface_id,
+                          uint16_t method_id, capnp_rpc_fill_fn fill,
+                          void *fill_ctx)
+{
+  uint32_t qid;
+  if (s->failed)
+    return CAPNP_ERR_ARG;
+  if (s->nout >= s->window) {
+    stream_retire_oldest(c, s);
+    if (s->failed)
+      return CAPNP_ERR_ARG;
+  }
+  qid = capnp_rpc_send_call(c, imported_cap, interface_id, method_id, fill,
+                            fill_ctx);
+  if (qid == (uint32_t)-1)
+    return CAPNP_ERR_ALLOC;
+  s->qids[s->nout++] = qid;
+  return CAPNP_OK;
+}
+
+int capnp_rpc_stream_finish(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s)
+{
+  while (s->nout > 0)
+    stream_retire_oldest(c, s);
+  return s->have_failure ? CAPNP_ERR_ARG : CAPNP_OK;
+}
+
 int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
 {
   capnp_message_t m;
@@ -646,6 +932,16 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
     break;
   case CAPNP_RPC_MSG_DISEMBARGO:
     rc = handle_disembargo(c, &body);
+    break;
+  case CAPNP_RPC_MSG_RETURN:
+    handle_return(c, &body, data, len);
+    break;
+  case CAPNP_RPC_MSG_RESOLVE:
+    /* Promise resolution. Replying unimplemented is the spec-defined
+     * signal that this vat does not adopt resolutions: the sender keeps
+     * forwarding calls addressed to the promise, which it does until
+     * Release. */
+    rc = send_unimplemented(c, &root);
     break;
   default:
     /* Provide and Accept name a third vat, which a two-party connection
