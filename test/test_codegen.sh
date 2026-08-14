@@ -40,4 +40,16 @@ if grep -E 'get-id|get-signed' u64probe.janet | grep -q 'get-u32'; then
   echo "FAIL: u64 fields still emit get-u32" >&2
   exit 1
 fi
+# Interfaces carry the id, the ordinal and both struct shapes, so a
+# caller need not spell them. A parameter struct sized wrong drops
+# arguments past the end without complaint.
+cp "$ROOT/schema/adder.capnp" "$TMP/"
+capnp compile "-o$PLUGIN" adder.capnp
+test -f adder.janet
+grep -q 'Adder-interface-id' adder.janet
+grep -q '0xea01e10cbc414411' adder.janet
+grep -q 'Adder-methods' adder.janet
+# add(a :Int64, b :Int64) -> (sum :Int64): two data words in, one out.
+grep -q ':add {:ordinal 0 :params-dwords 2 :params-pwords 0 :results-dwords 1' adder.janet
+
 echo "ok codegen"

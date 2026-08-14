@@ -39,6 +39,7 @@ enum {
   NODE_FILE = 0,
   NODE_STRUCT = 1,
   NODE_ENUM = 2,
+  NODE_IFACE = 3,
   NODE_INTERFACE = 3,
   NODE_CONST = 4,
   NODE_ANNOTATION = 5
@@ -184,6 +185,76 @@ static const char *type_kw(uint16_t which) {
   default:
     return "unknown";
   }
+}
+
+
+/* Look up a struct node by id and report its shape.
+ *
+ * A method's parameter and result structs are implicit nodes; their
+ * dimensions are what a caller needs and what it would otherwise have to
+ * guess. Guessing low drops any field past the end silently. */
+static void struct_shape(const capnp_ptr_t *nodes, uint64_t id, int *dw,
+                         int *pw) {
+  uint32_t i, n;
+  *dw = 0;
+  *pw = 0;
+  n = capnp_list_len(nodes);
+  for (i = 0; i < n; i++) {
+    capnp_ptr_t node;
+    if (capnp_list_getp(nodes, i, &node) != CAPNP_OK)
+      continue;
+    if (capnp_get_u64(&node, 0, 0) != id)
+      continue;
+    if (capnp_get_u16(&node, 12, 0xffff) != NODE_STRUCT)
+      return;
+    *dw = (int)capnp_get_u16(&node, 14, 0);
+    *pw = (int)capnp_get_u16(&node, 24, 0);
+    return;
+  }
+}
+
+/* Emit an interface's id and one entry per method.
+ *
+ * The caller needs three things the schema already carries: which
+ * interface, which ordinal, and how big the parameter struct is. Emitting
+ * them keeps those out of every call site. */
+static void emit_interface(FILE *out, const capnp_ptr_t *node,
+                           const capnp_ptr_t *nodes) {
+  char iname[256];
+  capnp_ptr_t methods;
+  uint32_t i, count;
+
+  if (capnp_get_u16(node, 12, 0xffff) != NODE_IFACE)
+    return;
+  type_short_name(get_text(node, 0), iname, sizeof(iname));
+
+  fprintf(out, "\n# Interface %s\n", iname);
+  fprintf(out, "(def %s-interface-id (int/u64 \"0x%016llx\"))\n", iname,
+          (unsigned long long)capnp_get_u64(node, 0, 0));
+
+  /* interface.methods shares pointer slot 3 with struct.fields. */
+  if (capnp_getp(node, 3, &methods) != CAPNP_OK)
+    return;
+  count = capnp_list_len(&methods);
+  if (count == 0)
+    return;
+
+  fprintf(out, "(def %s-methods\n  {", iname);
+  for (i = 0; i < count; i++) {
+    capnp_ptr_t m;
+    const char *mname;
+    int pdw, ppw, rdw, rpw;
+    if (capnp_list_get_struct(&methods, i, &m) != CAPNP_OK)
+      continue;
+    mname = get_text(&m, 0);
+    struct_shape(nodes, capnp_get_u64(&m, 8, 0), &pdw, &ppw);
+    struct_shape(nodes, capnp_get_u64(&m, 16, 0), &rdw, &rpw);
+    fprintf(out,
+            "\n   :%s {:ordinal %u :params-dwords %d :params-pwords %d"
+            " :results-dwords %d :results-pwords %d}",
+            mname ? mname : "?", i, pdw, ppw, rdw, rpw);
+  }
+  fprintf(out, "})\n");
 }
 
 static void emit_struct(FILE *out, const capnp_ptr_t *node) {
@@ -368,6 +439,8 @@ static int write_module(const char *filename, const capnp_ptr_t *nodes,
       emit_struct(out, &node);
     else if (which == NODE_ENUM)
       emit_enum(out, &node);
+    else if (which == NODE_IFACE)
+      emit_interface(out, &node, nodes);
   }
 
   fclose(out);
