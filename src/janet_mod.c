@@ -345,14 +345,17 @@ static const JanetReg capnp_cfuns[] = {
      "[:u16|:u32|:u64|:f64|:bool|:text off val]."},
     {NULL, NULL, NULL}};
 
+/* Embedding path: the host injects into a root env that applies no import
+ * prefix of its own, so bind the qualified capnp/… names here. */
 void capnp_janet_register(JanetTable *env) {
-  /* Prefix so packs call (capnp/build-message …) etc. */
   janet_cfuns_prefix(env, "capnp", capnp_cfuns);
 }
 
 void capnp_janet_env(JanetTable *env) { capnp_janet_register(env); }
 
-JANET_MODULE_ENTRY(JanetTable *env) { capnp_janet_register(env); }
+/* (import capnp) prefixes every binding with the module name, so the module
+ * entry binds bare names; call sites stay at capnp/build-message. */
+JANET_MODULE_ENTRY(JanetTable *env) { janet_cfuns(env, "capnp", capnp_cfuns); }
 
 void capnp_janet_lookup_into(JanetTable *lookup) {
   JanetTable *tmp;
