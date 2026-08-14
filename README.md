@@ -143,17 +143,32 @@ Link `libcapnp_janet` (pkg-config: `capnp-janet`).
 
 ### Janet
 
+Build a framed root struct of one data word and one pointer word, then read
+it back. `build-message` takes an array of `[kind byte-offset value]` fields:
+
 ```janet
 (import capnp)
 
-(def buf (capnp/build-demo 42 "hello" ["a" "bb"]))
-(def msg (capnp/message-from-buffer buf))
-(def root (capnp/root msg))
+(def buf (capnp/build-message 1 1 @[[:u32 0 42] [:text 0 "hello"]]))
+(def root (capnp/root (capnp/message-from-buffer buf)))
 (print (capnp/get-u32 root 0))       # 42
 ; (capnp/get-u64 root byte-offset) for UInt64/Int64 fields
 (print (capnp/get-text root 0))      # hello
-(def items (capnp/getp root 1))
-(print (capnp/list-get-text items 1)) # bb
+```
+
+Lists come out of a decoded message. Reading the AddressBook golden that
+`capnp encode` produced:
+
+```janet
+(import capnp)
+
+(def root (capnp/root (capnp/message-from-buffer
+                        (slurp "test/fixtures/addressbook_alice_bob.bin"))))
+(def people (capnp/getp root 0))
+(print (capnp/list-len people))                    # 2
+(def alice (capnp/list-getp people 0))
+(print (capnp/get-u32 alice 0))                    # 123
+(print (capnp/get-text alice 0))                   # Alice
 ```
 
 Embedders that amalgamate Janet call `capnp_janet_register(env)` after
