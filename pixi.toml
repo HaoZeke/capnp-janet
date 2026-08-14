@@ -11,6 +11,8 @@ ninja = "*"
 pkg-config = "*"
 # scripts/packaging-smoke.sh consumes the project through CMake as well.
 cmake = ">=3.16"
+# interop/ links the capnp-C++ RPC peer the vat is tested against.
+cxx-compiler = "*"
 # test/test_codegen.sh drives capnpc-janet through the capnp CLI, and skips
 # itself when the CLI is absent. Keep it here so the skip never fires in CI.
 capnproto = ">=1.0"

@@ -697,6 +697,7 @@ uint32_t capnp_rpc_send_bootstrap(capnp_rpc_conn_t *c)
 
 uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
                              uint64_t interface_id, uint16_t method_id,
+                             uint16_t params_dwords, uint16_t params_pwords,
                              capnp_rpc_fill_fn fill, void *fill_ctx)
 {
   capnp_builder_t b;
@@ -731,7 +732,7 @@ uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
   if (rc == CAPNP_OK)
     rc = capnp_builder_slot(&payload, PAYLOAD_DW, 0, &slot);
   if (rc == CAPNP_OK)
-    rc = capnp_builder_struct(&slot, 1, 1, &params);
+    rc = capnp_builder_struct(&slot, params_dwords, params_pwords, &params);
   if (rc == CAPNP_OK && fill)
     fill(fill_ctx, &params);
   if (rc == CAPNP_OK)
@@ -868,7 +869,8 @@ static void stream_retire_oldest(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s)
 
 int capnp_rpc_stream_send(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s,
                           uint32_t imported_cap, uint64_t interface_id,
-                          uint16_t method_id, capnp_rpc_fill_fn fill,
+                          uint16_t method_id, uint16_t params_dwords,
+                          uint16_t params_pwords, capnp_rpc_fill_fn fill,
                           void *fill_ctx)
 {
   uint32_t qid;
@@ -879,8 +881,8 @@ int capnp_rpc_stream_send(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s,
     if (s->failed)
       return CAPNP_ERR_ARG;
   }
-  qid = capnp_rpc_send_call(c, imported_cap, interface_id, method_id, fill,
-                            fill_ctx);
+  qid = capnp_rpc_send_call(c, imported_cap, interface_id, method_id,
+                            params_dwords, params_pwords, fill, fill_ctx);
   if (qid == (uint32_t)-1)
     return CAPNP_ERR_ALLOC;
   s->qids[s->nout++] = qid;

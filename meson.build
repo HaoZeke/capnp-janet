@@ -195,6 +195,59 @@ test_rpc_client = executable(
 )
 test('rpc_client', test_rpc_client)
 
+# --- live-peer RPC interop: this vat against capnp-C++ ---------------
+#
+# Byte equality against our own encoders says nothing about whether the
+# reference implementation will talk to us, so this bootstraps a real
+# EzRpcServer and calls it.
+cpp_ok = add_languages('cpp', required: false, native: false)
+capnp_rpc_dep = dependency('capnp-rpc', required: false)
+capnp_tool = find_program('capnp', required: false)
+capnpc_cpp = find_program('capnpc-c++', required: false)
+bash = find_program('bash', required: false)
+
+if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found() and bash.found()
+  adder_cpp = custom_target(
+    'adder-capnp-cpp',
+    input: 'schema' / 'adder.capnp',
+    output: ['adder.capnp.c++', 'adder.capnp.h'],
+    command: [
+      capnp_tool, 'compile',
+      '--src-prefix=' + meson.current_source_dir() / 'schema',
+      '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
+      '@INPUT@',
+    ],
+  )
+
+  rpc_peer_server = executable(
+    'rpc_peer_server',
+    ['interop' / 'rpc_peer_server.c++', adder_cpp],
+    dependencies: capnp_rpc_dep,
+    override_options: ['cpp_std=c++17'],
+  )
+
+  rpc_client_c = executable(
+    'rpc_client_c',
+    'interop' / 'rpc_client.c',
+    dependencies: capnp_janet_dep,
+    c_args: ['-D_POSIX_C_SOURCE=200809L'],
+  )
+
+  test(
+    'rpc_interop_cpp',
+    bash,
+    args: [
+      meson.current_source_dir() / 'interop' / 'run_rpc_interop.sh',
+      rpc_peer_server.full_path(),
+      rpc_client_c.full_path(),
+    ],
+    depends: [rpc_peer_server, rpc_client_c],
+    timeout: 60,
+  )
+else
+  message('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')
+endif
+
 janet_dep = dependency('janet', required: get_option('janet'))
 if janet_dep.found()
   shared_module(

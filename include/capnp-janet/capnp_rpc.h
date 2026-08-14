@@ -159,9 +159,14 @@ typedef void (*capnp_rpc_fill_fn)(void *ctx, const capnp_bptr_t *params);
  * (uint32_t)-1 when the question table is full. */
 uint32_t capnp_rpc_send_bootstrap(capnp_rpc_conn_t *c);
 
-/* Call a method on an imported capability. `fill` may be NULL. */
+/* Call a method on an imported capability. `fill` may be NULL.
+ *
+ * The caller gives the parameter struct's dimensions because only it
+ * knows the method signature; a size guessed here silently drops any
+ * field past the end. */
 uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
                              uint64_t interface_id, uint16_t method_id,
+                             uint16_t params_dwords, uint16_t params_pwords,
                              capnp_rpc_fill_fn fill, void *fill_ctx);
 
 /* Tell the peer we are done with an answer, and drop our copy. */
@@ -187,7 +192,8 @@ void capnp_rpc_stream_init(capnp_rpc_stream_t *s, int window);
 /* Send one stream call, blocking only when the window is full. */
 int capnp_rpc_stream_send(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s,
                           uint32_t imported_cap, uint64_t interface_id,
-                          uint16_t method_id, capnp_rpc_fill_fn fill,
+                          uint16_t method_id, uint16_t params_dwords,
+                          uint16_t params_pwords, capnp_rpc_fill_fn fill,
                           void *fill_ctx);
 
 /* Wait for every outstanding call. CAPNP_OK when all succeeded. */

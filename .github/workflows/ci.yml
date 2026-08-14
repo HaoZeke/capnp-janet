@@ -57,3 +57,23 @@ jobs:
       # or a stale .pc reaches users. This builds a consumer four ways.
       - name: CMake, find_package, pkg-config and meson subproject
         run: pixi run -- bash scripts/packaging-smoke.sh
+
+  rpc-interop:
+    name: live capnp-C++ RPC peer
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.8.3
+        with:
+          environments: default
+      # Byte equality against our own encoders says nothing about whether
+      # the reference implementation will talk to us. This bootstraps a
+      # real EzRpcServer and calls it.
+      - name: Configure and build
+        run: |
+          pixi run -- meson setup build-interop
+          pixi run -- meson compile -C build-interop
+      - name: The interop test ran rather than being skipped
+        run: |
+          pixi run -- meson test -C build-interop rpc_interop_cpp --print-errorlogs
+          test -x build-interop/rpc_peer_server

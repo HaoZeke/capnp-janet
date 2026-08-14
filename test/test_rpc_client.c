@@ -121,7 +121,7 @@ int main(void)
 
   /* A call returns the server's results to the caller. */
   arg = 21;
-  q = capnp_rpc_send_call(&client, 0, 0x1234, 1, fill_u32, &arg);
+  q = capnp_rpc_send_call(&client, 0, 0x1234, 1, 1, 1, fill_u32, &arg);
   CHECK(q != (uint32_t)-1, "call sent");
   pump(&vat, &g_to_vat);
   pump(&client, &g_to_client);
@@ -138,7 +138,7 @@ int main(void)
   CHECK(doubler_calls == 1, "one dispatch");
 
   /* A call the vat cannot route comes back failed, not silent. */
-  q = capnp_rpc_send_call(&client, 99, 0, 0, NULL, NULL);
+  q = capnp_rpc_send_call(&client, 99, 0, 0, 1, 1, NULL, NULL);
   pump(&vat, &g_to_vat);
   pump(&client, &g_to_client);
   CHECK(capnp_rpc_is_answered(&client, q), "unroutable call answered");
@@ -171,12 +171,12 @@ int main(void)
     capnp_rpc_stream_t s;
     uint32_t v = 1;
     capnp_rpc_stream_init(&s, 2);
-    CHECK(capnp_rpc_stream_send(&client, &s, 0, 0, 0, fill_u32, &v) == CAPNP_OK, "s1");
-    CHECK(capnp_rpc_stream_send(&client, &s, 0, 0, 0, fill_u32, &v) == CAPNP_OK, "s2");
+    CHECK(capnp_rpc_stream_send(&client, &s, 0, 0, 0, 1, 1, fill_u32, &v) == CAPNP_OK, "s1");
+    CHECK(capnp_rpc_stream_send(&client, &s, 0, 0, 0, 1, 1, fill_u32, &v) == CAPNP_OK, "s2");
     CHECK(s.nout == 2, "window holds two");
     pump(&vat, &g_to_vat);
     pump(&client, &g_to_client);
-    CHECK(capnp_rpc_stream_send(&client, &s, 0, 0, 0, fill_u32, &v) == CAPNP_OK, "s3");
+    CHECK(capnp_rpc_stream_send(&client, &s, 0, 0, 0, 1, 1, fill_u32, &v) == CAPNP_OK, "s3");
     CHECK(s.nout <= 2, "window still bounded");
     pump(&vat, &g_to_vat);
     pump(&client, &g_to_client);
@@ -190,9 +190,9 @@ int main(void)
     uint32_t v = 1;
     doubler_fail_from = doubler_calls + 2;
     capnp_rpc_stream_init(&s, 4);
-    capnp_rpc_stream_send(&client, &s, 0, 0, 0, fill_u32, &v);
-    capnp_rpc_stream_send(&client, &s, 0, 0, 0, fill_u32, &v);
-    capnp_rpc_stream_send(&client, &s, 0, 0, 0, fill_u32, &v);
+    capnp_rpc_stream_send(&client, &s, 0, 0, 0, 1, 1, fill_u32, &v);
+    capnp_rpc_stream_send(&client, &s, 0, 0, 0, 1, 1, fill_u32, &v);
+    capnp_rpc_stream_send(&client, &s, 0, 0, 0, 1, 1, fill_u32, &v);
     pump(&vat, &g_to_vat);
     pump(&client, &g_to_client);
     CHECK(capnp_rpc_stream_finish(&client, &s) != CAPNP_OK, "finish reports failure");
@@ -200,7 +200,7 @@ int main(void)
     CHECK(s.failed, "stream marked failed");
     /* The window is empty, so this refusal can only come from the stream
      * remembering it failed. */
-    CHECK(capnp_rpc_stream_send(&client, &s, 0, 0, 0, fill_u32, &v) != CAPNP_OK,
+    CHECK(capnp_rpc_stream_send(&client, &s, 0, 0, 0, 1, 1, fill_u32, &v) != CAPNP_OK,
           "failed stream refuses further sends");
   }
 
