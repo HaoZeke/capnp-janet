@@ -20,6 +20,9 @@ jobs:
       # own earlier output.
       - name: goldens still match the capnp CLI
         run: pixi run -- bash scripts/gen-sample-fixtures.sh --check
+
+      - name: level 3 frames still match the capnp CLI
+        run: pixi run -- bash scripts/gen-rpc-frames.sh --check
       - run: pixi run test
       # test_codegen.sh exits 0 when the capnp CLI is missing. capnproto is a
       # default-environment dependency so that skip means a real failure.
