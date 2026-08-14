@@ -15,6 +15,11 @@ jobs:
           environments: default
       - run: pixi run configure
       - run: pixi run build
+      # The goldens are only evidence of upstream parity while they are still
+      # what the capnp CLI emits; the suite cannot tell them apart from our
+      # own earlier output.
+      - name: goldens still match the capnp CLI
+        run: pixi run -- bash scripts/gen-sample-fixtures.sh --check
       - run: pixi run test
       # test_codegen.sh exits 0 when the capnp CLI is missing. capnproto is a
       # default-environment dependency so that skip means a real failure.
