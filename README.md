@@ -53,7 +53,7 @@ packs import.
 | Builder / deep copy | limited | yes | yes | **multi-seg builder + far/double-far + copy_flat + setp** (no orphans yet) |
 | Canonical form | yes (0.3.0) | yes | yes | **yes** (byte-parity tested) |
 | Code generator (`capnp compile -o`) | yes | yes | yes | **yes** (`capnpc-janet` v1: structs/enums + getters) |
-| RPC | no | yes | yes | out of scope for v0.x |
+| RPC levels 1-4 | no | L1-L2 (no L4) | L1-L2 (no L4) | **L1-L4** (C vat, `include/capnp-janet/capnp_rpc.h`; L3 over `schema/rpc-threeparty.capnp`, L4 `Join` which upstream C++ lacks) |
 
 ## Schema-evolution list views
 
@@ -196,8 +196,10 @@ Wire tests include the classic Cap'n samples (same content as C++/pycapnp):
 | `calculator` | `schema/calculator.capnp` | Expression trees (literal / call / nested), evaluate in-process; goldens |
 | `wire` / `list_text` | demo shapes | core reader/builder |
 
-Calculator **RPC** (interfaces, pipelining) is out of scope; the schema is a
-serialization-only Expression subset of the official calculator sample.
+The calculator schema here is a serialization-only Expression subset of the
+official sample: it exercises the wire format, not the vat. The RPC surface
+lives in `capnp_rpc.h` and is tested against a live capnp-C++ peer
+(`interop/run_rpc_interop.sh`).
 
 Regenerate goldens (needs system `capnp`):
 
@@ -224,12 +226,14 @@ docs/orgmode/  architecture notes
    AddressBook encode (this tree)
 3. **v0.3** — `capnpc-janet` plugin (structs/enums/getters) (landed v1)
 4. **v0.4** — orphans, c-capnproto golden-master, richer codegen (unions/defaults)
-5. Dynamic API as needed; RPC remains out of scope
+5. Dynamic API as needed; the RPC vat (levels 1-4) is C-side, with Janet
+   bindings still to come
 
 ## Related
 
 - [capnp-fortran](https://github.com/HaoZeke/capnp-fortran) — native F2018 Cap'n
 - [c-capnproto](https://github.com/HaoZeke/c-capnproto) — C reference encoder
+- [capnp-ts](https://github.com/HaoZeke/capnp-ts) — TypeScript port
 - [Cap'n Proto](https://capnproto.org) — encoding and RPC specs
 
 ## License
