@@ -56,6 +56,7 @@ add_library(capnp_janet
   src/capnp_builder.c
   src/capnp_packed.c
   src/capnp_canonical.c
+  src/capnp_rpc.c
 )
 add_library(capnp_janet::capnp_janet ALIAS capnp_janet)
 
@@ -103,6 +104,7 @@ if(CAPNP_JANET_INSTALL)
     include/capnp-janet/capnp_canonical.h
     include/capnp-janet/capnp_copy.h
     include/capnp-janet/capnp_janet.h
+    include/capnp-janet/capnp_rpc.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/capnp-janet
   )
   install(FILES janet/policy.janet

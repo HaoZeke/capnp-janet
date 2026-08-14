@@ -88,6 +88,12 @@ static inline uint64_t capnp_wp_make_list(int32_t off, int esize,
   return w;
 }
 
+/* Capability pointer: kind 3, body bits zero, capability-table index in
+ * the upper word (encoding.html "Other" pointers, A=3 B=0 C=index). */
+static inline uint64_t capnp_wp_make_cap(uint32_t cap_index) {
+  return 3ull | ((uint64_t)cap_index << 32);
+}
+
 static inline uint64_t capnp_wp_make_far(int two_word_pad, uint32_t word_off,
                                          uint32_t seg_id) {
   uint64_t w = 2ull;

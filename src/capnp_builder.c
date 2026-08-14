@@ -427,6 +427,21 @@ static int write_text_at(capnp_builder_t *b, uint32_t slot_seg, size_t slot_word
                         CAPNP_SZ_BYTE, (uint32_t)nbytes);
 }
 
+/* Write a capability pointer naming capTable entry `cap_index`. RPC
+ * payloads carry capabilities this way: the pointer holds only the index
+ * and the descriptor beside it says what the capability is. */
+int capnp_builder_set_cap(const capnp_bptr_t *body, uint16_t dwords,
+                          uint16_t ptr_index, uint32_t cap_index) {
+  size_t ptr_word;
+  if (!body || !body->b)
+    return CAPNP_ERR_ARG;
+  ptr_word = body->word + dwords + ptr_index;
+  if (ptr_word >= body->b->segs[body->seg].words)
+    return CAPNP_ERR_BOUNDS;
+  store_w(body->b, body->seg, ptr_word, capnp_wp_make_cap(cap_index));
+  return CAPNP_OK;
+}
+
 int capnp_builder_set_text(const capnp_bptr_t *body, uint16_t dwords,
                            uint16_t ptr_index, const char *text,
                            size_t text_len) {

@@ -83,6 +83,9 @@ int capnp_builder_slot(const capnp_bptr_t *body, uint16_t dwords,
 int capnp_builder_set_text(const capnp_bptr_t *body, uint16_t dwords,
                            uint16_t ptr_index, const char *text,
                            size_t text_len);
+/* Capability pointer naming capTable entry `cap_index`. */
+int capnp_builder_set_cap(const capnp_bptr_t *body, uint16_t dwords,
+                          uint16_t ptr_index, uint32_t cap_index);
 int capnp_builder_set_list_text(const capnp_bptr_t *body, uint16_t dwords,
                                 uint16_t ptr_index, const char *const *items,
                                 uint32_t nitems);

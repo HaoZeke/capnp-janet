@@ -18,6 +18,7 @@ lib_sources = files(
   'src/capnp_builder.c',
   'src/capnp_packed.c',
   'src/capnp_canonical.c',
+  'src/capnp_rpc.c',
 )
 
 capnp_janet_lib = library(
@@ -47,6 +48,7 @@ install_headers(
   'include/capnp-janet/capnp_canonical.h',
   'include/capnp-janet/capnp_copy.h',
   'include/capnp-janet/capnp_janet.h',
+  'include/capnp-janet/capnp_rpc.h',
   subdir: 'capnp-janet',
 )
 
@@ -176,6 +178,14 @@ test(
   workdir: meson.project_source_root(),
   env: {'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root()},
 )
+
+test_rpc_join = executable(
+  'test_rpc_join',
+  'test/test_rpc_join.c',
+  dependencies: capnp_janet_dep,
+  include_directories: test_inc,
+)
+test('rpc_join', test_rpc_join)
 
 janet_dep = dependency('janet', required: get_option('janet'))
 if janet_dep.found()
