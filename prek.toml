@@ -39,7 +39,8 @@ hooks = [
   { id = "codespell", args = [
     "--skip=*.lock,*.bin,*.packed,*.canonical,CHANGELOG.md,docs/build/*",
     "-L",
-    "crate,nd,te,inout,ser,dout,clen",
+    # Verbatim Cap'n Proto schema vocabulary: capTable is a field name.
+    "crate,nd,te,inout,ser,dout,clen,capTable",
   ] },
 ]
 
