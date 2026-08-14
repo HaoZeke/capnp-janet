@@ -187,7 +187,7 @@ static const char *type_kw(uint16_t which) {
 }
 
 static void emit_struct(FILE *out, const capnp_ptr_t *node) {
-  /* Node struct group: dataWordCount @bits 112-128 = byte 14 as u16? 
+  /* Node struct group: dataWordCount @bits 112-128 = byte 14 as u16?
    * From compile: dataWordCount @7 :UInt16 bits[112, 128)
    * pointerCount @8 bits[192, 208)
    * fields @13 List(Field) ptr[3]
