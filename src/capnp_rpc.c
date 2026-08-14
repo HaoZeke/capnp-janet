@@ -102,6 +102,10 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define DIS_CTX_VALUE_OFF 0
 #define DIS_CTX_SENDER_LOOPBACK 0
 #define DIS_CTX_RECEIVER_LOOPBACK 1
+#define DIS_CTX_ACCEPT 2
+#define DIS_CTX_PROVIDE 3
+/* Accept.embargo is a bit, at bit offset 32 of the data section. */
+#define ACCEPT_EMBARGO_BIT 32
 #define DISEMBARGO_DW 1
 #define DISEMBARGO_PW 1
 /* MessageTarget union tags. */
@@ -696,6 +700,8 @@ static int handle_join(capnp_rpc_conn_t *c, const capnp_ptr_t *join)
   return CAPNP_OK;
 }
 
+static int release_provide_embargo(capnp_rpc_conn_t *c, uint32_t provide_qid);
+
 /* A Disembargo with `senderLoopback` is echoed back as `receiverLoopback`
  * carrying the same id. That reflection is what lets the sender know every
  * call it had already sent through a promise has arrived, so it can stop
@@ -710,6 +716,8 @@ static int handle_disembargo(capnp_rpc_conn_t *c, const capnp_ptr_t *dis)
 
   if (dis->kind != CAPNP_PK_STRUCT)
     return CAPNP_OK;
+  if (capnp_get_u16(dis, DIS_CTX_TAG_OFF, 0) == DIS_CTX_PROVIDE)
+    return release_provide_embargo(c, capnp_get_u32(dis, DIS_CTX_VALUE_OFF, 0));
   /* receiverLoopback is the reply to an embargo we raised, and this vat
    * raises none; accept it without echoing to avoid a loop. */
   if (capnp_get_u16(dis, DIS_CTX_TAG_OFF, 0) != DIS_CTX_SENDER_LOOPBACK)
@@ -1091,6 +1099,8 @@ static int handle_provide(capnp_rpc_conn_t *c, const capnp_ptr_t *provide)
       c->provisions[i].used = 1;
       c->provisions[i].nonce = nonce;
       c->provisions[i].export_id = eid;
+      c->provisions[i].question_id = qid;
+      c->provisions[i].embargoed = 0;
       /* The recipient holds a reference once it accepts. */
       c->exports[eid].refcount++;
       return send_empty_return(c, qid);
@@ -1110,7 +1120,7 @@ static int handle_accept(capnp_rpc_conn_t *c, const capnp_ptr_t *accept)
   capnp_ptr_t provision;
   uint32_t qid;
   uint64_t nonce;
-  int i, eid = -1, rc;
+  int i, eid = -1, rc, embargo;
 
   if (accept->kind != CAPNP_PK_STRUCT)
     return CAPNP_OK;
@@ -1120,15 +1130,28 @@ static int handle_accept(capnp_rpc_conn_t *c, const capnp_ptr_t *accept)
     return send_return_exception(c, qid, "accept: no provision");
   nonce = capnp_get_u64(&provision, PROVISION_NONCE_OFF, 0);
 
+  embargo = capnp_get_bool(accept, ACCEPT_EMBARGO_BIT, 0);
   for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++) {
-    if (c->provisions[i].used && c->provisions[i].nonce == nonce) {
+    if (c->provisions[i].used && !c->provisions[i].embargoed &&
+        c->provisions[i].nonce == nonce) {
       eid = c->provisions[i].export_id;
-      c->provisions[i].used = 0;
+      if (embargo) {
+        /* Claimed, but the Return waits: the recipient has pipelined
+         * calls in flight through the introducer, and answering now
+         * would let a later call overtake them. The introducer lifts it
+         * with Disembargo.provide. */
+        c->provisions[i].embargoed = 1;
+        c->provisions[i].accept_question_id = qid;
+      } else {
+        c->provisions[i].used = 0;
+      }
       break;
     }
   }
   if (eid < 0)
     return send_return_exception(c, qid, "accept: no such provision");
+  if (embargo)
+    return CAPNP_OK;
 
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
@@ -1140,6 +1163,50 @@ static int handle_accept(capnp_rpc_conn_t *c, const capnp_ptr_t *accept)
     rc = flush_answer(c, &b, qid);
   capnp_builder_free(&b);
   return rc;
+}
+
+/* Disembargo.provide: the introducer lifts the embargo on the Accept it
+ * arranged, naming its own Provide question. */
+static int release_provide_embargo(capnp_rpc_conn_t *c, uint32_t provide_qid)
+{
+  capnp_builder_t b;
+  capnp_bptr_t ret, payload;
+  int i, rc;
+
+  for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++) {
+    uint32_t qid;
+    int eid;
+    if (!c->provisions[i].used || !c->provisions[i].embargoed)
+      continue;
+    if (c->provisions[i].question_id != provide_qid)
+      continue;
+    qid = c->provisions[i].accept_question_id;
+    eid = c->provisions[i].export_id;
+    memset(&c->provisions[i], 0, sizeof c->provisions[i]);
+
+    capnp_builder_init(&b);
+    rc = begin_return(&b, qid, &ret, &payload);
+    if (rc == CAPNP_OK)
+      rc = write_cap_table(&payload, eid);
+    if (rc == CAPNP_OK)
+      rc = capnp_builder_set_cap(&payload, PAYLOAD_DW, 0, 0);
+    if (rc == CAPNP_OK)
+      rc = flush_answer(c, &b, qid);
+    capnp_builder_free(&b);
+    return rc;
+  }
+  /* A Disembargo naming nothing we hold is the sender's problem, not a
+   * reason to disturb this connection. */
+  return CAPNP_OK;
+}
+
+int capnp_rpc_embargoed_accepts(capnp_rpc_conn_t *c)
+{
+  int i, n = 0;
+  for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++)
+    if (c->provisions[i].used && c->provisions[i].embargoed)
+      n++;
+  return n;
 }
 
 int capnp_rpc_pending_provisions(capnp_rpc_conn_t *c, uint64_t *out, int cap)

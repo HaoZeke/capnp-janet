@@ -409,6 +409,57 @@ static void send_provide(capnp_rpc_conn_t *c, uint32_t qid, uint32_t export_id,
   capnp_builder_free(&b);
 }
 
+/* Carol -> us: claim the capability under `nonce`, but hold the answer
+ * until the introducer lifts the embargo. */
+static void send_accept_embargoed(capnp_rpc_conn_t *c, uint32_t qid, uint64_t nonce)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, accept, provision;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+
+  capnp_builder_init(&b);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  CHECK(capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK, "msg");
+  CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_ACCEPT) == CAPNP_OK, "accept tag");
+  CHECK(capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot) == CAPNP_OK, "msg slot");
+  CHECK(capnp_builder_struct(&slot, ACCEPT_DW, ACCEPT_PW, &accept) == CAPNP_OK, "accept");
+  CHECK(capnp_builder_set_u32(&accept, 0, qid) == CAPNP_OK, "qid");
+  CHECK(capnp_builder_set_bool(&accept, 32, 1) == CAPNP_OK, "embargo");
+  CHECK(capnp_builder_slot(&accept, ACCEPT_DW, 0, &slot) == CAPNP_OK, "pslot");
+  CHECK(capnp_builder_struct(&slot, PROVISION_DW, PROVISION_PW, &provision) == CAPNP_OK, "provision");
+  CHECK(capnp_builder_set_u64(&provision, 0, nonce) == CAPNP_OK, "nonce");
+
+  CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
+  capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+}
+
+/* Alice -> us: lift the embargo on the Accept she arranged, naming her
+ * own Provide question. */
+static void send_disembargo_provide(capnp_rpc_conn_t *c, uint32_t provide_qid)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, dis;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+
+  capnp_builder_init(&b);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  CHECK(capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK, "msg");
+  CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_DISEMBARGO) == CAPNP_OK, "dis tag");
+  CHECK(capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot) == CAPNP_OK, "msg slot");
+  CHECK(capnp_builder_struct(&slot, DIS_DW, DIS_PW, &dis) == CAPNP_OK, "dis");
+  CHECK(capnp_builder_set_u16(&dis, 4, 3) == CAPNP_OK, "provide tag");
+  CHECK(capnp_builder_set_u32(&dis, 0, provide_qid) == CAPNP_OK, "provide qid");
+
+  CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
+  capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+}
+
 /* Read a checked-in golden frame. Missing means a broken tree. */
 static uint8_t *load_frame(const char *name, size_t *len)
 {
@@ -713,6 +764,46 @@ int main(void)
     CHECK(!exc, "first claim succeeded");
     /* Claiming one leaves the other standing. */
     CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == 1, "the other stands");
+    outbox_clear(&out);
+  }
+
+  /* Level 3 embargo: an embargoed Accept claims the capability but is
+   * not answered until the introducer says the recipient's earlier calls
+   * have all arrived. Answering sooner would let a call sent straight to
+   * us overtake one still in flight through the introducer. */
+  {
+    const uint64_t nonce = 0x5150ULL;
+    uint32_t ansid;
+    int exc, cap;
+    int before = capnp_rpc_pending_provisions(&c, NULL, 0);
+
+    send_provide(&c, 70, 0, nonce);
+    outbox_clear(&out);
+
+    send_accept_embargoed(&c, 71, nonce);
+    CHECK(out.n == 0, "an embargoed Accept is not answered yet");
+    CHECK(capnp_rpc_embargoed_accepts(&c) == 1, "one embargoed accept held");
+
+    /* The arrangement is claimed, so a second Accept finds nothing. */
+    send_accept(&c, 72, nonce);
+    CHECK(out.n == 1, "second accept answered");
+    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
+    CHECK(exc, "a claimed provision cannot be claimed again");
+    outbox_clear(&out);
+
+    /* A Disembargo naming a Provide we never received changes nothing. */
+    send_disembargo_provide(&c, 999);
+    CHECK(out.n == 0, "unknown provide question ignored");
+    CHECK(capnp_rpc_embargoed_accepts(&c) == 1, "still held");
+
+    send_disembargo_provide(&c, 70);
+    CHECK(out.n == 1, "embargo lifted, accept answered");
+    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
+    CHECK(ansid == 71, "the embargoed Accept's answerId");
+    CHECK(!exc, "embargoed accept succeeded");
+    CHECK(cap, "embargoed accept got the capability");
+    CHECK(capnp_rpc_embargoed_accepts(&c) == 0, "embargo cleared");
+    CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == before, "provision consumed");
     outbox_clear(&out);
   }
 
