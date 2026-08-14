@@ -1,0 +1,73 @@
+# Git hooks via `prek` (https://prek.j178.dev) — Rust drop-in for pre-commit.
+# Install: `prek install`
+# Run all: `prek run -a`
+#:schema https://www.schemastore.org/prek.json
+
+minimum_prek_version = "0.3.0"
+
+exclude = """(?x)(
+    ^\\.pixi/|
+    ^_build/|
+    ^build/|
+    ^build-.*/|
+    ^docs/build/|
+    ^test/fixtures/|
+    ^pixi\\.lock$
+)"""
+
+[[repos]]
+repo = "builtin"
+hooks = [
+  { id = "trailing-whitespace" },
+  { id = "end-of-file-fixer" },
+  { id = "check-yaml" },
+  { id = "check-toml" },
+  { id = "check-merge-conflict" },
+  { id = "check-added-large-files", args = ["--maxkb=1000"] },
+  { id = "detect-private-key" },
+]
+
+[[repos]]
+repo = "https://github.com/pre-commit/pre-commit-hooks"
+rev = "v6.0.0"
+hooks = [{ id = "check-case-conflict" }]
+
+[[repos]]
+repo = "https://github.com/codespell-project/codespell"
+rev = "v2.4.1"
+hooks = [
+  { id = "codespell", args = [
+    "--skip=*.lock,*.bin,*.packed,*.canonical,CHANGELOG.md,docs/build/*",
+    "-L",
+    "crate,nd,te,inout,ser,dout,clen",
+  ] },
+]
+
+[[repos]]
+repo = "local"
+hooks = [
+  {
+    id = "version-lockstep",
+    name = "VERSION matches project.janet and docs conf.py release",
+    entry = "bash",
+    language = "system",
+    pass_filenames = false,
+    files = "^(VERSION|project\\.janet|docs/source/conf\\.py)$",
+    args = [
+      "-c",
+      "v=$(tr -d '[:space:]' < VERSION); r=$(rg -n '^release\\s*=' docs/source/conf.py | head -1 | sed -E 's/.*\"([^\"]+)\".*/\\1/'); if [ \"$v\" != \"$r\" ]; then echo \"version mismatch: VERSION=$v conf.py release=$r\"; exit 1; fi",
+    ],
+  },
+  {
+    id = "no-doubled-module-prefix",
+    name = "docs never show the capnp/capnp/ double prefix",
+    entry = "bash",
+    language = "system",
+    pass_filenames = false,
+    files = "^(README\\.md|docs/orgmode/.*\\.org|src/janet_mod\\.c)$",
+    args = [
+      "-c",
+      "if rg -n 'capnp/capnp/' README.md docs/orgmode src 2>/dev/null; then echo 'doubled module prefix: (import capnp) already adds capnp/'; exit 1; fi",
+    ],
+  },
+]
