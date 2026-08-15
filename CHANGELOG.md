@@ -8,6 +8,18 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-08-15
+
+### Fixed
+
+- The RPC tests keep their connections in static storage rather than on
+  the stack. A `capnp_rpc_conn_t` is about a megabyte, since the answer
+  and question tables hold their replies inline, and Windows gives a
+  thread a 1 MiB stack where Linux gives 8: the three RPC tests died
+  with STATUS_STACK_OVERFLOW on MSYS2, and the handoff test wanted six
+  connections at once. `capnp_rpc.h` now says so, so a caller does not
+  meet it the hard way.
+
 ## [0.2.4] - 2026-08-15
 
 ### Fixed
@@ -122,6 +134,7 @@ with fewer than two zero bytes). Canonical AddressBook matches
 `capnpc-janet` v1, list upgrade views.
 
 [Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.0...main
+[0.2.5]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.1...v0.2.2

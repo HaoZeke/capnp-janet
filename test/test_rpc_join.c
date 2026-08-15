@@ -562,7 +562,9 @@ static void bootstrap_once(capnp_rpc_conn_t *c, outbox_t *o)
 int main(void)
 {
   outbox_t out;
-  capnp_rpc_conn_t c;
+  /* static, not automatic: a connection is ~1 MiB and Windows gives a
+   * thread a 1 MiB stack, so an automatic one overflows it. */
+  static capnp_rpc_conn_t c;
   int calls = 0;
 
   /* Two parts naming one capability join, and one result carries the cap. */

@@ -90,7 +90,8 @@ static void fill_u32(void *ctx, const capnp_bptr_t *params)
 
 int main(void)
 {
-  capnp_rpc_conn_t client, vat;
+  /* static, not automatic: see test_rpc_join.c. */
+  static capnp_rpc_conn_t client, vat;
   uint32_t q, arg;
 
   memset(&g_to_vat, 0, sizeof g_to_vat);

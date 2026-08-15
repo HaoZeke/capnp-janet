@@ -7,6 +7,11 @@
  * "never used, because there is no third party". This family defines
  * one instead: schema/rpc-threeparty.capnp.
  *
+ * A connection is around a megabyte: the answer and question tables hold
+ * their replies inline. That is the whole default thread stack on
+ * Windows, so put one on the heap or in static storage rather than
+ * declaring it as a local.
+ *
  * The vat owns no transport. A caller feeds it whole framed messages and
  * receives whole framed messages back through the send callback, so it
  * works the same over a socket or a harness in one process.

@@ -157,8 +157,10 @@ int main(void)
   marked_t carols = {0, 1};
   uint32_t boot, provide, claim, replay, q, side;
   capnp_rpc_vat_t bob_vat;
-  capnp_rpc_conn_t alice_to_bob, bob_to_alice, carol_to_bob, bob_to_carol;
-  capnp_rpc_conn_t alice_to_carol, carol_to_alice;
+  /* static, not automatic: six connections at ~1 MiB each would be six
+   * times the whole default thread stack on Windows. */
+  static capnp_rpc_conn_t alice_to_bob, bob_to_alice, carol_to_bob, bob_to_carol;
+  static capnp_rpc_conn_t alice_to_carol, carol_to_alice;
   capnp_rpc_introduction_t learned[4];
   wire_t a2b, b2a, c2b, b2c, a2c, c2a;
 
