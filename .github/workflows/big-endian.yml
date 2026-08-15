@@ -1,0 +1,38 @@
+name: big-endian
+
+# The wire format is little-endian; the host need not be. A builder that
+# copies host-order words into a message round-trips perfectly on a
+# little-endian machine, because the reader undoes exactly what the
+# writer did, and is wrong on the wire. That defect shipped in 0.2.1 and
+# was caught by someone else's s390x runners, so run our own.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  s390x:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: full suite on emulated s390x (big-endian)
+        uses: uraimo/run-on-arch-action@v2
+        with:
+          arch: s390x
+          distro: bookworm
+          # No githubToken: GHCR package create is denied for this account
+          # and the suite does not need it.
+          install: |
+            apt-get update -q -y
+            apt-get install -q -y build-essential meson ninja-build pkg-config
+          run: |
+            set -euo pipefail
+            uname -m
+            cc --version | head -1
+            python3 -c 'import sys; print("byteorder:", sys.byteorder)'
+            meson setup build
+            meson test -C build --print-errorlogs
