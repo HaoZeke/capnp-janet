@@ -10,6 +10,26 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Added
 
+- RPC level 3, both halves. `Provide` holds a capability under the
+  recipient's nonce and `Accept` claims it; an `Accept` with `embargo`
+  waits for `Disembargo` with `context.provide`. A `thirdPartyHosted`
+  CapDescriptor records an introduction, handed over by
+  `capnp_rpc_pending_introductions` and finished by
+  `capnp_rpc_introduction_done`, which releases the vine.
+  `capnp_rpc_send_provide`, `capnp_rpc_send_accept` and
+  `capnp_rpc_send_disembargo_provide` are the introducer's side.
+- `schema/rpc-threeparty.capnp`, the network layer that names a third
+  vat, shared verbatim with c-capnproto, capnp-fortran and capnp-ts.
+  `rpc.capnp` leaves those ids to the network, and `rpc-twoparty.capnp`
+  declares them empty because a two-party connection has no third to
+  name. A vat speaks one layer or the other, not both.
+- `capnp_rpc_set_vat`: level 3 arrangements belong to a vat rather than
+  a connection, since a handoff is made on one and claimed on another.
+- `capnp_rpc_answer_cap_id`, without which a capability returned in an
+  answer could not be called.
+- Level 3 goldens the reference `capnp` CLI encodes
+  (`test/fixtures/rpc-{provide,accept,introduce}.bin`), regenerated and
+  verified by `scripts/gen-rpc-frames.sh`.
 - Janet bundle config (`bundle/info.jdn`, `bundle/init.janet`) so
   `janet --install .` wraps the existing `project.janet` via
   `jpm-shim-env`, same shape as jhydro.
