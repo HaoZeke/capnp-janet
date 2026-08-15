@@ -3,6 +3,7 @@
 
 #include <capnp-janet/capnp_message.h>
 #include <stddef.h>
+#include <capnp-janet/capnp_kinds.h>
 #include <stdint.h>
 
 /*
@@ -48,13 +49,13 @@ typedef struct capnp_bptr {
   size_t word;
 } capnp_bptr_t;
 
-void capnp_builder_init(capnp_builder_t *b);
-void capnp_builder_init_sized(capnp_builder_t *b, size_t first_words);
-void capnp_builder_free(capnp_builder_t *b);
-void capnp_builder_set_max_seg_words(capnp_builder_t *b, size_t max_words);
+CAPNP_JANET_EXPORT void capnp_builder_init(capnp_builder_t *b);
+CAPNP_JANET_EXPORT void capnp_builder_init_sized(capnp_builder_t *b, size_t first_words);
+CAPNP_JANET_EXPORT void capnp_builder_free(capnp_builder_t *b);
+CAPNP_JANET_EXPORT void capnp_builder_set_max_seg_words(capnp_builder_t *b, size_t max_words);
 
-uint32_t capnp_builder_nsegs(const capnp_builder_t *b);
-size_t capnp_builder_seg_words(const capnp_builder_t *b, uint32_t seg);
+CAPNP_JANET_EXPORT uint32_t capnp_builder_nsegs(const capnp_builder_t *b);
+CAPNP_JANET_EXPORT size_t capnp_builder_seg_words(const capnp_builder_t *b, uint32_t seg);
 const uint8_t *capnp_builder_seg_data(const capnp_builder_t *b, uint32_t seg);
 
 static inline capnp_bptr_t capnp_bptr_add(capnp_bptr_t base, size_t word_delta) {
@@ -62,74 +63,74 @@ static inline capnp_bptr_t capnp_bptr_add(capnp_bptr_t base, size_t word_delta) 
   return base;
 }
 
-int capnp_builder_root(capnp_builder_t *b, capnp_bptr_t *root);
-int capnp_builder_struct(capnp_bptr_t *ptr, uint16_t dwords, uint16_t pwords,
+CAPNP_JANET_EXPORT int capnp_builder_root(capnp_builder_t *b, capnp_bptr_t *root);
+CAPNP_JANET_EXPORT int capnp_builder_struct(capnp_bptr_t *ptr, uint16_t dwords, uint16_t pwords,
                          capnp_bptr_t *body_out);
 
-int capnp_builder_set_u16(const capnp_bptr_t *body, uint32_t byte_offset,
+CAPNP_JANET_EXPORT int capnp_builder_set_u16(const capnp_bptr_t *body, uint32_t byte_offset,
                           uint16_t value);
-int capnp_builder_set_u32(const capnp_bptr_t *body, uint32_t byte_offset,
+CAPNP_JANET_EXPORT int capnp_builder_set_u32(const capnp_bptr_t *body, uint32_t byte_offset,
                           uint32_t value);
-int capnp_builder_set_u64(const capnp_bptr_t *body, uint32_t byte_offset,
+CAPNP_JANET_EXPORT int capnp_builder_set_u64(const capnp_bptr_t *body, uint32_t byte_offset,
                           uint64_t value);
-int capnp_builder_set_f64(const capnp_bptr_t *body, uint32_t byte_offset,
+CAPNP_JANET_EXPORT int capnp_builder_set_f64(const capnp_bptr_t *body, uint32_t byte_offset,
                           double value);
-int capnp_builder_set_bool(const capnp_bptr_t *body, uint32_t bit_offset,
+CAPNP_JANET_EXPORT int capnp_builder_set_bool(const capnp_bptr_t *body, uint32_t bit_offset,
                            int value);
 
-int capnp_builder_slot(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_slot(const capnp_bptr_t *body, uint16_t dwords,
                        uint16_t ptr_index, capnp_bptr_t *slot);
 
-int capnp_builder_set_text(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_text(const capnp_bptr_t *body, uint16_t dwords,
                            uint16_t ptr_index, const char *text,
                            size_t text_len);
 /* Capability pointer naming capTable entry `cap_index`. */
-int capnp_builder_set_cap(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_cap(const capnp_bptr_t *body, uint16_t dwords,
                           uint16_t ptr_index, uint32_t cap_index);
-int capnp_builder_set_list_text(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_list_text(const capnp_bptr_t *body, uint16_t dwords,
                                 uint16_t ptr_index, const char *const *items,
                                 uint32_t nitems);
-int capnp_builder_set_data(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_data(const capnp_bptr_t *body, uint16_t dwords,
                            uint16_t ptr_index, const uint8_t *data,
                            size_t data_len);
 
-int capnp_builder_set_list_u8(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_list_u8(const capnp_bptr_t *body, uint16_t dwords,
                               uint16_t ptr_index, const uint8_t *items,
                               uint32_t nitems);
-int capnp_builder_set_list_u16(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_list_u16(const capnp_bptr_t *body, uint16_t dwords,
                                uint16_t ptr_index, const uint16_t *items,
                                uint32_t nitems);
-int capnp_builder_set_list_u32(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_list_u32(const capnp_bptr_t *body, uint16_t dwords,
                                uint16_t ptr_index, const uint32_t *items,
                                uint32_t nitems);
-int capnp_builder_set_list_u64(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_list_u64(const capnp_bptr_t *body, uint16_t dwords,
                                uint16_t ptr_index, const uint64_t *items,
                                uint32_t nitems);
-int capnp_builder_set_list_f64(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_list_f64(const capnp_bptr_t *body, uint16_t dwords,
                                uint16_t ptr_index, const double *items,
                                uint32_t nitems);
 
 /* List(Bool): items[i] non-zero = true. Bits packed LSB-first per byte. */
-int capnp_builder_set_list_bool(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_list_bool(const capnp_bptr_t *body, uint16_t dwords,
                                 uint16_t ptr_index, const uint8_t *items,
                                 uint32_t nitems);
 /* List(Void): length only; no element payload. */
-int capnp_builder_set_list_void(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_list_void(const capnp_bptr_t *body, uint16_t dwords,
                                 uint16_t ptr_index, uint32_t nitems);
 
-int capnp_builder_set_list_struct(const capnp_bptr_t *body, uint16_t dwords,
+CAPNP_JANET_EXPORT int capnp_builder_set_list_struct(const capnp_bptr_t *body, uint16_t dwords,
                                   uint16_t ptr_index, uint32_t nitems,
                                   uint16_t elem_dwords, uint16_t elem_pwords,
                                   capnp_bptr_t *first_elem);
 
-size_t capnp_builder_ptr_word(size_t body_word, uint16_t dwords,
+CAPNP_JANET_EXPORT size_t capnp_builder_ptr_word(size_t body_word, uint16_t dwords,
                               uint16_t ptr_index);
 
-int capnp_builder_copy_ptr(capnp_bptr_t *slot, const capnp_ptr_t *src);
+CAPNP_JANET_EXPORT int capnp_builder_copy_ptr(capnp_bptr_t *slot, const capnp_ptr_t *src);
 
-int capnp_builder_serialize(const capnp_builder_t *b, uint8_t **out,
+CAPNP_JANET_EXPORT int capnp_builder_serialize(const capnp_builder_t *b, uint8_t **out,
                             size_t *out_len);
 
-size_t capnp_builder_struct_body(const capnp_bptr_t *struct_ptr);
+CAPNP_JANET_EXPORT size_t capnp_builder_struct_body(const capnp_bptr_t *struct_ptr);
 
 #endif /* CAPNP_JANET_BUILDER_H */

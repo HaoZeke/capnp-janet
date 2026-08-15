@@ -4,6 +4,24 @@
 
 #include <stdint.h>
 
+/* Shared-library export. MSVC only writes an import library
+ * (capnp_janet.lib) when at least one symbol is __declspec(dllexport),
+ * so a Windows consumer cannot link a shared build without this. Static
+ * builds (CAPNP_JANET_STATIC) and non-Windows leave it empty. Define
+ * CAPNP_JANET_BUILDING when compiling the library objects.
+ */
+#if defined(CAPNP_JANET_STATIC)
+#define CAPNP_JANET_EXPORT
+#elif defined(_WIN32) || defined(__CYGWIN__)
+#ifdef CAPNP_JANET_BUILDING
+#define CAPNP_JANET_EXPORT __declspec(dllexport)
+#else
+#define CAPNP_JANET_EXPORT __declspec(dllimport)
+#endif
+#else
+#define CAPNP_JANET_EXPORT
+#endif
+
 enum {
   CAPNP_OK = 0,
   CAPNP_ERR_BOUNDS = 1,

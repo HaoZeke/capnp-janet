@@ -1,11 +1,11 @@
 /* Two-party Cap'n Proto RPC vat.
  *
  * Answers the level 1 messages a peer sends to a capability this vat
- * hosts, plus level 4 `Join`. Level 3 is absent by construction rather
- * than by omission: `Provide` and `Accept` introduce a capability to a
- * third vat, and a two-party connection has no way to name one --
- * rpc-twoparty.capnp declares `ThirdPartyCapId` and `RecipientId` empty,
- * "never used, because there is no third party".
+ * hosts, level 2 persistence hooks, level 3 in both directions, and
+ * level 4 `Join`. Level 3 needs a network layer that can name a third
+ * vat, which rpc-twoparty.capnp cannot -- it declares those ids empty,
+ * "never used, because there is no third party". This family defines
+ * one instead: schema/rpc-threeparty.capnp.
  *
  * The vat owns no transport. A caller feeds it whole framed messages and
  * receives whole framed messages back through the send callback, so it
@@ -203,17 +203,17 @@ typedef struct capnp_rpc_conn {
   void *send_ctx;
 } capnp_rpc_conn_t;
 
-void capnp_rpc_init(capnp_rpc_conn_t *c, capnp_rpc_send_fn send,
+CAPNP_JANET_EXPORT void capnp_rpc_init(capnp_rpc_conn_t *c, capnp_rpc_send_fn send,
                     void *send_ctx);
-void capnp_rpc_set_bootstrap(capnp_rpc_conn_t *c, void *server,
+CAPNP_JANET_EXPORT void capnp_rpc_set_bootstrap(capnp_rpc_conn_t *c, void *server,
                              capnp_rpc_dispatch_fn dispatch);
 
 /* Export a capability, or return the id it already holds; -1 when full. */
-int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
+CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
                      capnp_rpc_dispatch_fn dispatch);
 
 /* Handle one framed message. 0 when handled, non-zero on a bad frame. */
-int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
+CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
 
 /* --- client side -------------------------------------------------- */
 
@@ -222,27 +222,27 @@ typedef void (*capnp_rpc_fill_fn)(void *ctx, const capnp_bptr_t *params);
 
 /* Ask for the peer's bootstrap capability. Returns the questionId, or
  * (uint32_t)-1 when the question table is full. */
-uint32_t capnp_rpc_send_bootstrap(capnp_rpc_conn_t *c);
+CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_bootstrap(capnp_rpc_conn_t *c);
 
 /* Call a method on an imported capability. `fill` may be NULL.
  *
  * The caller gives the parameter struct's dimensions because only it
  * knows the method signature; a size guessed here silently drops any
  * field past the end. */
-uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
+CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
                              uint64_t interface_id, uint16_t method_id,
                              uint16_t params_dwords, uint16_t params_pwords,
                              capnp_rpc_fill_fn fill, void *fill_ctx);
 
 /* Tell the peer we are done with an answer, and drop our copy. */
-int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id);
+CAPNP_JANET_EXPORT int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id);
 
 /* Drop `count` references to an import. */
-int capnp_rpc_send_release(capnp_rpc_conn_t *c, uint32_t import_id,
+CAPNP_JANET_EXPORT int capnp_rpc_send_release(capnp_rpc_conn_t *c, uint32_t import_id,
                            uint32_t count);
 
-int capnp_rpc_is_answered(capnp_rpc_conn_t *c, uint32_t question_id);
-int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id);
+CAPNP_JANET_EXPORT int capnp_rpc_is_answered(capnp_rpc_conn_t *c, uint32_t question_id);
+CAPNP_JANET_EXPORT int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id);
 
 /* Results of an answered question. Returns CAPNP_OK and fills `msg_out`
  * / `out` on success. The caller frees `msg_out` with
@@ -251,41 +251,41 @@ int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id);
  * answer carries none. A returned capability arrives as a pointer into
  * the answer's capTable; calling it needs the id the descriptor beside
  * it names, which is what this reads. */
-int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id);
+CAPNP_JANET_EXPORT int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id);
 
-int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
+CAPNP_JANET_EXPORT int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
                              capnp_message_t *msg_out, capnp_ptr_t *out);
 
 /* Nonces of capabilities held for a third vat, for tests and shutdown
  * accounting. Writes up to `cap` entries and returns how many exist. */
-int capnp_rpc_pending_provisions(capnp_rpc_conn_t *c, uint64_t *out, int cap);
+CAPNP_JANET_EXPORT int capnp_rpc_pending_provisions(capnp_rpc_conn_t *c, uint64_t *out, int cap);
 
 /* Introductions handed to us and not yet picked up. Copies up to `cap`
  * into `out` (may be NULL) and returns how many are held. */
 /* Accepts claimed but still embargoed, awaiting Disembargo.provide. */
-int capnp_rpc_embargoed_accepts(capnp_rpc_conn_t *c);
+CAPNP_JANET_EXPORT int capnp_rpc_embargoed_accepts(capnp_rpc_conn_t *c);
 
 /* Share level 3 arrangements with this vat's other connections. Call
  * after capnp_rpc_init and before any Provide; `vat` must outlive the
  * connection. */
-void capnp_rpc_set_vat(capnp_rpc_conn_t *c, capnp_rpc_vat_t *vat);
+CAPNP_JANET_EXPORT void capnp_rpc_set_vat(capnp_rpc_conn_t *c, capnp_rpc_vat_t *vat);
 
 /* Ask the peer to hold `imported_cap` for a third vat, and return the
  * question id, which is also what a later Disembargo.provide names. The
  * nonce is the whole of the arrangement: the recipient presents it in an
  * Accept, and the host matches on it alone. */
-uint32_t capnp_rpc_send_provide(capnp_rpc_conn_t *c, uint32_t imported_cap,
+CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_provide(capnp_rpc_conn_t *c, uint32_t imported_cap,
                                 const char *recipient_host,
                                 uint16_t recipient_port, uint64_t nonce);
 
 /* Claim a capability a third vat provided for us. Returns the question
  * id; the answer carries the capability. */
-uint32_t capnp_rpc_send_accept(capnp_rpc_conn_t *c, uint64_t nonce, int embargo);
+CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_accept(capnp_rpc_conn_t *c, uint64_t nonce, int embargo);
 
 /* Lift the embargo on the Accept this vat arranged with Provide. */
-int capnp_rpc_send_disembargo_provide(capnp_rpc_conn_t *c, uint32_t provide_qid);
+CAPNP_JANET_EXPORT int capnp_rpc_send_disembargo_provide(capnp_rpc_conn_t *c, uint32_t provide_qid);
 
-int capnp_rpc_pending_introductions(capnp_rpc_conn_t *c,
+CAPNP_JANET_EXPORT int capnp_rpc_pending_introductions(capnp_rpc_conn_t *c,
                                     capnp_rpc_introduction_t *out, int cap);
 
 /* Finish the pickup for `nonce`: releases the vine, which the sender
@@ -293,28 +293,28 @@ int capnp_rpc_pending_introductions(capnp_rpc_conn_t *c,
  * third party has actually handed the capability over; releasing early
  * drops the fallback path with nothing in its place. Returns 0 on
  * success, -1 if no such introduction is held. */
-int capnp_rpc_introduction_done(capnp_rpc_conn_t *c, uint64_t nonce);
+CAPNP_JANET_EXPORT int capnp_rpc_introduction_done(capnp_rpc_conn_t *c, uint64_t nonce);
 
 /* Write a `thirdPartyHosted` descriptor into the builder `cd`: where the
  * recipient should go, which pending Provide to claim once there, and
  * the vine we export so calls work in the meantime. */
-int capnp_rpc_write_third_party_cap(capnp_rpc_conn_t *c, capnp_bptr_t *cd,
+CAPNP_JANET_EXPORT int capnp_rpc_write_third_party_cap(capnp_rpc_conn_t *c, capnp_bptr_t *cd,
                                     const char *host, uint16_t port,
                                     uint64_t nonce, uint32_t vine_id);
 
 /* --- stream flow control ------------------------------------------- */
 
-void capnp_rpc_stream_init(capnp_rpc_stream_t *s, int window);
+CAPNP_JANET_EXPORT void capnp_rpc_stream_init(capnp_rpc_stream_t *s, int window);
 
 /* Send one stream call, blocking only when the window is full. */
-int capnp_rpc_stream_send(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s,
+CAPNP_JANET_EXPORT int capnp_rpc_stream_send(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s,
                           uint32_t imported_cap, uint64_t interface_id,
                           uint16_t method_id, uint16_t params_dwords,
                           uint16_t params_pwords, capnp_rpc_fill_fn fill,
                           void *fill_ctx);
 
 /* Wait for every outstanding call. CAPNP_OK when all succeeded. */
-int capnp_rpc_stream_finish(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s);
+CAPNP_JANET_EXPORT int capnp_rpc_stream_finish(capnp_rpc_conn_t *c, capnp_rpc_stream_t *s);
 
 #ifdef __cplusplus
 }

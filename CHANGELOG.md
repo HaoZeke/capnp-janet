@@ -8,6 +8,23 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-08-15
+
+### Fixed
+
+- A shared build links on Windows. MSVC writes an import library only
+  when something is `__declspec(dllexport)`, so the build produced no
+  `capnp_janet.lib` and every consumer failed with LNK1181. The public
+  headers now carry `CAPNP_JANET_EXPORT`, defined by
+  `CAPNP_JANET_BUILDING` while building and `CAPNP_JANET_STATIC` for a
+  static archive, as c-capnproto already does. Found by WrapDB's MSVC
+  runners.
+
+### Changed
+
+- `capnp_rpc.h` no longer says level 3 is absent by construction. It has
+  been present since 0.2.0, over `schema/rpc-threeparty.capnp`.
+
 ## [0.2.2] - 2026-08-15
 
 ### Fixed
@@ -94,6 +111,7 @@ with fewer than two zero bytes). Canonical AddressBook matches
 `capnpc-janet` v1, list upgrade views.
 
 [Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.0...main
+[0.2.3]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/HaoZeke/capnp-janet/releases/tag/v0.2.0

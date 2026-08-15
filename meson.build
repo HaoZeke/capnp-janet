@@ -21,10 +21,21 @@ lib_sources = files(
   'src/capnp_rpc.c',
 )
 
+# MSVC writes an import library only when something is dllexport, so a
+# shared build without this produces no capnp_janet.lib and a consumer
+# cannot link. CAPNP_JANET_BUILDING marks the library objects;
+# CAPNP_JANET_STATIC keeps the headers from saying dllimport when the
+# archive is static.
+capnp_janet_consumer_args = []
+if get_option('default_library') == 'static'
+  capnp_janet_consumer_args += '-DCAPNP_JANET_STATIC'
+endif
+
 capnp_janet_lib = library(
   'capnp_janet',
   lib_sources,
   include_directories: inc,
+  c_args: capnp_janet_consumer_args + ['-DCAPNP_JANET_BUILDING'],
   install: true,
 )
 
@@ -32,6 +43,7 @@ capnp_janet_lib = library(
 capnp_janet_dep = declare_dependency(
   link_with: capnp_janet_lib,
   include_directories: inc,
+  compile_args: capnp_janet_consumer_args,
 )
 
 # Janet CFUN TU for hosts that embed their own Janet amalgamation.

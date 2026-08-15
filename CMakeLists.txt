@@ -60,6 +60,15 @@ add_library(capnp_janet
 )
 add_library(capnp_janet::capnp_janet ALIAS capnp_janet)
 
+# The headers say dllexport while the library is being built and
+# dllimport to a consumer; a static archive wants neither. Without this
+# MSVC sees inconsistent dll linkage against WINDOWS_EXPORT_ALL_SYMBOLS.
+if(BUILD_SHARED_LIBS)
+  target_compile_definitions(capnp_janet PRIVATE CAPNP_JANET_BUILDING)
+else()
+  target_compile_definitions(capnp_janet PUBLIC CAPNP_JANET_STATIC)
+endif()
+
 set_target_properties(capnp_janet PROPERTIES
   OUTPUT_NAME capnp_janet
   VERSION ${PROJECT_VERSION}

@@ -10,10 +10,10 @@
 /* Optional Janet registration (requires janet.h in the TU that links). */
 #ifdef CAPNP_JANET_WITH_JANET
 #include <janet.h>
-void capnp_janet_register(JanetTable *env);
-void capnp_janet_env(JanetTable *env);
+CAPNP_JANET_EXPORT void capnp_janet_register(JanetTable *env);
+CAPNP_JANET_EXPORT void capnp_janet_env(JanetTable *env);
 /* Fill an unmarshal registry so make-image / .jimage packs resolve capnp/*. */
-void capnp_janet_lookup_into(JanetTable *lookup);
+CAPNP_JANET_EXPORT void capnp_janet_lookup_into(JanetTable *lookup);
 #endif
 
 #endif /* CAPNP_JANET_H */

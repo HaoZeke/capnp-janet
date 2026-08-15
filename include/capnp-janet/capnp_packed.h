@@ -17,10 +17,10 @@
  */
 
 /* Pack word-aligned input. *out is malloc'd; caller frees. */
-int capnp_pack(const uint8_t *in, size_t in_len, uint8_t **out, size_t *out_len);
+CAPNP_JANET_EXPORT int capnp_pack(const uint8_t *in, size_t in_len, uint8_t **out, size_t *out_len);
 
 /* Unpack to word-aligned output. *out is malloc'd; caller frees. */
-int capnp_unpack(const uint8_t *in, size_t in_len, uint8_t **out,
+CAPNP_JANET_EXPORT int capnp_unpack(const uint8_t *in, size_t in_len, uint8_t **out,
                  size_t *out_len);
 
 #endif /* CAPNP_JANET_PACKED_H */
