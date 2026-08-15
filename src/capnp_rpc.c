@@ -1065,6 +1065,34 @@ int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id)
   return q && q->answered && q->failed;
 }
 
+int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id)
+{
+  capnp_rpc_question_t *q = question_find(c, question_id);
+  capnp_message_t m;
+  capnp_ptr_t root, ret, payload, content, table, desc;
+  int id = -1;
+
+  if (q == NULL || !q->answered || q->failed)
+    return -1;
+  if (capnp_message_from_flat(&m, q->reply, q->reply_len) != CAPNP_OK)
+    return -1;
+  if (capnp_root(&m, &root) == CAPNP_OK &&
+      capnp_get_u16(&root, MESSAGE_TAG_OFF, 0) == CAPNP_RPC_MSG_RETURN &&
+      capnp_getp(&root, 0, &ret) == CAPNP_OK &&
+      capnp_get_u16(&ret, RETURN_TAG_OFF, 0) == RETURN_TAG_RESULTS &&
+      capnp_getp(&ret, 0, &payload) == CAPNP_OK &&
+      capnp_getp(&payload, 0, &content) == CAPNP_OK &&
+      content.kind == CAPNP_PK_CAP &&
+      capnp_getp(&payload, 1, &table) == CAPNP_OK &&
+      content.count < capnp_list_len(&table) &&
+      capnp_list_get_struct(&table, content.count, &desc) == CAPNP_OK &&
+      capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0) == CAPDESC_TAG_SENDERHOSTED) {
+    id = (int)capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0);
+  }
+  capnp_message_free(&m);
+  return id;
+}
+
 int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
                              capnp_message_t *msg_out, capnp_ptr_t *out)
 {

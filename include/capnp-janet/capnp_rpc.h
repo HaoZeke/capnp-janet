@@ -247,6 +247,12 @@ int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id);
 /* Results of an answered question. Returns CAPNP_OK and fills `msg_out`
  * / `out` on success. The caller frees `msg_out` with
  * capnp_message_free. */
+/* The import id of a capability an answer returned, or -1 when the
+ * answer carries none. A returned capability arrives as a pointer into
+ * the answer's capTable; calling it needs the id the descriptor beside
+ * it names, which is what this reads. */
+int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id);
+
 int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
                              capnp_message_t *msg_out, capnp_ptr_t *out);
 

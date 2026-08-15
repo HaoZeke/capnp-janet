@@ -74,16 +74,22 @@ static void flush_wire(wire_t *w)
   }
 }
 
-static int counting_dispatch(void *server, uint64_t iface, uint16_t method,
-                             const capnp_ptr_t *params,
-                             const capnp_bptr_t *results)
+/* Answers with its own mark, so a call shows which object it reached. */
+typedef struct marked {
+  int calls;
+  uint32_t mark;
+} marked_t;
+
+static int marked_dispatch(void *server, uint64_t iface, uint16_t method,
+                           const capnp_ptr_t *params,
+                           const capnp_bptr_t *results)
 {
-  int *calls = (int *)server;
+  marked_t *m = (marked_t *)server;
   (void)iface;
   (void)method;
   (void)params;
-  (*calls)++;
-  return capnp_builder_set_u32(results, 0, 42);
+  m->calls++;
+  return capnp_builder_set_u32(results, 0, m->mark);
 }
 
 /* Alice -> Carol: a call whose params name the capability Bob hosts.
@@ -141,8 +147,15 @@ static int answered_with_cap(capnp_rpc_conn_t *c, uint32_t qid)
 int main(void)
 {
   const uint64_t nonce = 0x5eedULL;
-  int calls = 0, carol_calls = 0, before;
-  uint32_t boot, provide, claim, replay, q;
+  int before, claimed_id;
+  marked_t hosted = {0, 42};
+  /* Bob answers Carol's connection with a different object, so the two
+   * connections do not agree on export ids by accident: the capability
+   * Alice hands over must arrive under an id of Carol's connection, not
+   * the one Alice used. */
+  marked_t sidecar = {0, 1000};
+  marked_t carols = {0, 1};
+  uint32_t boot, provide, claim, replay, q, side;
   capnp_rpc_vat_t bob_vat;
   capnp_rpc_conn_t alice_to_bob, bob_to_alice, carol_to_bob, bob_to_carol;
   capnp_rpc_conn_t alice_to_carol, carol_to_alice;
@@ -168,9 +181,9 @@ int main(void)
    * on hers is claimable on Carol's. */
   capnp_rpc_set_vat(&bob_to_alice, &bob_vat);
   capnp_rpc_set_vat(&bob_to_carol, &bob_vat);
-  capnp_rpc_set_bootstrap(&bob_to_alice, &calls, counting_dispatch);
-  capnp_rpc_set_bootstrap(&bob_to_carol, &calls, counting_dispatch);
-  capnp_rpc_set_bootstrap(&carol_to_alice, &carol_calls, counting_dispatch);
+  capnp_rpc_set_bootstrap(&bob_to_alice, &hosted, marked_dispatch);
+  capnp_rpc_set_bootstrap(&bob_to_carol, &sidecar, marked_dispatch);
+  capnp_rpc_set_bootstrap(&carol_to_alice, &carols, marked_dispatch);
 
   a2b.peer = &bob_to_alice;
   b2a.peer = &alice_to_bob;
@@ -205,6 +218,13 @@ int main(void)
   CHECK(strcmp(learned[0].host, "10.0.0.1") == 0, "introduction host");
   CHECK(learned[0].port == 5000, "introduction port");
 
+  /* Carol bootstraps Bob first, so her connection's export 0 is the
+   * sidecar and the handed-over capability cannot land on 0 too. */
+  side = capnp_rpc_send_bootstrap(&carol_to_bob);
+  flush_wire(&c2b);
+  flush_wire(&b2c);
+  CHECK(capnp_rpc_is_answered(&carol_to_bob, side), "sidecar bootstrapped");
+
   /* 3. Carol presents the nonce to Bob, over her own connection. She was
    *    never told which export id Alice used, and it would mean nothing
    *    here: the arrangement is keyed by the nonce alone. */
@@ -225,13 +245,20 @@ int main(void)
   CHECK(capnp_rpc_introduction_done(&carol_to_alice, nonce) == 0, "pickup finished");
   CHECK(capnp_rpc_pending_introductions(&carol_to_alice, NULL, 0) == 0, "vine dropped");
 
-  /* Carol now holds the capability Bob hosts: a call on it reaches the
-   * very object Alice was talking to. */
-  before = calls;
-  q = capnp_rpc_send_call(&carol_to_bob, 0, 0x1234, 0, 1, 0, NULL, NULL);
+  /* Carol now holds the capability Bob hosts. Calling it reaches the
+   * object Alice was talking to, not whatever else sits at that id on
+   * Carol's connection: this one answers 42, the sidecar 1000. */
+  claimed_id = capnp_rpc_answer_cap_id(&carol_to_bob, claim);
+  /* Not the id Alice used: her connection called it 0, and 0 here is the
+   * sidecar. */
+  CHECK(claimed_id > 0, "the claim named an id of Carol's connection");
+  before = hosted.calls;
+  q = capnp_rpc_send_call(&carol_to_bob, (uint32_t)claimed_id, 0x1234, 0, 1, 0,
+                          NULL, NULL);
   flush_wire(&c2b);
   flush_wire(&b2c);
-  CHECK(calls == before + 1, "the call reached the hosted object");
+  CHECK(hosted.calls == before + 1, "the call reached the object Alice provided");
+  CHECK(sidecar.calls == 0, "and not the sidecar");
   CHECK(capnp_rpc_is_answered(&carol_to_bob, q), "the call was answered");
 
   if (g_failures != 0) {
