@@ -21,7 +21,16 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* getcwd below. MSVC has no <unistd.h> and spells it _getcwd in
+ * <direct.h>; MinGW and the MSYS2 environments have the POSIX header. */
+#ifdef _MSC_VER
+#include <direct.h>
+#define capnp_janet_getcwd _getcwd
+#else
 #include <unistd.h>
+#define capnp_janet_getcwd getcwd
+#endif
 
 /* CodeGeneratorRequest: 0 data, 4 ptrs — nodes@0, requestedFiles@1, ... */
 /* Node: 6 data words, 6 ptrs — see schema.capnp */
@@ -448,7 +457,7 @@ static int write_module(const char *filename, const capnp_ptr_t *nodes,
   /* Plugin protocol: print absolute or relative path of generated file */
   {
     char cwd[1024];
-    if (getcwd(cwd, sizeof(cwd)))
+    if (capnp_janet_getcwd(cwd, sizeof(cwd)))
       printf("%s/%s\n", cwd, outpath);
     else
       printf("%s\n", outpath);

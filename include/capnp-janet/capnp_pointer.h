@@ -18,6 +18,15 @@ static inline uint32_t capnp_load_le32(const uint8_t *p) {
          ((uint32_t)p[3] << 24);
 }
 
+static inline uint16_t capnp_load_le16(const uint8_t *p) {
+  return (uint16_t)((uint16_t)p[0] | ((uint16_t)p[1] << 8));
+}
+
+static inline void capnp_store_le16(uint8_t *p, uint16_t v) {
+  p[0] = (uint8_t)(v);
+  p[1] = (uint8_t)(v >> 8);
+}
+
 static inline void capnp_store_le64(uint8_t *p, uint64_t v) {
   p[0] = (uint8_t)(v);
   p[1] = (uint8_t)(v >> 8);

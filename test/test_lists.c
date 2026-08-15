@@ -35,6 +35,41 @@ static void test_list_u32(void) {
   capnp_message_free(&m);
 }
 
+/* A primitive list is little-endian on the wire whatever the host is.
+ *
+ * The round-trip tests above pass on a little-endian host even when the
+ * builder writes host order, because the reader undoes exactly what the
+ * writer did. Pinning the bytes is what catches that: on s390x the
+ * builder wrote 00 00 00 01 where the format says 01 00 00 00.
+ */
+static void test_list_u32_wire_bytes(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body;
+  uint32_t items[] = {1, 2, 100};
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  /* Segment table (8) + root pointer (8) + struct body (8) + the list's
+   * three u32 elements padded to two words. The elements start at byte
+   * 24: 01 00 00 00  02 00 00 00  64 00 00 00. */
+  static const uint8_t want[] = {0x01, 0x00, 0x00, 0x00, 0x02, 0x00,
+                                 0x00, 0x00, 0x64, 0x00, 0x00, 0x00};
+  size_t i, off = 24;
+
+  capnp_builder_init(&b);
+  capnp_builder_root(&b, &root);
+  capnp_builder_struct(&root, 0, 1, &body);
+  CHECK(capnp_builder_set_list_u32(&body, 0, 0, items, 3) == CAPNP_OK,
+        "set list u32");
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
+  capnp_builder_free(&b);
+  CHECK(flen >= off + sizeof want, "frame long enough");
+  if (flen >= off + sizeof want) {
+    for (i = 0; i < sizeof want; i++)
+      CHECK(flat[off + i] == want[i], "list element byte");
+  }
+  free(flat);
+}
+
 static void test_data_blob(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body;
@@ -178,6 +213,7 @@ static void test_list_u64(void) {
 
 int main(void) {
   test_list_u32();
+  test_list_u32_wire_bytes();
   test_struct_u64();
   test_list_u64();
   test_data_blob();

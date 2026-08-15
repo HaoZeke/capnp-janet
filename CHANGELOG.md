@@ -8,6 +8,22 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-08-15
+
+### Fixed
+
+- Primitive lists are written little-endian element by element. The
+  builder bulk-copied the caller's array into the message, which is the
+  host's byte order, so on a big-endian host every element came back
+  swapped: 1 read as 16777216. The round-trip tests could not see it,
+  because the reader undid exactly what the writer did; a test that pins
+  the serialized bytes can, and now does. Found by WrapDB's s390x
+  runners.
+- `capnpc-janet` builds under MSVC. It reached for `getcwd` through
+  `<unistd.h>`, which MSVC does not have; it is `_getcwd` in
+  `<direct.h>` there, while MinGW and the MSYS2 environments keep the
+  POSIX spelling.
+
 ## [0.2.1] - 2026-08-15
 
 ### Fixed
@@ -78,5 +94,6 @@ with fewer than two zero bytes). Canonical AddressBook matches
 `capnpc-janet` v1, list upgrade views.
 
 [Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.0...main
+[0.2.2]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/HaoZeke/capnp-janet/releases/tag/v0.2.0

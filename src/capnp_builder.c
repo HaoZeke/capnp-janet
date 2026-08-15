@@ -501,8 +501,32 @@ static int set_list_prim(const capnp_bptr_t *body, uint16_t dwords,
       return CAPNP_ERR_ALLOC;
     memset(wbytes(body->b, start_seg, start_word), 0,
            nwords * CAPNP_WORD_BYTES);
-    if (items && nbytes)
-      memcpy(wbytes(body->b, start_seg, start_word), items, nbytes);
+    if (items && nbytes) {
+      /* Element by element, little-endian: the wire format is
+       * little-endian and the caller's array is in host order, so a bulk
+       * memcpy is only right by accident on a little-endian host. */
+      uint8_t *dst = wbytes(body->b, start_seg, start_word);
+      uint32_t i;
+      switch (elem_bytes) {
+      case 1:
+        memcpy(dst, items, nbytes);
+        break;
+      case 2:
+        for (i = 0; i < nitems; i++)
+          capnp_store_le16(dst + (size_t)i * 2, ((const uint16_t *)items)[i]);
+        break;
+      case 4:
+        for (i = 0; i < nitems; i++)
+          capnp_store_le32(dst + (size_t)i * 4, ((const uint32_t *)items)[i]);
+        break;
+      case 8:
+        for (i = 0; i < nitems; i++)
+          capnp_store_le64(dst + (size_t)i * 8, ((const uint64_t *)items)[i]);
+        break;
+      default:
+        return CAPNP_ERR_ARG;
+      }
+    }
   } else {
     start_seg = body->seg;
     start_word = ptr_word + 1;
