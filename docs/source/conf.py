@@ -1,7 +1,7 @@
 project = "capnp-janet"
 copyright = "2026, Rohit Goswami"
 author = "Rohit Goswami"
-release = "0.2.3"
+release = "0.2.4"
 
 extensions = [
     "sphinx_copybutton",

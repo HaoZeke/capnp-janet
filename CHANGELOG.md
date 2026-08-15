@@ -8,6 +8,17 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-08-15
+
+### Fixed
+
+- `capnp_builder_seg_data` is exported too. 0.2.3 annotated the public
+  API by pattern and this one declaration, which puts the `*` on the
+  name rather than the type, slipped through: a Windows consumer linking
+  the shared library got an undefined symbol instead of a missing import
+  library. Checked exhaustively this time, and against the symbols the
+  tests actually use.
+
 ## [0.2.3] - 2026-08-15
 
 ### Fixed
@@ -111,6 +122,7 @@ with fewer than two zero bytes). Canonical AddressBook matches
 `capnpc-janet` v1, list upgrade views.
 
 [Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.0...main
+[0.2.4]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.2...v0.2.3
 [0.2.2]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.1...v0.2.2
 [0.2.1]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.0...v0.2.1

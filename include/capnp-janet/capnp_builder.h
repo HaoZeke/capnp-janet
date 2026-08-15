@@ -56,7 +56,8 @@ CAPNP_JANET_EXPORT void capnp_builder_set_max_seg_words(capnp_builder_t *b, size
 
 CAPNP_JANET_EXPORT uint32_t capnp_builder_nsegs(const capnp_builder_t *b);
 CAPNP_JANET_EXPORT size_t capnp_builder_seg_words(const capnp_builder_t *b, uint32_t seg);
-const uint8_t *capnp_builder_seg_data(const capnp_builder_t *b, uint32_t seg);
+CAPNP_JANET_EXPORT const uint8_t *capnp_builder_seg_data(const capnp_builder_t *b,
+                                                         uint32_t seg);
 
 static inline capnp_bptr_t capnp_bptr_add(capnp_bptr_t base, size_t word_delta) {
   base.word += word_delta;
