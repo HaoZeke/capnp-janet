@@ -872,6 +872,29 @@ int main(void)
     outbox_clear(&out);
   }
 
+  /* The frame the reference encoder writes, rather than one these tests
+   * built: a layout the writer and reader share but the wire format does
+   * not would pass every case above. */
+  {
+    uint8_t *frame;
+    size_t len = 0;
+    capnp_rpc_introduction_t got[4];
+    int before = capnp_rpc_pending_introductions(&c, NULL, 0);
+
+    frame = load_frame("rpc-introduce.bin", &len);
+    if (frame) {
+      CHECK(capnp_rpc_handle(&c, frame, len) == CAPNP_OK, "reference call handled");
+      free(frame);
+      CHECK(capnp_rpc_pending_introductions(&c, got, 4) == before + 1,
+            "reference introduction recorded");
+      CHECK(got[before].nonce == 0xabcdefULL, "reference nonce");
+      CHECK(got[before].vine_id == 77, "reference vine");
+      CHECK(got[before].port == 5000, "reference port");
+      CHECK(strcmp(got[before].host, "10.0.0.7") == 0, "reference host");
+      outbox_clear(&out);
+    }
+  }
+
   /* Level 3 driven by frames the reference `capnp` CLI encoded.
    *
    * Everything above builds its own Provide and Accept, so it shows the
