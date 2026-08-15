@@ -8,6 +8,16 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-15
+
+### Fixed
+
+- `bash` is optional. It was a hard `find_program(required: true)` for
+  one test script, so configure failed outright on a musl host, which
+  ships busybox `ash` and no bash: the library could not be built at all
+  because of a smoke test. The test registers only when bash is present.
+  Found by WrapDB's Alpine runners, on every architecture.
+
 ## [0.2.0] - 2026-08-15
 
 First tagged release. RPC levels 1 through 4, level 3 over the
@@ -68,4 +78,5 @@ with fewer than two zero bytes). Canonical AddressBook matches
 `capnpc-janet` v1, list upgrade views.
 
 [Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.0...main
+[0.2.1]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/HaoZeke/capnp-janet/releases/tag/v0.2.0

@@ -153,18 +153,25 @@ test(
   env: {'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root()},
 )
 
-# capnpc-janet smoke (needs system `capnp` CLI).
-bash = find_program('bash', required: true)
-test(
-  'codegen',
-  bash,
-  args: [meson.project_source_root() / 'test/test_codegen.sh'],
-  depends: [capnpc_janet],
-  workdir: meson.project_source_root(),
-  env: {
-    'CAPNP_JANET_BUILD': meson.project_build_root(),
-  },
-)
+# capnpc-janet smoke (needs bash and the system `capnp` CLI; the script
+# skips itself without capnp). Optional: a musl host has no bash, and a
+# consumer pulling this in as a subproject should not be told to install
+# one to build the library.
+bash = find_program('bash', required: false)
+if bash.found()
+  test(
+    'codegen',
+    bash,
+    args: [meson.project_source_root() / 'test/test_codegen.sh'],
+    depends: [capnpc_janet],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
+else
+  message('codegen smoke: skipped (no bash).')
+endif
 
 test_copy = executable(
   'test_copy',
@@ -216,7 +223,6 @@ cpp_ok = add_languages('cpp', required: false, native: false)
 capnp_rpc_dep = dependency('capnp-rpc', required: false)
 capnp_tool = find_program('capnp', required: false)
 capnpc_cpp = find_program('capnpc-c++', required: false)
-bash = find_program('bash', required: false)
 
 if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found() and bash.found()
   adder_cpp = custom_target(
