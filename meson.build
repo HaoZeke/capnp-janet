@@ -1,7 +1,7 @@
 project(
   'capnp-janet',
   'c',
-  version: files('VERSION'),
+  version: files('VERSION.txt'),
   license: 'MIT',
   meson_version: '>=1.2',
   default_options: [

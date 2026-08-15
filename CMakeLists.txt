@@ -22,7 +22,7 @@
 
 cmake_minimum_required(VERSION 3.16)
 
-file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION" _capnp_janet_version_raw)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/VERSION.txt" _capnp_janet_version_raw)
 string(STRIP "${_capnp_janet_version_raw}" _capnp_janet_version_raw)
 # CMake project() rejects a -dev suffix; keep the numeric part.
 string(REGEX MATCH "^[0-9]+\\.[0-9]+\\.[0-9]+" CAPNP_JANET_VERSION "${_capnp_janet_version_raw}")

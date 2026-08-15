@@ -8,6 +8,19 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-08-15
+
+First tagged release. RPC levels 1 through 4, level 3 over the
+three-party network layer this family shares, and a meson build a
+consumer can pull in as a subproject.
+
+### Changed
+
+- `VERSION` is now `VERSION.txt`. On a case-insensitive filesystem a
+  file called `VERSION` in an implicit include directory answers
+  `#include <version>`, which is how libc++ breaks on macOS; c-capnproto
+  met exactly that and this avoids it before a release goes out.
+
 ### Added
 
 - RPC level 3, both halves. `Provide` holds a capability under the
@@ -54,4 +67,5 @@ with fewer than two zero bytes). Canonical AddressBook matches
 `capnp convert binary:canonical`. Multi-segment builder, far/double-far,
 `capnpc-janet` v1, list upgrade views.
 
-[Unreleased]: https://github.com/HaoZeke/capnp-janet/commits/main
+[Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.0...main
+[0.2.0]: https://github.com/HaoZeke/capnp-janet/releases/tag/v0.2.0

@@ -50,14 +50,14 @@ repo = "local"
 hooks = [
   {
     id = "version-lockstep",
-    name = "VERSION matches project.janet and docs conf.py release",
+    name = "VERSION.txt matches project.janet and docs conf.py release",
     entry = "bash",
     language = "system",
     pass_filenames = false,
-    files = "^(VERSION|project\\.janet|docs/source/conf\\.py)$",
+    files = "^(VERSION\\.txt|project\\.janet|docs/source/conf\\.py)$",
     args = [
       "-c",
-      "set -eu; v=$(tr -d '[:space:]' < VERSION); r=$(sed -n 's/^release[[:space:]]*=[[:space:]]*\"\\(.*\\)\"/\\1/p' docs/source/conf.py | head -1); if [ -z \"$v\" ] || [ -z \"$r\" ]; then echo \"could not read a version: VERSION='$v' conf.py release='$r'\"; exit 1; fi; if [ \"$v\" != \"$r\" ]; then echo \"version mismatch: VERSION=$v conf.py release=$r\"; exit 1; fi",
+      "set -eu; v=$(tr -d '[:space:]' < VERSION.txt); r=$(sed -n 's/^release[[:space:]]*=[[:space:]]*\"\\(.*\\)\"/\\1/p' docs/source/conf.py | head -1); if [ -z \"$v\" ] || [ -z \"$r\" ]; then echo \"could not read a version: VERSION='$v' conf.py release='$r'\"; exit 1; fi; if [ \"$v\" != \"$r\" ]; then echo \"version mismatch: VERSION=$v conf.py release=$r\"; exit 1; fi",
     ],
   },
   {
