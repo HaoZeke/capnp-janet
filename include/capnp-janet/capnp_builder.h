@@ -68,12 +68,16 @@ CAPNP_JANET_EXPORT int capnp_builder_root(capnp_builder_t *b, capnp_bptr_t *root
 CAPNP_JANET_EXPORT int capnp_builder_struct(capnp_bptr_t *ptr, uint16_t dwords, uint16_t pwords,
                          capnp_bptr_t *body_out);
 
+CAPNP_JANET_EXPORT int capnp_builder_set_u8(const capnp_bptr_t *body, uint32_t byte_offset,
+                         uint8_t value);
 CAPNP_JANET_EXPORT int capnp_builder_set_u16(const capnp_bptr_t *body, uint32_t byte_offset,
                           uint16_t value);
 CAPNP_JANET_EXPORT int capnp_builder_set_u32(const capnp_bptr_t *body, uint32_t byte_offset,
                           uint32_t value);
 CAPNP_JANET_EXPORT int capnp_builder_set_u64(const capnp_bptr_t *body, uint32_t byte_offset,
                           uint64_t value);
+CAPNP_JANET_EXPORT int capnp_builder_set_f32(const capnp_bptr_t *body, uint32_t byte_offset,
+                          float value);
 CAPNP_JANET_EXPORT int capnp_builder_set_f64(const capnp_bptr_t *body, uint32_t byte_offset,
                           double value);
 CAPNP_JANET_EXPORT int capnp_builder_set_bool(const capnp_bptr_t *body, uint32_t bit_offset,

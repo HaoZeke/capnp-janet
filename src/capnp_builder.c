@@ -335,6 +335,18 @@ static int body_ok(const capnp_bptr_t *body, size_t abs_end) {
   return CAPNP_OK;
 }
 
+int capnp_builder_set_u8(const capnp_bptr_t *body, uint32_t byte_offset,
+                         uint8_t value) {
+  size_t abs;
+  if (!body || !body->b)
+    return CAPNP_ERR_ARG;
+  abs = body->word * CAPNP_WORD_BYTES + byte_offset;
+  if (body_ok(body, abs + 1))
+    return CAPNP_ERR_BOUNDS;
+  body->b->segs[body->seg].data[abs] = value;
+  return CAPNP_OK;
+}
+
 int capnp_builder_set_u16(const capnp_bptr_t *body, uint32_t byte_offset,
                           uint16_t value) {
   size_t abs;
@@ -372,6 +384,13 @@ int capnp_builder_set_u64(const capnp_bptr_t *body, uint32_t byte_offset,
     return CAPNP_ERR_BOUNDS;
   capnp_store_le64(body->b->segs[body->seg].data + abs, value);
   return CAPNP_OK;
+}
+
+int capnp_builder_set_f32(const capnp_bptr_t *body, uint32_t byte_offset,
+                          float value) {
+  uint32_t bits;
+  memcpy(&bits, &value, sizeof(bits));
+  return capnp_builder_set_u32(body, byte_offset, bits);
 }
 
 int capnp_builder_set_f64(const capnp_bptr_t *body, uint32_t byte_offset,
