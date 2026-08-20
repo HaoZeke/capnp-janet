@@ -149,13 +149,40 @@ static Janet cfun_getp(int32_t argc, Janet *argv) {
   return make_ptr(p->message_abs, &out);
 }
 
+static Janet cfun_get_u8(int32_t argc, Janet *argv) {
+  janet_arity(argc, 2, 3);
+  capnp_ptr_wrap *p = get_ptr(argv, 0);
+  int32_t off = janet_getinteger(argv, 1);
+  uint8_t dflt = argc > 2 ? (uint8_t)janet_getinteger(argv, 2) : 0;
+  uint8_t raw = capnp_get_u8(&p->ptr, (uint32_t)off, 0);
+  return janet_wrap_number((double)(raw ^ dflt));
+}
+
+static Janet cfun_get_i8(int32_t argc, Janet *argv) {
+  janet_arity(argc, 2, 3);
+  capnp_ptr_wrap *p = get_ptr(argv, 0);
+  int32_t off = janet_getinteger(argv, 1);
+  int8_t dflt = argc > 2 ? (int8_t)janet_getinteger(argv, 2) : 0;
+  uint8_t raw = capnp_get_u8(&p->ptr, (uint32_t)off, 0);
+  return janet_wrap_number((double)(int8_t)(raw ^ (uint8_t)dflt));
+}
+
 static Janet cfun_get_u16(int32_t argc, Janet *argv) {
   janet_arity(argc, 2, 3);
   capnp_ptr_wrap *p = get_ptr(argv, 0);
   int32_t off = janet_getinteger(argv, 1);
   uint16_t dflt = argc > 2 ? (uint16_t)janet_getinteger(argv, 2) : 0;
-  return janet_wrap_number(
-      (double)capnp_get_u16(&p->ptr, (uint32_t)off, dflt));
+  uint16_t raw = capnp_get_u16(&p->ptr, (uint32_t)off, 0);
+  return janet_wrap_number((double)(raw ^ dflt));
+}
+
+static Janet cfun_get_i16(int32_t argc, Janet *argv) {
+  janet_arity(argc, 2, 3);
+  capnp_ptr_wrap *p = get_ptr(argv, 0);
+  int32_t off = janet_getinteger(argv, 1);
+  int16_t dflt = argc > 2 ? (int16_t)janet_getinteger(argv, 2) : 0;
+  uint16_t raw = capnp_get_u16(&p->ptr, (uint32_t)off, 0);
+  return janet_wrap_number((double)(int16_t)(raw ^ (uint16_t)dflt));
 }
 
 static Janet cfun_get_u32(int32_t argc, Janet *argv) {
@@ -163,8 +190,17 @@ static Janet cfun_get_u32(int32_t argc, Janet *argv) {
   capnp_ptr_wrap *p = get_ptr(argv, 0);
   int32_t off = janet_getinteger(argv, 1);
   uint32_t dflt = argc > 2 ? (uint32_t)janet_getinteger(argv, 2) : 0;
-  return janet_wrap_number(
-      (double)capnp_get_u32(&p->ptr, (uint32_t)off, dflt));
+  uint32_t raw = capnp_get_u32(&p->ptr, (uint32_t)off, 0);
+  return janet_wrap_number((double)(raw ^ dflt));
+}
+
+static Janet cfun_get_i32(int32_t argc, Janet *argv) {
+  janet_arity(argc, 2, 3);
+  capnp_ptr_wrap *p = get_ptr(argv, 0);
+  int32_t off = janet_getinteger(argv, 1);
+  int32_t dflt = argc > 2 ? janet_getinteger(argv, 2) : 0;
+  uint32_t raw = capnp_get_u32(&p->ptr, (uint32_t)off, 0);
+  return janet_wrap_number((double)(int32_t)(raw ^ (uint32_t)dflt));
 }
 
 static Janet cfun_get_u64(int32_t argc, Janet *argv) {
@@ -172,14 +208,34 @@ static Janet cfun_get_u64(int32_t argc, Janet *argv) {
   capnp_ptr_wrap *p = get_ptr(argv, 0);
   int32_t off = janet_getinteger(argv, 1);
   /* Number path: mantissa-safe integers (same as build-message :u64). */
-  uint64_t dflt = 0;
-  if (argc > 2) {
-    if (!janet_checktype(argv[2], JANET_NUMBER))
-      janet_panic("capnp/get-u64: default must be number");
-    dflt = (uint64_t)janet_unwrap_number(argv[2]);
-  }
-  return janet_wrap_number(
-      (double)capnp_get_u64(&p->ptr, (uint32_t)off, dflt));
+  uint64_t dflt = argc > 2 ? (uint64_t)janet_getnumber(argv, 2) : 0;
+  uint64_t raw = capnp_get_u64(&p->ptr, (uint32_t)off, 0);
+  return janet_wrap_number((double)(raw ^ dflt));
+}
+
+static Janet cfun_get_i64(int32_t argc, Janet *argv) {
+  janet_arity(argc, 2, 3);
+  capnp_ptr_wrap *p = get_ptr(argv, 0);
+  int32_t off = janet_getinteger(argv, 1);
+  int64_t dflt = argc > 2 ? (int64_t)janet_getnumber(argv, 2) : 0;
+  uint64_t bits = capnp_get_u64(&p->ptr, (uint32_t)off, 0) ^ (uint64_t)dflt;
+  int64_t value;
+  memcpy(&value, &bits, sizeof(value));
+  return janet_wrap_number((double)value);
+}
+
+static Janet cfun_get_f32(int32_t argc, Janet *argv) {
+  janet_arity(argc, 2, 3);
+  capnp_ptr_wrap *p = get_ptr(argv, 0);
+  int32_t off = janet_getinteger(argv, 1);
+  float dflt = argc > 2 ? (float)janet_getnumber(argv, 2) : 0.0f;
+  uint32_t dflt_bits;
+  uint32_t bits;
+  float value;
+  memcpy(&dflt_bits, &dflt, sizeof(dflt_bits));
+  bits = capnp_get_u32(&p->ptr, (uint32_t)off, 0) ^ dflt_bits;
+  memcpy(&value, &bits, sizeof(value));
+  return janet_wrap_number((double)value);
 }
 
 static Janet cfun_get_f64(int32_t argc, Janet *argv) {
@@ -187,7 +243,13 @@ static Janet cfun_get_f64(int32_t argc, Janet *argv) {
   capnp_ptr_wrap *p = get_ptr(argv, 0);
   int32_t off = janet_getinteger(argv, 1);
   double dflt = argc > 2 ? janet_getnumber(argv, 2) : 0.0;
-  return janet_wrap_number(capnp_get_f64(&p->ptr, (uint32_t)off, dflt));
+  uint64_t dflt_bits;
+  uint64_t bits;
+  double value;
+  memcpy(&dflt_bits, &dflt, sizeof(dflt_bits));
+  bits = capnp_get_u64(&p->ptr, (uint32_t)off, 0) ^ dflt_bits;
+  memcpy(&value, &bits, sizeof(value));
+  return janet_wrap_number(value);
 }
 
 static Janet cfun_get_bool(int32_t argc, Janet *argv) {
@@ -195,7 +257,7 @@ static Janet cfun_get_bool(int32_t argc, Janet *argv) {
   capnp_ptr_wrap *p = get_ptr(argv, 0);
   int32_t bit = janet_getinteger(argv, 1);
   int dflt = argc > 2 ? janet_getboolean(argv, 2) : 0;
-  return janet_wrap_boolean(capnp_get_bool(&p->ptr, (uint32_t)bit, dflt));
+  return janet_wrap_boolean(capnp_get_bool(&p->ptr, (uint32_t)bit, 0) != dflt);
 }
 
 static Janet cfun_get_text(int32_t argc, Janet *argv) {
@@ -340,9 +402,15 @@ static const JanetMethod msg_methods[] = {
 static const JanetMethod ptr_methods[] = {
     {"kind", cfun_kind},
     {"ptr", cfun_getp},
+    {"u8", cfun_get_u8},
+    {"i8", cfun_get_i8},
     {"u16", cfun_get_u16},
+    {"i16", cfun_get_i16},
     {"u32", cfun_get_u32},
+    {"i32", cfun_get_i32},
     {"u64", cfun_get_u64},
+    {"i64", cfun_get_i64},
+    {"f32", cfun_get_f32},
     {"f64", cfun_get_f64},
     {"bool", cfun_get_bool},
     {"text", cfun_get_text},
@@ -430,16 +498,28 @@ static const JanetReg capnp_cfuns[] = {
     {"root", cfun_root, "(capnp/root msg)\n\nRoot pointer of the message."},
     {"kind", cfun_kind, "(capnp/kind ptr)\n\n:null | :struct | :list | :cap"},
     {"getp", cfun_getp, "(capnp/getp struct-ptr index)\n\nPointer slot."},
+    {"get-u8", cfun_get_u8,
+     "(capnp/get-u8 struct-ptr byte-offset &opt schema-default)"},
+    {"get-i8", cfun_get_i8,
+     "(capnp/get-i8 struct-ptr byte-offset &opt schema-default)"},
     {"get-u16", cfun_get_u16,
-     "(capnp/get-u16 struct-ptr byte-offset &opt default)"},
+     "(capnp/get-u16 struct-ptr byte-offset &opt schema-default)"},
+    {"get-i16", cfun_get_i16,
+     "(capnp/get-i16 struct-ptr byte-offset &opt schema-default)"},
     {"get-u32", cfun_get_u32,
-     "(capnp/get-u32 struct-ptr byte-offset &opt default)"},
+     "(capnp/get-u32 struct-ptr byte-offset &opt schema-default)"},
+    {"get-i32", cfun_get_i32,
+     "(capnp/get-i32 struct-ptr byte-offset &opt schema-default)"},
     {"get-u64", cfun_get_u64,
-     "(capnp/get-u64 struct-ptr byte-offset &opt default)"},
+     "(capnp/get-u64 struct-ptr byte-offset &opt schema-default)"},
+    {"get-i64", cfun_get_i64,
+     "(capnp/get-i64 struct-ptr byte-offset &opt schema-default)"},
+    {"get-f32", cfun_get_f32,
+     "(capnp/get-f32 struct-ptr byte-offset &opt schema-default)"},
     {"get-f64", cfun_get_f64,
-     "(capnp/get-f64 struct-ptr byte-offset &opt default)"},
+     "(capnp/get-f64 struct-ptr byte-offset &opt schema-default)"},
     {"get-bool", cfun_get_bool,
-     "(capnp/get-bool struct-ptr bit-offset &opt default)"},
+     "(capnp/get-bool struct-ptr bit-offset &opt schema-default)"},
     {"get-text", cfun_get_text,
      "(capnp/get-text struct-ptr ptr-index)\n\nText at pointer slot."},
     {"list-len", cfun_list_len, "(capnp/list-len list-ptr)"},
