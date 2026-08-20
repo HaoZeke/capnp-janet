@@ -746,6 +746,16 @@ static Janet cfun_set_data(int32_t argc, Janet *argv) {
   return argv[0];
 }
 
+static Janet cfun_clear_pointer(int32_t argc, Janet *argv) {
+  janet_fixarity(argc, 2);
+  capnp_builder_ptr_wrap *p = get_builder_ptr(argv, 0);
+  uint16_t index = get_pointer_index(p, argv, 1, "capnp/clear-pointer");
+  check_builder_result(
+      capnp_builder_clear_ptr(&p->body, p->dwords, index),
+      "capnp/clear-pointer");
+  return argv[0];
+}
+
 static Janet cfun_finish_builder(int32_t argc, Janet *argv) {
   janet_fixarity(argc, 1);
   capnp_builder_wrap *w = get_builder(argv, 0);
@@ -1034,6 +1044,8 @@ static const JanetReg capnp_cfuns[] = {
      "(capnp/set-text body pointer-index value)"},
     {"set-data", cfun_set_data,
      "(capnp/set-data body pointer-index value)"},
+    {"clear-pointer", cfun_clear_pointer,
+     "(capnp/clear-pointer body pointer-index)\n\nSet a pointer slot to null."},
     {"build-message", cfun_build_message,
      "(capnp/build-message dwords pwords fields)\n\n"
      "Build a framed root struct. fields: array of "

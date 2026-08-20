@@ -85,6 +85,8 @@ CAPNP_JANET_EXPORT int capnp_builder_set_bool(const capnp_bptr_t *body, uint32_t
 
 CAPNP_JANET_EXPORT int capnp_builder_slot(const capnp_bptr_t *body, uint16_t dwords,
                        uint16_t ptr_index, capnp_bptr_t *slot);
+CAPNP_JANET_EXPORT int capnp_builder_clear_ptr(const capnp_bptr_t *body,
+                            uint16_t dwords, uint16_t ptr_index);
 
 CAPNP_JANET_EXPORT int capnp_builder_set_text(const capnp_bptr_t *body, uint16_t dwords,
                            uint16_t ptr_index, const char *text,
