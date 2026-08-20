@@ -118,7 +118,7 @@ janet -e '
 janet -e '
 (import capnp)
 (def builder (capnp/new-builder))
-(def root (capnp/init-root builder 7 2))
+(def root (capnp/init-root builder 7 3))
 (capnp/set-u8 root 0 9 11)
 (capnp/set-i8 root 1 -5 -7)
 (capnp/set-u16 root 2 2000 1000)
@@ -132,6 +132,8 @@ janet -e '
 (capnp/set-bool root 384 false true)
 (capnp/set-text root 0 "arena")
 (capnp/set-data root 1 "\x00\x01\xfe\xff")
+(capnp/set-text root 2 "stale")
+(capnp/clear-pointer root 2)
 (def decoded (:root (capnp/message-from-buffer (capnp/finish-builder builder))))
 (assert (= 9 (:u8 decoded 0 11)) "builder u8 default round-trip")
 (assert (= -5 (:i8 decoded 1 -7)) "builder i8 default round-trip")
@@ -147,6 +149,7 @@ janet -e '
 (assert (= "arena" (string (:text decoded 0))) "builder text round-trip")
 (assert (= "\x00\x01\xfe\xff" (string (capnp/get-data decoded 1)))
         "builder data round-trip")
+(assert (= "" (string (:text decoded 2))) "builder pointer clear")
 (print "arena scalar and pointer builders ok")'
 
 janet -e '

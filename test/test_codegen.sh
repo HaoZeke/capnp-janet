@@ -94,6 +94,7 @@ grep -q '(defn CodegenFeatures-set-number \[ptr value\]' codegen-features.janet
 grep -A2 -q 'capnp/set-u16 ptr CodegenFeatures-discriminant-byte CodegenFeatures-number-tag' < <(grep -A2 '(defn CodegenFeatures-set-number' codegen-features.janet)
 grep -q '(defn CodegenFeatures-init-detail \[ptr\]' codegen-features.janet
 grep -A2 -q 'capnp/set-u16 ptr CodegenFeatures-discriminant-byte CodegenFeatures-detail-tag' < <(grep -A2 '(defn CodegenFeatures-init-detail' codegen-features.janet)
+grep -A3 -q 'capnp/clear-pointer ptr 0' < <(grep -A3 '(defn CodegenFeatures-init-detail' codegen-features.janet)
 grep -q '(defn CodegenFeatures-detail-set-label \[ptr value\]' codegen-features.janet
 grep -Eq 'capnp/set-text ptr [0-9]+ value' codegen-features.janet
 grep -q '(defn CodegenFeatures-set-payload \[ptr value\]' codegen-features.janet
