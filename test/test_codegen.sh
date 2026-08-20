@@ -52,4 +52,22 @@ grep -q 'Adder-methods' adder.janet
 # add(a :Int64, b :Int64) -> (sum :Int64): two data words in, one out.
 grep -q ':add {:ordinal 0 :params-dwords 2 :params-pwords 0 :results-dwords 1' adder.janet
 
+# Every scalar width uses its signed/float-aware reader and carries the schema
+# default. The zeroed wire representation must decode to these values.
+cp "$ROOT/schema/codegen-features.capnp" "$TMP/"
+capnp compile "-o$PLUGIN" codegen-features.capnp
+test -f codegen-features.janet
+grep -Eq 'capnp/get-bool ptr [0-9]+ true' codegen-features.janet
+grep -Eq 'capnp/get-i8 ptr [0-9]+ -7' codegen-features.janet
+grep -Eq 'capnp/get-i16 ptr [0-9]+ -700' codegen-features.janet
+grep -Eq 'capnp/get-i32 ptr [0-9]+ -70000' codegen-features.janet
+grep -Eq 'capnp/get-i64 ptr [0-9]+ -700000' codegen-features.janet
+grep -Eq 'capnp/get-u8 ptr [0-9]+ 250' codegen-features.janet
+grep -Eq 'capnp/get-u16 ptr [0-9]+ 65000' codegen-features.janet
+grep -Eq 'capnp/get-u32 ptr [0-9]+ 4000000000' codegen-features.janet
+grep -Eq 'capnp/get-u64 ptr [0-9]+ 9007199254740991' codegen-features.janet
+grep -Eq 'capnp/get-f32 ptr [0-9]+ 1\.5' codegen-features.janet
+grep -Eq 'capnp/get-f64 ptr [0-9]+ 2\.5' codegen-features.janet
+grep -Eq 'capnp/get-u16 ptr [0-9]+ 1' codegen-features.janet
+
 echo "ok codegen"
