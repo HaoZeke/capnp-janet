@@ -351,6 +351,40 @@ static uint32_t scalar_byte_offset(uint16_t type, uint32_t offset) {
   }
 }
 
+static const char *list_accessor_suffix(uint16_t element_type) {
+  switch (element_type) {
+  case TYPE_BOOL:
+    return "bool";
+  case TYPE_INT8:
+    return "i8";
+  case TYPE_UINT8:
+    return "u8";
+  case TYPE_INT16:
+    return "i16";
+  case TYPE_UINT16:
+  case TYPE_ENUM:
+    return "u16";
+  case TYPE_INT32:
+    return "i32";
+  case TYPE_UINT32:
+    return "u32";
+  case TYPE_INT64:
+    return "i64";
+  case TYPE_UINT64:
+    return "u64";
+  case TYPE_FLOAT32:
+    return "f32";
+  case TYPE_FLOAT64:
+    return "f64";
+  case TYPE_TEXT:
+    return "text";
+  case TYPE_VOID:
+    return "void";
+  default:
+    return NULL;
+  }
+}
+
 /* A group initializer restores the group's fields to their zero wire state.
  * This matches C++ init<Group>(): scalar schema defaults are represented by
  * zero data bits and pointer fields become null. */
@@ -693,6 +727,7 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
     case TYPE_LIST: {
       capnp_ptr_t element_type;
       uint16_t element_which = 0xffff;
+      const char *list_suffix;
       if (capnp_getp(&typ, 0, &element_type) == CAPNP_OK &&
           element_type.kind == CAPNP_PK_STRUCT)
         element_which = capnp_get_u16(&element_type, 0, 0xffff);
@@ -704,6 +739,21 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
         emit_union_select(out, sname, fname, is_union_member);
         fprintf(out, "  (capnp/init-struct-list ptr %u count %d %d))\n",
                 (unsigned)offset, child_dwords, child_pwords);
+        break;
+      }
+      list_suffix = list_accessor_suffix(element_which);
+      if (!list_suffix)
+        break;
+      if (element_which == TYPE_VOID) {
+        fprintf(out, "(defn %s-set-%s [ptr count]\n", sname, fname);
+        emit_union_select(out, sname, fname, is_union_member);
+        fprintf(out, "  (capnp/set-list-void ptr %u count))\n",
+                (unsigned)offset);
+      } else {
+        fprintf(out, "(defn %s-set-%s [ptr values]\n", sname, fname);
+        emit_union_select(out, sname, fname, is_union_member);
+        fprintf(out, "  (capnp/set-list-%s ptr %u values))\n", list_suffix,
+                (unsigned)offset);
       }
       break;
     }
@@ -805,7 +855,24 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
               "(defn %s-get-%s [ptr]\n  (capnp/get-data ptr %u))\n", sname,
               fname, (unsigned)offset);
       break;
-    case TYPE_LIST:
+    case TYPE_LIST: {
+      capnp_ptr_t element_type;
+      uint16_t element_which = 0xffff;
+      const char *list_suffix;
+      fprintf(out,
+              "(defn %s-get-%s [ptr]\n  (capnp/getp ptr %u))\n", sname, fname,
+              (unsigned)offset);
+      if (capnp_getp(&typ, 0, &element_type) == CAPNP_OK &&
+          element_type.kind == CAPNP_PK_STRUCT)
+        element_which = capnp_get_u16(&element_type, 0, 0xffff);
+      list_suffix = list_accessor_suffix(element_which);
+      if (list_suffix && element_which != TYPE_VOID)
+        fprintf(out,
+                "(defn %s-get-%s-at [list index]\n"
+                "  (capnp/list-get-%s list index))\n",
+                sname, fname, list_suffix);
+      break;
+    }
     case TYPE_STRUCT:
       fprintf(out,
               "(defn %s-get-%s [ptr]\n  (capnp/getp ptr %u))\n", sname, fname,
