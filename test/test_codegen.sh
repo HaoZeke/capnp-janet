@@ -75,5 +75,32 @@ grep -q '(def CodegenFeatures-number-tag 1)' codegen-features.janet
 grep -q '(def CodegenFeatures-detail-tag 2)' codegen-features.janet
 grep -q '(defn CodegenFeatures-detail \[ptr\]' codegen-features.janet
 grep -q '(defn CodegenFeatures-detail-get-label \[ptr\]' codegen-features.janet
+grep -q '(defn CodegenFeatures-init-root \[builder\]' codegen-features.janet
+grep -q 'capnp/init-root builder CodegenFeatures-data-words CodegenFeatures-pointer-words' codegen-features.janet
+grep -Eq 'capnp/set-bool ptr [0-9]+ value true' codegen-features.janet
+grep -Eq 'capnp/set-i8 ptr [0-9]+ value -7' codegen-features.janet
+grep -Eq 'capnp/set-i16 ptr [0-9]+ value -700' codegen-features.janet
+grep -Eq 'capnp/set-i32 ptr [0-9]+ value -70000' codegen-features.janet
+grep -Eq 'capnp/set-i64 ptr [0-9]+ value -700000' codegen-features.janet
+grep -Eq 'capnp/set-u8 ptr [0-9]+ value 250' codegen-features.janet
+grep -Eq 'capnp/set-u16 ptr [0-9]+ value 65000' codegen-features.janet
+grep -Eq 'capnp/set-u32 ptr [0-9]+ value 4000000000' codegen-features.janet
+grep -Eq 'capnp/set-u64 ptr [0-9]+ value 9007199254740991' codegen-features.janet
+grep -Eq 'capnp/set-f32 ptr [0-9]+ value 1\.5' codegen-features.janet
+grep -Eq 'capnp/set-f64 ptr [0-9]+ value 2\.5' codegen-features.janet
+grep -q '(defn CodegenFeatures-set-none \[ptr\]' codegen-features.janet
+grep -A2 -q 'capnp/set-u16 ptr CodegenFeatures-discriminant-byte CodegenFeatures-none-tag' < <(grep -A2 '(defn CodegenFeatures-set-none' codegen-features.janet)
+grep -q '(defn CodegenFeatures-set-number \[ptr value\]' codegen-features.janet
+grep -A2 -q 'capnp/set-u16 ptr CodegenFeatures-discriminant-byte CodegenFeatures-number-tag' < <(grep -A2 '(defn CodegenFeatures-set-number' codegen-features.janet)
+grep -q '(defn CodegenFeatures-init-detail \[ptr\]' codegen-features.janet
+grep -A2 -q 'capnp/set-u16 ptr CodegenFeatures-discriminant-byte CodegenFeatures-detail-tag' < <(grep -A2 '(defn CodegenFeatures-init-detail' codegen-features.janet)
+grep -q '(defn CodegenFeatures-detail-set-label \[ptr value\]' codegen-features.janet
+grep -Eq 'capnp/set-text ptr [0-9]+ value' codegen-features.janet
+grep -q '(defn CodegenFeatures-set-payload \[ptr value\]' codegen-features.janet
+grep -Eq 'capnp/set-data ptr [0-9]+ value' codegen-features.janet
+grep -q '(defn CodegenFeatures-init-child \[ptr\]' codegen-features.janet
+grep -Eq 'capnp/init-struct ptr [0-9]+ [0-9]+ [0-9]+' codegen-features.janet
+grep -q '(defn CodegenFeatures-init-children \[ptr count\]' codegen-features.janet
+grep -Eq 'capnp/init-struct-list ptr [0-9]+ count [0-9]+ [0-9]+' codegen-features.janet
 
 echo "ok codegen"

@@ -26,4 +26,13 @@ struct CodegenFeatures {
       label @14 :Text;
     }
   }
+
+  payload @15 :Data;
+  child @16 :Child;
+  children @17 :List(Child);
+
+  struct Child {
+    code @0 :UInt32;
+    name @1 :Text;
+  }
 }
