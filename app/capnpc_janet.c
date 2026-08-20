@@ -146,6 +146,25 @@ static void janet_ident(const char *in, char *out, size_t outn) {
   }
 }
 
+static void janet_field_ident(const char *in, char *out, size_t outn) {
+  size_t i, j = 0;
+  for (i = 0; in[i] && j + 1 < outn; i++) {
+    unsigned char c = (unsigned char)in[i];
+    if (isupper(c)) {
+      if (j > 0 && out[j - 1] != '-' && j + 2 < outn)
+        out[j++] = '-';
+      out[j++] = (char)tolower(c);
+    } else if (isalnum(c) || c == '-' || c == '_') {
+      out[j++] = (char)c;
+    } else {
+      out[j++] = '-';
+    }
+  }
+  out[j] = '\0';
+  if (j == 0)
+    snprintf(out, outn, "anon");
+}
+
 static void type_short_name(const char *display, char *out, size_t outn) {
   const char *colon = strrchr(display, ':');
   const char *sname = colon ? colon + 1 : display;
@@ -570,7 +589,7 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       discriminant = capnp_get_u16(&f, 2, 0) ^ UINT16_C(0xffff);
       if (discriminant == UINT16_C(0xffff))
         continue;
-      janet_ident(get_text(&f, 0), fname, sizeof(fname));
+      janet_field_ident(get_text(&f, 0), fname, sizeof(fname));
       fprintf(out, "(def %s-%s-tag %u)\n", sname, fname,
               (unsigned)discriminant);
     }
@@ -582,7 +601,7 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
     if (capnp_list_getp(&fields, i, &f) != CAPNP_OK)
       continue;
     char fname[128];
-    janet_ident(get_text(&f, 0), fname, sizeof(fname));
+    janet_field_ident(get_text(&f, 0), fname, sizeof(fname));
     uint16_t fwhich = capnp_get_u16(&f, 8, 0xffff);
     if (fwhich == FIELD_GROUP) {
       fprintf(out, "\n    :%s @{:type :group}", fname);
@@ -628,7 +647,7 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
     const char *setter = NULL;
     if (capnp_list_getp(&fields, i, &f) != CAPNP_OK)
       continue;
-    janet_ident(get_text(&f, 0), fname, sizeof(fname));
+    janet_field_ident(get_text(&f, 0), fname, sizeof(fname));
     fwhich = capnp_get_u16(&f, 8, 0xffff);
     discriminant = capnp_get_u16(&f, 2, 0) ^ UINT16_C(0xffff);
     is_union_member = discriminant_count > 0 &&
@@ -769,7 +788,7 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
     char dflt[96];
     if (capnp_list_getp(&fields, i, &f) != CAPNP_OK)
       continue;
-    janet_ident(get_text(&f, 0), fname, sizeof(fname));
+    janet_field_ident(get_text(&f, 0), fname, sizeof(fname));
     uint16_t fwhich = capnp_get_u16(&f, 8, 0xffff);
     if (fwhich == FIELD_GROUP) {
       char group_name[256];
