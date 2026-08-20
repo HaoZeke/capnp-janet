@@ -97,6 +97,9 @@ CAPNP_JANET_EXPORT int capnp_builder_set_cap(const capnp_bptr_t *body, uint16_t 
 CAPNP_JANET_EXPORT int capnp_builder_set_list_text(const capnp_bptr_t *body, uint16_t dwords,
                                 uint16_t ptr_index, const char *const *items,
                                 uint32_t nitems);
+CAPNP_JANET_EXPORT int capnp_builder_set_list_text_n(
+    const capnp_bptr_t *body, uint16_t dwords, uint16_t ptr_index,
+    const char *const *items, const size_t *lengths, uint32_t nitems);
 CAPNP_JANET_EXPORT int capnp_builder_set_data(const capnp_bptr_t *body, uint16_t dwords,
                            uint16_t ptr_index, const uint8_t *data,
                            size_t data_len);

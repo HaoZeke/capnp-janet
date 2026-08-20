@@ -647,9 +647,10 @@ int capnp_builder_set_list_void(const capnp_bptr_t *body, uint16_t dwords,
   return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_VOID, nitems, 0, NULL);
 }
 
-int capnp_builder_set_list_text(const capnp_bptr_t *body, uint16_t dwords,
-                                uint16_t ptr_index, const char *const *items,
-                                uint32_t nitems) {
+int capnp_builder_set_list_text_n(const capnp_bptr_t *body, uint16_t dwords,
+                                  uint16_t ptr_index,
+                                  const char *const *items,
+                                  const size_t *lengths, uint32_t nitems) {
   size_t list_ptr_word;
   uint32_t list_seg, i;
   size_t list_start;
@@ -670,10 +671,18 @@ int capnp_builder_set_list_text(const capnp_bptr_t *body, uint16_t dwords,
     return CAPNP_ERR_ALLOC;
   for (i = 0; i < nitems; i++) {
     const char *t = items[i] ? items[i] : "";
-    if (write_text_at(body->b, list_seg, list_start + i, t, strlen(t)))
+    size_t len = lengths ? lengths[i] : strlen(t);
+    if (write_text_at(body->b, list_seg, list_start + i, t, len))
       return CAPNP_ERR_ALLOC;
   }
   return CAPNP_OK;
+}
+
+int capnp_builder_set_list_text(const capnp_bptr_t *body, uint16_t dwords,
+                                uint16_t ptr_index, const char *const *items,
+                                uint32_t nitems) {
+  return capnp_builder_set_list_text_n(body, dwords, ptr_index, items, NULL,
+                                       nitems);
 }
 
 size_t capnp_builder_ptr_word(size_t body_word, uint16_t dwords,
