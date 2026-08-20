@@ -162,15 +162,19 @@ static const char *type_kw(uint16_t which) {
   case TYPE_BOOL:
     return "bool";
   case TYPE_INT8:
+    return "i8";
   case TYPE_UINT8:
     return "u8";
   case TYPE_INT16:
+    return "i16";
   case TYPE_UINT16:
     return "u16";
   case TYPE_INT32:
+    return "i32";
   case TYPE_UINT32:
     return "u32";
   case TYPE_INT64:
+    return "i64";
   case TYPE_UINT64:
     return "u64";
   case TYPE_FLOAT32:
@@ -193,6 +197,71 @@ static const char *type_kw(uint16_t which) {
     return "any-pointer";
   default:
     return "unknown";
+  }
+}
+
+static void scalar_default_literal(const capnp_ptr_t *field, uint16_t type,
+                                   char *out, size_t outn) {
+  capnp_ptr_t value;
+  uint32_t bits32;
+  uint64_t bits64;
+  float f32;
+  double f64;
+
+  snprintf(out, outn, "0");
+  if (capnp_getp(field, 3, &value) != CAPNP_OK ||
+      value.kind != CAPNP_PK_STRUCT)
+    return;
+
+  switch (type) {
+  case TYPE_BOOL:
+    snprintf(out, outn, "%s", capnp_get_bool(&value, 16, 0) ? "true" : "false");
+    break;
+  case TYPE_INT8:
+    snprintf(out, outn, "%d", (int)(int8_t)capnp_get_u8(&value, 2, 0));
+    break;
+  case TYPE_INT16:
+    snprintf(out, outn, "%d", (int)(int16_t)capnp_get_u16(&value, 2, 0));
+    break;
+  case TYPE_INT32:
+    snprintf(out, outn, "%d", (int32_t)capnp_get_u32(&value, 4, 0));
+    break;
+  case TYPE_INT64:
+    snprintf(out, outn, "%lld",
+             (long long)(int64_t)capnp_get_u64(&value, 8, 0));
+    break;
+  case TYPE_UINT8:
+    snprintf(out, outn, "%u", (unsigned)capnp_get_u8(&value, 2, 0));
+    break;
+  case TYPE_UINT16:
+  case TYPE_ENUM:
+    snprintf(out, outn, "%u", (unsigned)capnp_get_u16(&value, 2, 0));
+    break;
+  case TYPE_UINT32:
+    snprintf(out, outn, "%u", (unsigned)capnp_get_u32(&value, 4, 0));
+    break;
+  case TYPE_UINT64:
+    snprintf(out, outn, "%llu",
+             (unsigned long long)capnp_get_u64(&value, 8, 0));
+    break;
+  case TYPE_FLOAT32:
+    bits32 = capnp_get_u32(&value, 4, 0);
+    memcpy(&f32, &bits32, sizeof(f32));
+    if (bits32 == UINT32_C(0x80000000))
+      snprintf(out, outn, "-0.0");
+    else
+      snprintf(out, outn, "%.9g", (double)f32);
+    break;
+  case TYPE_FLOAT64:
+    bits64 = capnp_get_u64(&value, 8, 0);
+    memcpy(&f64, &bits64, sizeof(f64));
+    if (bits64 == UINT64_C(0x8000000000000000))
+      snprintf(out, outn, "-0.0");
+    else
+      snprintf(out, outn, "%.17g", f64);
+    break;
+  default:
+    break;
   }
 }
 
@@ -320,6 +389,7 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node) {
   for (uint32_t i = 0; i < nf; i++) {
     capnp_ptr_t f;
     char fname[128];
+    char dflt[96];
     if (capnp_list_getp(&fields, i, &f) != CAPNP_OK)
       continue;
     janet_ident(get_text(&f, 0), fname, sizeof(fname));
@@ -331,37 +401,65 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node) {
     uint16_t tw = 0xffff;
     if (capnp_getp(&f, 2, &typ) == CAPNP_OK && typ.kind == CAPNP_PK_STRUCT)
       tw = capnp_get_u16(&typ, 0, 0xffff);
+    scalar_default_literal(&f, tw, dflt, sizeof(dflt));
 
     switch (tw) {
     case TYPE_BOOL:
       /* offset is bit index */
       fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/get-bool ptr %u))\n", sname,
-              fname, (unsigned)offset);
+              "(defn %s-get-%s [ptr]\n  (capnp/get-bool ptr %u %s))\n",
+              sname, fname, (unsigned)offset, dflt);
+      break;
+    case TYPE_INT8:
+      fprintf(out,
+              "(defn %s-get-%s [ptr]\n  (capnp/get-i8 ptr %u %s))\n", sname,
+              fname, (unsigned)offset, dflt);
+      break;
+    case TYPE_UINT8:
+      fprintf(out,
+              "(defn %s-get-%s [ptr]\n  (capnp/get-u8 ptr %u %s))\n", sname,
+              fname, (unsigned)offset, dflt);
+      break;
+    case TYPE_INT16:
+      fprintf(out,
+              "(defn %s-get-%s [ptr]\n  (capnp/get-i16 ptr %u %s))\n",
+              sname, fname, (unsigned)(offset * 2), dflt);
       break;
     case TYPE_UINT16:
-    case TYPE_INT16:
     case TYPE_ENUM:
       fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/get-u16 ptr %u))\n", sname,
-              fname, (unsigned)(offset * 2));
+              "(defn %s-get-%s [ptr]\n  (capnp/get-u16 ptr %u %s))\n",
+              sname, fname, (unsigned)(offset * 2), dflt);
       break;
-    case TYPE_UINT32:
     case TYPE_INT32:
       fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/get-u32 ptr %u))\n", sname,
-              fname, (unsigned)(offset * 4));
+              "(defn %s-get-%s [ptr]\n  (capnp/get-i32 ptr %u %s))\n",
+              sname, fname, (unsigned)(offset * 4), dflt);
       break;
-    case TYPE_UINT64:
+    case TYPE_UINT32:
+      fprintf(out,
+              "(defn %s-get-%s [ptr]\n  (capnp/get-u32 ptr %u %s))\n",
+              sname, fname, (unsigned)(offset * 4), dflt);
+      break;
     case TYPE_INT64:
       fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/get-u64 ptr %u))\n", sname,
-              fname, (unsigned)(offset * 8));
+              "(defn %s-get-%s [ptr]\n  (capnp/get-i64 ptr %u %s))\n",
+              sname, fname, (unsigned)(offset * 8), dflt);
+      break;
+    case TYPE_UINT64:
+      fprintf(out,
+              "(defn %s-get-%s [ptr]\n  (capnp/get-u64 ptr %u %s))\n",
+              sname, fname, (unsigned)(offset * 8), dflt);
+      break;
+    case TYPE_FLOAT32:
+      fprintf(out,
+              "(defn %s-get-%s [ptr]\n  (capnp/get-f32 ptr %u %s))\n",
+              sname, fname, (unsigned)(offset * 4), dflt);
       break;
     case TYPE_FLOAT64:
       fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/get-f64 ptr %u))\n", sname,
-              fname, (unsigned)(offset * 8));
+              "(defn %s-get-%s [ptr]\n  (capnp/get-f64 ptr %u %s))\n",
+              sname, fname, (unsigned)(offset * 8), dflt);
       break;
     case TYPE_TEXT:
       fprintf(out,
