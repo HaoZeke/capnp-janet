@@ -160,11 +160,43 @@ static void test_schema_evolution_default(void) {
   capnp_message_free(&m);
 }
 
+static void test_narrow_scalar_builders(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body;
+  capnp_message_t m;
+  capnp_ptr_t r;
+  uint8_t *flat = NULL;
+  size_t flat_len = 0;
+  uint32_t f32_bits;
+  float f32 = 1.5f;
+
+  memcpy(&f32_bits, &f32, sizeof(f32_bits));
+  capnp_builder_init(&b);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "narrow root");
+  CHECK(capnp_builder_struct(&root, 1, 0, &body) == CAPNP_OK,
+        "narrow struct");
+  CHECK(capnp_builder_set_u8(&body, 0, UINT8_C(0xab)) == CAPNP_OK,
+        "set u8");
+  CHECK(capnp_builder_set_f32(&body, 4, f32) == CAPNP_OK, "set f32");
+  CHECK(capnp_builder_serialize(&b, &flat, &flat_len) == CAPNP_OK,
+        "narrow serialize");
+  capnp_builder_free(&b);
+
+  CHECK(capnp_message_from_flat(&m, flat, flat_len) == CAPNP_OK,
+        "narrow parse");
+  free(flat);
+  CHECK(capnp_root(&m, &r) == CAPNP_OK, "narrow read root");
+  CHECK(capnp_get_u8(&r, 0, 0) == UINT8_C(0xab), "u8 round-trip");
+  CHECK(capnp_get_u32(&r, 4, 0) == f32_bits, "f32 bits round-trip");
+  capnp_message_free(&m);
+}
+
 int main(void) {
   test_roundtrip_demo();
   test_view_flat();
   test_composite_list();
   test_schema_evolution_default();
+  test_narrow_scalar_builders();
   if (failures) {
     fprintf(stderr, "%d failure(s)\n", failures);
     return 1;
