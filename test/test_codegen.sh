@@ -104,4 +104,10 @@ grep -Eq 'capnp/init-struct ptr [0-9]+ [0-9]+ [0-9]+' codegen-features.janet
 grep -q '(defn CodegenFeatures-init-children \[ptr count\]' codegen-features.janet
 grep -Eq 'capnp/init-struct-list ptr [0-9]+ count [0-9]+ [0-9]+' codegen-features.janet
 
+MODULE=${CAPNP_JANET_MODULE:-$BUILD/capnp.so}
+if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then
+  cp "$MODULE" "$TMP/capnp.so"
+  JANET_PATH="$TMP" janet "$ROOT/test/generated_builder_smoke.janet"
+fi
+
 echo "ok codegen"
