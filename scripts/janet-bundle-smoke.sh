@@ -169,8 +169,8 @@ janet -e '
 (assert (= "nested" (string (:text decoded-child 0))) "nested struct text")
 (def decoded-people (:ptr decoded 1))
 (assert (= 2 (length decoded-people)) "struct-list length")
-(assert (= @[123 456] (map |(:u32 $ 0) decoded-people)) "struct-list values")
-(assert (= @["Alice" "Bob"] (map |(string (:text $ 0)) decoded-people))
+(assert (deep= @[123 456] (map |(:u32 $ 0) decoded-people)) "struct-list values")
+(assert (deep= @["Alice" "Bob"] (map |(string (:text $ 0)) decoded-people))
         "struct-list pointers")
 (print "nested builder views ok")'
 
