@@ -8,6 +8,34 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+### Added
+
+- Janet arena builders expose root, nested-struct, struct-list, pointer, and
+  typed primitive-list construction without rebuilding intermediate messages.
+- Janet scalar access covers every signed/unsigned width, Float32/Float64,
+  schema-default XOR, and exact `Int64`/`UInt64` values.
+- `capnpc-janet` emits executable typed readers and builders for scalars,
+  Text/Data, structs, primitive and struct lists, unions, groups, and interface
+  metadata. Generated field names follow Janet's kebab-case convention.
+
+### Fixed
+
+- Scalar byte-range validation rejects offset arithmetic overflow before
+  touching the message buffer.
+- `List(Text)` builders preserve explicit lengths, including embedded NUL
+  bytes, and Float32 access avoids strict-aliasing and host-endian assumptions.
+- Generated group initialization clears overlapping pointer storage and selects
+  the union arm, matching the C++ builder contract.
+- Standalone generated-module tests retain the native library search path and
+  preload an instrumented runtime when required.
+
+### Changed
+
+- Generated modules import `capnp` themselves, and CI executes their builders
+  through the native module rather than checking source text alone.
+- Interop documentation describes the wired official-CLI and live C++ gates;
+  the unused `interop` Meson option is removed.
+
 ## [0.2.5] - 2026-08-15
 
 ### Fixed
@@ -133,7 +161,7 @@ with fewer than two zero bytes). Canonical AddressBook matches
 `capnp convert binary:canonical`. Multi-segment builder, far/double-far,
 `capnpc-janet` v1, list upgrade views.
 
-[Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.0...main
+[Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.5...main
 [0.2.5]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.2...v0.2.3
