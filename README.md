@@ -6,11 +6,11 @@ plus a C library embedders can link without the Janet VM. Docs:
 Same family as
 [capnp-fortran](https://capnp-fortran.rgoswami.me) and
 [c-capnproto](https://c-capnproto.rgoswami.me): wire-format first,
-zero-copy segment views, schema evolution defaults, and a path to a
-`capnpc-janet` schema compiler plugin.
+zero-copy segment views, schema evolution defaults, and the `capnpc-janet`
+schema compiler plugin.
 
-**Status:** `0.2.0-dev`. Reader, multi-segment builder, packed and
-canonical codecs, and `capnpc-janet` v1. Wire encode of AddressBook
+**Status:** `0.2.5`. Reader, multi-segment builder, packed and canonical
+codecs, and typed `capnpc-janet` readers/builders. Wire encode of AddressBook
 matches official `capnp encode` when fields are set in schema order.
 
 ## Why this exists
@@ -25,8 +25,8 @@ packs import.
 
 - Stream-framed deserialize (copy) and zero-copy view of caller buffers
 - Struct / list / far / double-far / capability pointer resolution
-- Data field readers (`u8`/`u16`/`u32`/`u64`/`f64`/`bool`) with past-end defaults
-- Text, Data, `List(Text)`, primitive lists (`u8`/`u16`/`u32`/`u64`/`f64`)
+- Data field readers (`u8`/`u16`/`u32`/`u64`/`f32`/`f64`/`bool`) with past-end defaults
+- Text, Data, `List(Text)`, primitive lists (`u8`/`u16`/`u32`/`u64`/`f32`/`f64`)
 - `List(Bool)` bit-lists (`capnp_list_get_bool` / `capnp_builder_set_list_bool`)
 - `List(Void)` length-only (`capnp_builder_set_list_void` + `capnp_list_len`)
 - Schema-evolution list upgrade/downgrade views (see below)
@@ -36,7 +36,9 @@ packs import.
 - Canonical form (`capnp_canonicalize`) — **byte-identical** to
   `capnp convert binary:canonical` on AddressBook
 - Sample parity tests: AddressBook + calculator Expression (C++/pycapnp shapes)
-- Janet module (`capnp/...` including `get-u64`) and plain C API for static embeds
+- Janet module with arena-backed nested builders, typed primitive lists, and
+  lossless `Int64`/`UInt64`; plain C API for static embeds
+- Generated scalar-default, union, group, struct, and list reader/builder helpers
 - `capnp_janet_lookup_into` + `janet/policy.janet` for compiled `.jimage` packs
 - Traversal word budget and depth limit (C++ defaults)
 
@@ -52,7 +54,7 @@ packs import.
 | Schema-evolution reads (defaults past end, list up/downgrade) | partial | yes | yes | **yes** (supported cases below) |
 | Builder / deep copy | limited | yes | yes | **multi-seg builder + far/double-far + copy_flat + setp** (no orphans yet) |
 | Canonical form | yes (0.3.0) | yes | yes | **yes** (byte-parity tested) |
-| Code generator (`capnp compile -o`) | yes | yes | yes | **yes** (`capnpc-janet` v1: structs/enums + getters) |
+| Code generator (`capnp compile -o`) | yes | yes | yes | **yes** (typed readers/builders, unions, groups, scalar defaults, lists, interfaces) |
 | RPC levels 1-4 | no | L1-L2 (no L4) | L1-L2 (no L4) | **L1-L4** (C vat, `include/capnp-janet/capnp_rpc.h`; L3 both halves with `Accept.embargo`, over `schema/rpc-threeparty.capnp`, tested as a three-vat handoff; L4 `Join`, which upstream C++ lacks) |
 
 ## Schema-evolution list views
@@ -84,8 +86,8 @@ partial).** Matching C++/fortran:
   `capnp_list_getp` / `capnp_list_get_struct` then `capnp_getp` on the element
   (fortran overloads `getp` on lists; the C surface keeps the split).
 - Full matrix of every esize pair is not claimed: implement the fortran
-  `t_list_upgrade_views` / `t_list_downgrade_views` shapes above; anything else
-  is out of scope until a product need lands.
+  `t_list_upgrade_views` / `t_list_downgrade_views` shapes above; other pairs
+  return a kind error or the supplied default.
 
 Tests: `test/test_list_evolution.c` (meson target `list_evolution`).
 
@@ -143,18 +145,25 @@ Link `libcapnp_janet` (pkg-config: `capnp-janet`).
 
 ### Janet
 
-Build a framed root struct of one data word and one pointer word, then read
-it back. `build-message` takes an array of `[kind byte-offset value]` fields:
+Build a framed root struct in one growable arena, then read it back:
 
 ```janet
 (import capnp)
 
-(def buf (capnp/build-message 1 1 @[[:u32 0 42] [:text 0 "hello"]]))
+(def builder (capnp/new-builder))
+(def body (capnp/init-root builder 1 1))
+(capnp/set-u32 body 0 42)
+(capnp/set-text body 0 "hello")
+(def buf (capnp/finish-builder builder))
 (def root (capnp/root (capnp/message-from-buffer buf)))
 (print (capnp/get-u32 root 0))       # 42
-; (capnp/get-u64 root byte-offset) for UInt64/Int64 fields
 (print (capnp/get-text root 0))      # hello
 ```
+
+`init-struct`, `init-struct-list`, and `struct-list-at` return mutable views
+into the same arena. Typed setters accept the schema default as an optional
+final argument and store the required XOR wire value. `build-message` remains
+as a compact compatibility helper for flat demo structs.
 
 Lists come out of a decoded message. A list pointer carries Janet's
 `length`, index and iteration protocols, so it answers to the same forms
@@ -178,8 +187,8 @@ as an array rather than to a parallel set of functions:
 ```
 
 `(:verb receiver ...)` reaches the same accessors as the `capnp/` functions:
-`:kind`, `:ptr`, `:u16`, `:u32`, `:u64`, `:f64`, `:bool`, `:text`, and
-`:text-at` for an element of a `List(Text)`. A message answers to `:root`.
+`:kind`, `:ptr`, every signed/unsigned scalar width, `:f32`, `:f64`, `:bool`,
+`:text`, and typed `:*-at` primitive-list readers. A message answers to `:root`.
 The long forms (`capnp/get-u32`, `capnp/list-len`, `capnp/list-getp`, …)
 remain and behave identically.
 
@@ -216,20 +225,18 @@ src/           C runtime + Janet module
 test/          C wire + sample tests
 test/fixtures/ capnp encode goldens
 schema/        demo + addressbook + calculator
-app/           capnpc-janet plugin (stub)
-interop/       c-capnproto golden-master notes
+app/           capnpc-janet schema compiler plugin
+interop/       official CLI and live capnp-C++ interop
 docs/orgmode/  architecture notes
 ```
 
-## Roadmap
+## Compatibility boundaries
 
-1. **v0.1** — reader + minimal builder + C/Janet API + wire tests (done)
-2. **v0.2** — packed + canonical + primitive lists + samples + schema-order
-   AddressBook encode (this tree)
-3. **v0.3** — `capnpc-janet` plugin (structs/enums/getters) (landed v1)
-4. **v0.4** — orphans, c-capnproto golden-master, richer codegen (unions/defaults)
-5. Dynamic API as needed; the RPC vat (levels 1-4) is C-side, with Janet
-   bindings still to come
+The supported surface includes readers, arena builders, packed and canonical
+codecs, generated typed helpers, and the C RPC vat through level 4. It does not
+expose C++ orphan ownership, generated pointer-default constants, a dynamic
+schema API, or Janet wrappers for the C RPC vat. Calls outside the documented
+list-evolution matrix return a kind error or the supplied default.
 
 ## Related
 
