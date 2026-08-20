@@ -212,6 +212,36 @@ static void test_struct_u64(void) {
   capnp_message_free(&m);
 }
 
+static void test_struct_offset_overflow(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m;
+  capnp_ptr_t r;
+
+  capnp_builder_init(&b);
+  capnp_builder_root(&b, &root);
+  capnp_builder_struct(&root, 1, 0, &body);
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
+  capnp_builder_free(&b);
+  CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "flat");
+  free(flat);
+  CHECK(capnp_root(&m, &r) == CAPNP_OK, "root");
+  CHECK_EQ_U32(capnp_get_u8(&r, UINT32_MAX, 9), 9, "u8 offset overflow");
+  CHECK_EQ_U32(capnp_get_u16(&r, UINT32_MAX, 99), 99,
+               "u16 offset overflow");
+  CHECK_EQ_U32(capnp_get_u32(&r, UINT32_MAX, 999), 999,
+               "u32 offset overflow");
+  CHECK_EQ_U64(capnp_get_u64(&r, UINT32_MAX, 9999), 9999,
+               "u64 offset overflow");
+  CHECK_NEAR(capnp_get_f32(&r, UINT32_MAX, 1.5f), 1.5, 1e-6,
+             "f32 offset overflow");
+  CHECK_NEAR(capnp_get_f64(&r, UINT32_MAX, 2.5), 2.5, 1e-12,
+             "f64 offset overflow");
+  capnp_message_free(&m);
+}
+
 static void test_list_u64(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body;
@@ -243,6 +273,7 @@ int main(void) {
   test_list_u32();
   test_list_u32_wire_bytes();
   test_struct_u64();
+  test_struct_offset_overflow();
   test_list_u64();
   test_data_blob();
   test_f32();
