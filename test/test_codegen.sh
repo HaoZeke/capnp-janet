@@ -66,6 +66,8 @@ grep -Eq 'capnp/get-u8 ptr [0-9]+ 250' codegen-features.janet
 grep -Eq 'capnp/get-u16 ptr [0-9]+ 65000' codegen-features.janet
 grep -Eq 'capnp/get-u32 ptr [0-9]+ 4000000000' codegen-features.janet
 grep -Eq 'capnp/get-u64 ptr [0-9]+ 9007199254740991' codegen-features.janet
+grep -Eq 'capnp/get-u64 ptr [0-9]+ \(int/u64 "18446744073709551615"\)' codegen-features.janet
+grep -Eq 'capnp/get-i64 ptr [0-9]+ \(int/s64 "-9223372036854775808"\)' codegen-features.janet
 grep -Eq 'capnp/get-f32 ptr [0-9]+ 1\.5' codegen-features.janet
 grep -Eq 'capnp/get-f64 ptr [0-9]+ 2\.5' codegen-features.janet
 grep -Eq 'capnp/get-u16 ptr [0-9]+ 1' codegen-features.janet
@@ -86,6 +88,8 @@ grep -Eq 'capnp/set-u8 ptr [0-9]+ value 250' codegen-features.janet
 grep -Eq 'capnp/set-u16 ptr [0-9]+ value 65000' codegen-features.janet
 grep -Eq 'capnp/set-u32 ptr [0-9]+ value 4000000000' codegen-features.janet
 grep -Eq 'capnp/set-u64 ptr [0-9]+ value 9007199254740991' codegen-features.janet
+grep -Eq 'capnp/set-u64 ptr [0-9]+ value \(int/u64 "18446744073709551615"\)' codegen-features.janet
+grep -Eq 'capnp/set-i64 ptr [0-9]+ value \(int/s64 "-9223372036854775808"\)' codegen-features.janet
 grep -Eq 'capnp/set-f32 ptr [0-9]+ value 1\.5' codegen-features.janet
 grep -Eq 'capnp/set-f64 ptr [0-9]+ value 2\.5' codegen-features.janet
 grep -q '(defn CodegenFeatures-set-none \[ptr\]' codegen-features.janet

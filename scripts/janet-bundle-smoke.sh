@@ -152,6 +152,23 @@ janet -e '
 (assert (= "" (string (:text decoded 2))) "builder pointer clear")
 (print "arena scalar and pointer builders ok")'
 
+# Janet's integer abstracts carry values beyond the exact-double range, so
+# the full Cap'n Proto 64-bit domain survives both defaults and values.
+janet -e '
+(import capnp)
+(def umax (int/u64 "18446744073709551615"))
+(def unext (int/u64 "18446744073709551614"))
+(def smin (int/s64 "-9223372036854775808"))
+(def snext (int/s64 "-9223372036854775807"))
+(def builder (capnp/new-builder))
+(def root (capnp/init-root builder 2 0))
+(capnp/set-u64 root 0 unext umax)
+(capnp/set-i64 root 8 snext smin)
+(def decoded (:root (capnp/message-from-buffer (capnp/finish-builder builder))))
+(assert (= unext (capnp/get-u64 decoded 0 umax)) "exact UInt64 round-trip")
+(assert (= snext (capnp/get-i64 decoded 8 smin)) "exact Int64 round-trip")
+(print "exact 64-bit integers ok")'
+
 janet -e '
 (import capnp)
 (def builder (capnp/new-builder))

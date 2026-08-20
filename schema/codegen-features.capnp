@@ -30,6 +30,8 @@ struct CodegenFeatures {
   payload @15 :Data;
   child @16 :Child;
   children @17 :List(Child);
+  huge @18 :UInt64 = 18446744073709551615;
+  lowest @19 :Int64 = -9223372036854775808;
 
   struct Child {
     code @0 :UInt32;
