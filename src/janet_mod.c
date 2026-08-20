@@ -767,6 +767,333 @@ static Janet cfun_clear_pointer(int32_t argc, Janet *argv) {
   return argv[0];
 }
 
+typedef enum {
+  JANET_LIST_BOOL,
+  JANET_LIST_I8,
+  JANET_LIST_U8,
+  JANET_LIST_I16,
+  JANET_LIST_U16,
+  JANET_LIST_I32,
+  JANET_LIST_U32,
+  JANET_LIST_I64,
+  JANET_LIST_U64,
+  JANET_LIST_F32,
+  JANET_LIST_F64
+} janet_list_kind;
+
+static size_t list_item_size(janet_list_kind kind) {
+  switch (kind) {
+  case JANET_LIST_BOOL:
+  case JANET_LIST_I8:
+  case JANET_LIST_U8:
+    return 1;
+  case JANET_LIST_I16:
+  case JANET_LIST_U16:
+    return 2;
+  case JANET_LIST_I32:
+  case JANET_LIST_U32:
+  case JANET_LIST_F32:
+    return 4;
+  case JANET_LIST_I64:
+  case JANET_LIST_U64:
+  case JANET_LIST_F64:
+    return 8;
+  }
+  return 0;
+}
+
+static void validate_list_item(const Janet *item, janet_list_kind kind,
+                               const char *where) {
+  switch (kind) {
+  case JANET_LIST_BOOL:
+    (void)janet_getboolean(item, 0);
+    break;
+  case JANET_LIST_I8:
+    (void)get_i8_arg(item, 0, where);
+    break;
+  case JANET_LIST_U8:
+    (void)get_u8_arg(item, 0, where);
+    break;
+  case JANET_LIST_I16:
+    (void)janet_getinteger16(item, 0);
+    break;
+  case JANET_LIST_U16:
+    (void)janet_getuinteger16(item, 0);
+    break;
+  case JANET_LIST_I32:
+    (void)janet_getinteger(item, 0);
+    break;
+  case JANET_LIST_U32:
+    (void)janet_getuinteger(item, 0);
+    break;
+  case JANET_LIST_I64:
+    (void)janet_getinteger64(item, 0);
+    break;
+  case JANET_LIST_U64:
+    (void)janet_getuinteger64(item, 0);
+    break;
+  case JANET_LIST_F32:
+  case JANET_LIST_F64:
+    (void)janet_getnumber(item, 0);
+    break;
+  }
+}
+
+static void *alloc_list_items(int32_t count, size_t item_size,
+                              const char *where) {
+  void *items;
+  if (count == 0)
+    return NULL;
+  if ((size_t)count > SIZE_MAX / item_size)
+    janet_panicf("%s: list is too large", where);
+  items = malloc((size_t)count * item_size);
+  if (!items)
+    janet_panicf("%s: temporary allocation failed", where);
+  return items;
+}
+
+static Janet cfun_set_list_values(int32_t argc, Janet *argv,
+                                  janet_list_kind kind, const char *where) {
+  capnp_builder_ptr_wrap *p;
+  uint16_t index;
+  JanetView values;
+  size_t item_size;
+  void *items;
+  int rc = CAPNP_ERR_ARG;
+  int32_t i;
+  janet_fixarity(argc, 3);
+  p = get_builder_ptr(argv, 0);
+  index = get_pointer_index(p, argv, 1, where);
+  values = janet_getindexed(argv, 2);
+  item_size = list_item_size(kind);
+  for (i = 0; i < values.len; i++)
+    validate_list_item(values.items + i, kind, where);
+  items = alloc_list_items(values.len, item_size, where);
+
+  switch (kind) {
+  case JANET_LIST_BOOL:
+    for (i = 0; i < values.len; i++)
+      ((uint8_t *)items)[i] = (uint8_t)janet_getboolean(values.items + i, 0);
+    rc = capnp_builder_set_list_bool(&p->body, p->dwords, index, items,
+                                     (uint32_t)values.len);
+    break;
+  case JANET_LIST_I8:
+    for (i = 0; i < values.len; i++)
+      ((uint8_t *)items)[i] =
+          (uint8_t)get_i8_arg(values.items + i, 0, where);
+    rc = capnp_builder_set_list_u8(&p->body, p->dwords, index, items,
+                                   (uint32_t)values.len);
+    break;
+  case JANET_LIST_U8:
+    for (i = 0; i < values.len; i++)
+      ((uint8_t *)items)[i] = get_u8_arg(values.items + i, 0, where);
+    rc = capnp_builder_set_list_u8(&p->body, p->dwords, index, items,
+                                   (uint32_t)values.len);
+    break;
+  case JANET_LIST_I16:
+    for (i = 0; i < values.len; i++)
+      ((uint16_t *)items)[i] =
+          (uint16_t)janet_getinteger16(values.items + i, 0);
+    rc = capnp_builder_set_list_u16(&p->body, p->dwords, index, items,
+                                    (uint32_t)values.len);
+    break;
+  case JANET_LIST_U16:
+    for (i = 0; i < values.len; i++)
+      ((uint16_t *)items)[i] = janet_getuinteger16(values.items + i, 0);
+    rc = capnp_builder_set_list_u16(&p->body, p->dwords, index, items,
+                                    (uint32_t)values.len);
+    break;
+  case JANET_LIST_I32:
+    for (i = 0; i < values.len; i++)
+      ((uint32_t *)items)[i] =
+          (uint32_t)janet_getinteger(values.items + i, 0);
+    rc = capnp_builder_set_list_u32(&p->body, p->dwords, index, items,
+                                    (uint32_t)values.len);
+    break;
+  case JANET_LIST_U32:
+    for (i = 0; i < values.len; i++)
+      ((uint32_t *)items)[i] = janet_getuinteger(values.items + i, 0);
+    rc = capnp_builder_set_list_u32(&p->body, p->dwords, index, items,
+                                    (uint32_t)values.len);
+    break;
+  case JANET_LIST_I64:
+    for (i = 0; i < values.len; i++)
+      ((uint64_t *)items)[i] =
+          (uint64_t)janet_getinteger64(values.items + i, 0);
+    rc = capnp_builder_set_list_u64(&p->body, p->dwords, index, items,
+                                    (uint32_t)values.len);
+    break;
+  case JANET_LIST_U64:
+    for (i = 0; i < values.len; i++)
+      ((uint64_t *)items)[i] = janet_getuinteger64(values.items + i, 0);
+    rc = capnp_builder_set_list_u64(&p->body, p->dwords, index, items,
+                                    (uint32_t)values.len);
+    break;
+  case JANET_LIST_F32:
+    for (i = 0; i < values.len; i++)
+      ((float *)items)[i] = (float)janet_getnumber(values.items + i, 0);
+    rc = capnp_builder_set_list_f32(&p->body, p->dwords, index, items,
+                                    (uint32_t)values.len);
+    break;
+  case JANET_LIST_F64:
+    for (i = 0; i < values.len; i++)
+      ((double *)items)[i] = janet_getnumber(values.items + i, 0);
+    rc = capnp_builder_set_list_f64(&p->body, p->dwords, index, items,
+                                    (uint32_t)values.len);
+    break;
+  }
+  free(items);
+  check_builder_result(rc, where);
+  return argv[0];
+}
+
+#define DEFINE_LIST_SETTER(name, kind)                                         \
+  static Janet cfun_set_list_##name(int32_t argc, Janet *argv) {               \
+    return cfun_set_list_values(argc, argv, kind, "capnp/set-list-" #name);    \
+  }
+
+DEFINE_LIST_SETTER(bool, JANET_LIST_BOOL)
+DEFINE_LIST_SETTER(i8, JANET_LIST_I8)
+DEFINE_LIST_SETTER(u8, JANET_LIST_U8)
+DEFINE_LIST_SETTER(i16, JANET_LIST_I16)
+DEFINE_LIST_SETTER(u16, JANET_LIST_U16)
+DEFINE_LIST_SETTER(i32, JANET_LIST_I32)
+DEFINE_LIST_SETTER(u32, JANET_LIST_U32)
+DEFINE_LIST_SETTER(i64, JANET_LIST_I64)
+DEFINE_LIST_SETTER(u64, JANET_LIST_U64)
+DEFINE_LIST_SETTER(f32, JANET_LIST_F32)
+DEFINE_LIST_SETTER(f64, JANET_LIST_F64)
+
+#undef DEFINE_LIST_SETTER
+
+static Janet cfun_set_list_text(int32_t argc, Janet *argv) {
+  capnp_builder_ptr_wrap *p;
+  uint16_t index;
+  JanetView values;
+  const char **items;
+  size_t *lengths;
+  int32_t i;
+  int rc;
+  janet_fixarity(argc, 3);
+  p = get_builder_ptr(argv, 0);
+  index = get_pointer_index(p, argv, 1, "capnp/set-list-text");
+  values = janet_getindexed(argv, 2);
+  for (i = 0; i < values.len; i++)
+    (void)janet_getbytes(values.items + i, 0);
+  items = alloc_list_items(values.len, sizeof(*items), "capnp/set-list-text");
+  lengths =
+      alloc_list_items(values.len, sizeof(*lengths), "capnp/set-list-text");
+  for (i = 0; i < values.len; i++) {
+    JanetByteView value = janet_getbytes(values.items + i, 0);
+    items[i] = (const char *)value.bytes;
+    lengths[i] = (size_t)value.len;
+  }
+  rc = capnp_builder_set_list_text_n(&p->body, p->dwords, index, items,
+                                     lengths, (uint32_t)values.len);
+  free(lengths);
+  free(items);
+  check_builder_result(rc, "capnp/set-list-text");
+  return argv[0];
+}
+
+static Janet cfun_set_list_void(int32_t argc, Janet *argv) {
+  janet_fixarity(argc, 3);
+  capnp_builder_ptr_wrap *p = get_builder_ptr(argv, 0);
+  uint16_t index =
+      get_pointer_index(p, argv, 1, "capnp/set-list-void");
+  uint32_t count = janet_getuinteger(argv, 2);
+  check_builder_result(capnp_builder_set_list_void(
+                           &p->body, p->dwords, index, count),
+                       "capnp/set-list-void");
+  return argv[0];
+}
+
+static Janet cfun_list_get_value(int32_t argc, Janet *argv,
+                                 janet_list_kind kind) {
+  capnp_ptr_wrap *list;
+  uint32_t index;
+  janet_arity(argc, 2, 3);
+  list = get_ptr(argv, 0);
+  index = janet_getuinteger(argv, 1);
+  switch (kind) {
+  case JANET_LIST_BOOL: {
+    int dflt = argc > 2 ? janet_getboolean(argv, 2) : 0;
+    return janet_wrap_boolean(capnp_list_get_bool(&list->ptr, index, dflt));
+  }
+  case JANET_LIST_I8: {
+    int8_t dflt = argc > 2 ? get_i8_arg(argv, 2, "capnp/list-get-i8") : 0;
+    return janet_wrap_number((double)(int8_t)capnp_list_get_u8(
+        &list->ptr, index, (uint8_t)dflt));
+  }
+  case JANET_LIST_U8: {
+    uint8_t dflt = argc > 2 ? get_u8_arg(argv, 2, "capnp/list-get-u8") : 0;
+    return janet_wrap_number(
+        (double)capnp_list_get_u8(&list->ptr, index, dflt));
+  }
+  case JANET_LIST_I16: {
+    int16_t dflt = argc > 2 ? janet_getinteger16(argv, 2) : 0;
+    return janet_wrap_number((double)(int16_t)capnp_list_get_u16(
+        &list->ptr, index, (uint16_t)dflt));
+  }
+  case JANET_LIST_U16: {
+    uint16_t dflt = argc > 2 ? janet_getuinteger16(argv, 2) : 0;
+    return janet_wrap_number(
+        (double)capnp_list_get_u16(&list->ptr, index, dflt));
+  }
+  case JANET_LIST_I32: {
+    int32_t dflt = argc > 2 ? janet_getinteger(argv, 2) : 0;
+    return janet_wrap_number((double)(int32_t)capnp_list_get_u32(
+        &list->ptr, index, (uint32_t)dflt));
+  }
+  case JANET_LIST_U32: {
+    uint32_t dflt = argc > 2 ? janet_getuinteger(argv, 2) : 0;
+    return janet_wrap_number(
+        (double)capnp_list_get_u32(&list->ptr, index, dflt));
+  }
+  case JANET_LIST_I64: {
+    int64_t dflt = argc > 2 ? janet_getinteger64(argv, 2) : 0;
+    uint64_t bits =
+        capnp_list_get_u64(&list->ptr, index, (uint64_t)dflt);
+    int64_t value;
+    memcpy(&value, &bits, sizeof(value));
+    return wrap_i64_lossless(value);
+  }
+  case JANET_LIST_U64: {
+    uint64_t dflt = argc > 2 ? janet_getuinteger64(argv, 2) : 0;
+    return wrap_u64_lossless(capnp_list_get_u64(&list->ptr, index, dflt));
+  }
+  case JANET_LIST_F32: {
+    float dflt = argc > 2 ? (float)janet_getnumber(argv, 2) : 0.0f;
+    return janet_wrap_number(
+        (double)capnp_list_get_f32(&list->ptr, index, dflt));
+  }
+  case JANET_LIST_F64: {
+    double dflt = argc > 2 ? janet_getnumber(argv, 2) : 0.0;
+    return janet_wrap_number(capnp_list_get_f64(&list->ptr, index, dflt));
+  }
+  }
+  return janet_wrap_nil();
+}
+
+#define DEFINE_LIST_GETTER(name, kind)                                         \
+  static Janet cfun_list_get_##name(int32_t argc, Janet *argv) {               \
+    return cfun_list_get_value(argc, argv, kind);                              \
+  }
+
+DEFINE_LIST_GETTER(bool, JANET_LIST_BOOL)
+DEFINE_LIST_GETTER(i8, JANET_LIST_I8)
+DEFINE_LIST_GETTER(u8, JANET_LIST_U8)
+DEFINE_LIST_GETTER(i16, JANET_LIST_I16)
+DEFINE_LIST_GETTER(u16, JANET_LIST_U16)
+DEFINE_LIST_GETTER(i32, JANET_LIST_I32)
+DEFINE_LIST_GETTER(u32, JANET_LIST_U32)
+DEFINE_LIST_GETTER(i64, JANET_LIST_I64)
+DEFINE_LIST_GETTER(u64, JANET_LIST_U64)
+DEFINE_LIST_GETTER(f32, JANET_LIST_F32)
+DEFINE_LIST_GETTER(f64, JANET_LIST_F64)
+
+#undef DEFINE_LIST_GETTER
+
 static Janet cfun_finish_builder(int32_t argc, Janet *argv) {
   janet_fixarity(argc, 1);
   capnp_builder_wrap *w = get_builder(argv, 0);
@@ -893,6 +1220,17 @@ static const JanetMethod ptr_methods[] = {
     {"f64", cfun_get_f64},
     {"bool", cfun_get_bool},
     {"text", cfun_get_text},
+    {"bool-at", cfun_list_get_bool},
+    {"i8-at", cfun_list_get_i8},
+    {"u8-at", cfun_list_get_u8},
+    {"i16-at", cfun_list_get_i16},
+    {"u16-at", cfun_list_get_u16},
+    {"i32-at", cfun_list_get_i32},
+    {"u32-at", cfun_list_get_u32},
+    {"i64-at", cfun_list_get_i64},
+    {"u64-at", cfun_list_get_u64},
+    {"f32-at", cfun_list_get_f32},
+    {"f64-at", cfun_list_get_f64},
     {"text-at", cfun_list_get_text},
     {NULL, NULL},
 };
@@ -1007,6 +1345,28 @@ static const JanetReg capnp_cfuns[] = {
     {"list-getp", cfun_list_getp, "(capnp/list-getp list-ptr index)"},
     {"list-get-text", cfun_list_get_text,
      "(capnp/list-get-text list-ptr index)\n\nElement of List(Text)."},
+    {"list-get-bool", cfun_list_get_bool,
+     "(capnp/list-get-bool list index &opt default)"},
+    {"list-get-i8", cfun_list_get_i8,
+     "(capnp/list-get-i8 list index &opt default)"},
+    {"list-get-u8", cfun_list_get_u8,
+     "(capnp/list-get-u8 list index &opt default)"},
+    {"list-get-i16", cfun_list_get_i16,
+     "(capnp/list-get-i16 list index &opt default)"},
+    {"list-get-u16", cfun_list_get_u16,
+     "(capnp/list-get-u16 list index &opt default)"},
+    {"list-get-i32", cfun_list_get_i32,
+     "(capnp/list-get-i32 list index &opt default)"},
+    {"list-get-u32", cfun_list_get_u32,
+     "(capnp/list-get-u32 list index &opt default)"},
+    {"list-get-i64", cfun_list_get_i64,
+     "(capnp/list-get-i64 list index &opt default)"},
+    {"list-get-u64", cfun_list_get_u64,
+     "(capnp/list-get-u64 list index &opt default)"},
+    {"list-get-f32", cfun_list_get_f32,
+     "(capnp/list-get-f32 list index &opt default)"},
+    {"list-get-f64", cfun_list_get_f64,
+     "(capnp/list-get-f64 list index &opt default)"},
     {"new-builder", cfun_new_builder,
      "(capnp/new-builder &opt first-segment-words)\n\n"
      "Create a growable message arena."},
@@ -1051,6 +1411,32 @@ static const JanetReg capnp_cfuns[] = {
      "(capnp/set-data body pointer-index value)"},
     {"clear-pointer", cfun_clear_pointer,
      "(capnp/clear-pointer body pointer-index)\n\nSet a pointer slot to null."},
+    {"set-list-bool", cfun_set_list_bool,
+     "(capnp/set-list-bool body pointer-index values)"},
+    {"set-list-i8", cfun_set_list_i8,
+     "(capnp/set-list-i8 body pointer-index values)"},
+    {"set-list-u8", cfun_set_list_u8,
+     "(capnp/set-list-u8 body pointer-index values)"},
+    {"set-list-i16", cfun_set_list_i16,
+     "(capnp/set-list-i16 body pointer-index values)"},
+    {"set-list-u16", cfun_set_list_u16,
+     "(capnp/set-list-u16 body pointer-index values)"},
+    {"set-list-i32", cfun_set_list_i32,
+     "(capnp/set-list-i32 body pointer-index values)"},
+    {"set-list-u32", cfun_set_list_u32,
+     "(capnp/set-list-u32 body pointer-index values)"},
+    {"set-list-i64", cfun_set_list_i64,
+     "(capnp/set-list-i64 body pointer-index values)"},
+    {"set-list-u64", cfun_set_list_u64,
+     "(capnp/set-list-u64 body pointer-index values)"},
+    {"set-list-f32", cfun_set_list_f32,
+     "(capnp/set-list-f32 body pointer-index values)"},
+    {"set-list-f64", cfun_set_list_f64,
+     "(capnp/set-list-f64 body pointer-index values)"},
+    {"set-list-text", cfun_set_list_text,
+     "(capnp/set-list-text body pointer-index values)"},
+    {"set-list-void", cfun_set_list_void,
+     "(capnp/set-list-void body pointer-index count)"},
     {"build-message", cfun_build_message,
      "(capnp/build-message dwords pwords fields)\n\n"
      "Build a framed root struct. fields: array of "
