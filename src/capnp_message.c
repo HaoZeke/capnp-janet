@@ -353,19 +353,24 @@ static const uint8_t *data_bytes(const capnp_ptr_t *s) {
   return s->msg->segs[s->seg].data + s->word * CAPNP_WORD_BYTES + s->body_byte;
 }
 
-uint8_t capnp_get_u8(const capnp_ptr_t *s, uint32_t byte_offset, uint8_t dflt) {
+static int data_has_bytes(const capnp_ptr_t *s, uint32_t byte_offset,
+                          uint32_t width) {
+  uint32_t bytes;
   if (!s || s->kind != CAPNP_PK_STRUCT)
-    return dflt;
-  if ((byte_offset + 1u) * 8u > data_bit_count(s))
+    return 0;
+  bytes = data_bit_count(s) / 8u;
+  return byte_offset <= bytes && width <= bytes - byte_offset;
+}
+
+uint8_t capnp_get_u8(const capnp_ptr_t *s, uint32_t byte_offset, uint8_t dflt) {
+  if (!data_has_bytes(s, byte_offset, 1))
     return dflt;
   return data_bytes(s)[byte_offset];
 }
 
 uint16_t capnp_get_u16(const capnp_ptr_t *s, uint32_t byte_offset,
                        uint16_t dflt) {
-  if (!s || s->kind != CAPNP_PK_STRUCT)
-    return dflt;
-  if ((byte_offset + 2u) * 8u > data_bit_count(s))
+  if (!data_has_bytes(s, byte_offset, 2))
     return dflt;
   const uint8_t *p = data_bytes(s) + byte_offset;
   return (uint16_t)(p[0] | (p[1] << 8));
@@ -373,18 +378,14 @@ uint16_t capnp_get_u16(const capnp_ptr_t *s, uint32_t byte_offset,
 
 uint32_t capnp_get_u32(const capnp_ptr_t *s, uint32_t byte_offset,
                        uint32_t dflt) {
-  if (!s || s->kind != CAPNP_PK_STRUCT)
-    return dflt;
-  if ((byte_offset + 4u) * 8u > data_bit_count(s))
+  if (!data_has_bytes(s, byte_offset, 4))
     return dflt;
   return capnp_load_le32(data_bytes(s) + byte_offset);
 }
 
 uint64_t capnp_get_u64(const capnp_ptr_t *s, uint32_t byte_offset,
                        uint64_t dflt) {
-  if (!s || s->kind != CAPNP_PK_STRUCT)
-    return dflt;
-  if ((byte_offset + 8u) * 8u > data_bit_count(s))
+  if (!data_has_bytes(s, byte_offset, 8))
     return dflt;
   return capnp_load_le64(data_bytes(s) + byte_offset);
 }
@@ -392,9 +393,7 @@ uint64_t capnp_get_u64(const capnp_ptr_t *s, uint32_t byte_offset,
 float capnp_get_f32(const capnp_ptr_t *s, uint32_t byte_offset, float dflt) {
   uint32_t bits;
   float value;
-  if (!s || s->kind != CAPNP_PK_STRUCT)
-    return dflt;
-  if ((byte_offset + 4u) * 8u > data_bit_count(s))
+  if (!data_has_bytes(s, byte_offset, 4))
     return dflt;
   bits = capnp_load_le32(data_bytes(s) + byte_offset);
   memcpy(&value, &bits, sizeof(value));
@@ -402,9 +401,7 @@ float capnp_get_f32(const capnp_ptr_t *s, uint32_t byte_offset, float dflt) {
 }
 
 double capnp_get_f64(const capnp_ptr_t *s, uint32_t byte_offset, double dflt) {
-  if (!s || s->kind != CAPNP_PK_STRUCT)
-    return dflt;
-  if ((byte_offset + 8u) * 8u > data_bit_count(s))
+  if (!data_has_bytes(s, byte_offset, 8))
     return dflt;
   uint64_t bits = capnp_load_le64(data_bytes(s) + byte_offset);
   double v;
