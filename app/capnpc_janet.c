@@ -306,6 +306,137 @@ static int node_type_name(const capnp_ptr_t *nodes, uint64_t id, char *out,
   return 0;
 }
 
+static int node_by_id(const capnp_ptr_t *nodes, uint64_t id,
+                      capnp_ptr_t *out) {
+  uint32_t i, n = capnp_list_len(nodes);
+  for (i = 0; i < n; i++) {
+    capnp_ptr_t node;
+    if (capnp_list_getp(nodes, i, &node) != CAPNP_OK)
+      continue;
+    if (capnp_get_u64(&node, 0, 0) == id) {
+      *out = node;
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static uint32_t scalar_byte_offset(uint16_t type, uint32_t offset) {
+  switch (type) {
+  case TYPE_INT16:
+  case TYPE_UINT16:
+  case TYPE_ENUM:
+    return offset * 2u;
+  case TYPE_INT32:
+  case TYPE_UINT32:
+  case TYPE_FLOAT32:
+    return offset * 4u;
+  case TYPE_INT64:
+  case TYPE_UINT64:
+  case TYPE_FLOAT64:
+    return offset * 8u;
+  default:
+    return offset;
+  }
+}
+
+/* A group initializer restores the group's fields to their zero wire state.
+ * This matches C++ init<Group>(): scalar schema defaults are represented by
+ * zero data bits and pointer fields become null. */
+static void emit_group_clear(FILE *out, const capnp_ptr_t *nodes,
+                             uint64_t group_id) {
+  capnp_ptr_t group;
+  capnp_ptr_t fields;
+  uint32_t i, count;
+  if (!node_by_id(nodes, group_id, &group) ||
+      capnp_getp(&group, 3, &fields) != CAPNP_OK ||
+      fields.kind != CAPNP_PK_LIST)
+    return;
+  count = capnp_list_len(&fields);
+  for (i = 0; i < count; i++) {
+    capnp_ptr_t field;
+    capnp_ptr_t type;
+    uint16_t field_which;
+    uint16_t type_which;
+    uint32_t offset;
+    if (capnp_list_getp(&fields, i, &field) != CAPNP_OK)
+      continue;
+    field_which = capnp_get_u16(&field, 8, 0xffff);
+    if (field_which == FIELD_GROUP) {
+      emit_group_clear(out, nodes, capnp_get_u64(&field, 16, 0));
+      continue;
+    }
+    if (field_which != FIELD_SLOT ||
+        capnp_getp(&field, 2, &type) != CAPNP_OK ||
+        type.kind != CAPNP_PK_STRUCT)
+      continue;
+    type_which = capnp_get_u16(&type, 0, 0xffff);
+    offset = capnp_get_u32(&field, 4, 0);
+    switch (type_which) {
+    case TYPE_BOOL:
+      fprintf(out, "  (capnp/set-bool ptr %u false)\n", (unsigned)offset);
+      break;
+    case TYPE_INT8:
+      fprintf(out, "  (capnp/set-i8 ptr %u 0)\n", (unsigned)offset);
+      break;
+    case TYPE_UINT8:
+      fprintf(out, "  (capnp/set-u8 ptr %u 0)\n", (unsigned)offset);
+      break;
+    case TYPE_INT16:
+      fprintf(out, "  (capnp/set-i16 ptr %u 0)\n",
+              (unsigned)scalar_byte_offset(type_which, offset));
+      break;
+    case TYPE_UINT16:
+    case TYPE_ENUM:
+      fprintf(out, "  (capnp/set-u16 ptr %u 0)\n",
+              (unsigned)scalar_byte_offset(type_which, offset));
+      break;
+    case TYPE_INT32:
+      fprintf(out, "  (capnp/set-i32 ptr %u 0)\n",
+              (unsigned)scalar_byte_offset(type_which, offset));
+      break;
+    case TYPE_UINT32:
+      fprintf(out, "  (capnp/set-u32 ptr %u 0)\n",
+              (unsigned)scalar_byte_offset(type_which, offset));
+      break;
+    case TYPE_INT64:
+      fprintf(out, "  (capnp/set-i64 ptr %u 0)\n",
+              (unsigned)scalar_byte_offset(type_which, offset));
+      break;
+    case TYPE_UINT64:
+      fprintf(out, "  (capnp/set-u64 ptr %u 0)\n",
+              (unsigned)scalar_byte_offset(type_which, offset));
+      break;
+    case TYPE_FLOAT32:
+      fprintf(out, "  (capnp/set-f32 ptr %u 0)\n",
+              (unsigned)scalar_byte_offset(type_which, offset));
+      break;
+    case TYPE_FLOAT64:
+      fprintf(out, "  (capnp/set-f64 ptr %u 0)\n",
+              (unsigned)scalar_byte_offset(type_which, offset));
+      break;
+    case TYPE_TEXT:
+    case TYPE_DATA:
+    case TYPE_LIST:
+    case TYPE_STRUCT:
+    case TYPE_INTERFACE:
+    case TYPE_ANY_POINTER:
+      fprintf(out, "  (capnp/clear-pointer ptr %u)\n", (unsigned)offset);
+      break;
+    default:
+      break;
+    }
+  }
+}
+
+static void emit_union_select(FILE *out, const char *struct_name,
+                              const char *field_name, int is_union_member) {
+  if (is_union_member)
+    fprintf(out,
+            "  (capnp/set-u16 ptr %s-discriminant-byte %s-%s-tag)\n",
+            struct_name, struct_name, field_name);
+}
+
 /* Emit an interface's id and one entry per method.
  *
  * The caller needs three things the schema already carries: which
@@ -428,6 +559,148 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
   }
   fprintf(out, "})\n");
 
+  if (!capnp_get_bool(node, 224, 0)) {
+    fprintf(out,
+            "(defn %s-init-root [builder]\n"
+            "  (capnp/init-root builder %s-data-words "
+            "%s-pointer-words))\n",
+            sname, sname, sname);
+  }
+
+  /* Mutable accessors mirror the generated C++ Builder surface. Each body
+   * view retains its arena owner, so nested initialization does not copy or
+   * allocate a second message. */
+  for (uint32_t i = 0; i < nf; i++) {
+    capnp_ptr_t f;
+    capnp_ptr_t typ;
+    char fname[128];
+    char dflt[96];
+    uint16_t fwhich;
+    uint16_t tw = 0xffff;
+    uint16_t discriminant;
+    uint32_t offset;
+    int is_union_member;
+    const char *setter = NULL;
+    if (capnp_list_getp(&fields, i, &f) != CAPNP_OK)
+      continue;
+    janet_ident(get_text(&f, 0), fname, sizeof(fname));
+    fwhich = capnp_get_u16(&f, 8, 0xffff);
+    discriminant = capnp_get_u16(&f, 2, 0) ^ UINT16_C(0xffff);
+    is_union_member = discriminant_count > 0 &&
+                      discriminant != UINT16_C(0xffff);
+
+    if (fwhich == FIELD_GROUP) {
+      fprintf(out, "(defn %s-init-%s [ptr]\n", sname, fname);
+      emit_union_select(out, sname, fname, is_union_member);
+      emit_group_clear(out, nodes, capnp_get_u64(&f, 16, 0));
+      fprintf(out, "  ptr)\n");
+      continue;
+    }
+    if (fwhich != FIELD_SLOT ||
+        capnp_getp(&f, 2, &typ) != CAPNP_OK ||
+        typ.kind != CAPNP_PK_STRUCT)
+      continue;
+    tw = capnp_get_u16(&typ, 0, 0xffff);
+    offset = capnp_get_u32(&f, 4, 0);
+    scalar_default_literal(&f, tw, dflt, sizeof(dflt));
+
+    switch (tw) {
+    case TYPE_BOOL:
+      setter = "set-bool";
+      break;
+    case TYPE_INT8:
+      setter = "set-i8";
+      break;
+    case TYPE_UINT8:
+      setter = "set-u8";
+      break;
+    case TYPE_INT16:
+      setter = "set-i16";
+      break;
+    case TYPE_UINT16:
+    case TYPE_ENUM:
+      setter = "set-u16";
+      break;
+    case TYPE_INT32:
+      setter = "set-i32";
+      break;
+    case TYPE_UINT32:
+      setter = "set-u32";
+      break;
+    case TYPE_INT64:
+      setter = "set-i64";
+      break;
+    case TYPE_UINT64:
+      setter = "set-u64";
+      break;
+    case TYPE_FLOAT32:
+      setter = "set-f32";
+      break;
+    case TYPE_FLOAT64:
+      setter = "set-f64";
+      break;
+    default:
+      break;
+    }
+
+    if (setter) {
+      uint32_t wire_offset =
+          tw == TYPE_BOOL ? offset : scalar_byte_offset(tw, offset);
+      fprintf(out, "(defn %s-set-%s [ptr value]\n", sname, fname);
+      emit_union_select(out, sname, fname, is_union_member);
+      fprintf(out, "  (capnp/%s ptr %u value %s))\n", setter,
+              (unsigned)wire_offset, dflt);
+      continue;
+    }
+
+    switch (tw) {
+    case TYPE_VOID:
+      fprintf(out, "(defn %s-set-%s [ptr]\n", sname, fname);
+      emit_union_select(out, sname, fname, is_union_member);
+      fprintf(out, "  ptr)\n");
+      break;
+    case TYPE_TEXT:
+      fprintf(out, "(defn %s-set-%s [ptr value]\n", sname, fname);
+      emit_union_select(out, sname, fname, is_union_member);
+      fprintf(out, "  (capnp/set-text ptr %u value))\n", (unsigned)offset);
+      break;
+    case TYPE_DATA:
+      fprintf(out, "(defn %s-set-%s [ptr value]\n", sname, fname);
+      emit_union_select(out, sname, fname, is_union_member);
+      fprintf(out, "  (capnp/set-data ptr %u value))\n", (unsigned)offset);
+      break;
+    case TYPE_STRUCT: {
+      int child_dwords, child_pwords;
+      struct_shape(nodes, capnp_get_u64(&typ, 8, 0), &child_dwords,
+                   &child_pwords);
+      fprintf(out, "(defn %s-init-%s [ptr]\n", sname, fname);
+      emit_union_select(out, sname, fname, is_union_member);
+      fprintf(out, "  (capnp/init-struct ptr %u %d %d))\n",
+              (unsigned)offset, child_dwords, child_pwords);
+      break;
+    }
+    case TYPE_LIST: {
+      capnp_ptr_t element_type;
+      uint16_t element_which = 0xffff;
+      if (capnp_getp(&typ, 0, &element_type) == CAPNP_OK &&
+          element_type.kind == CAPNP_PK_STRUCT)
+        element_which = capnp_get_u16(&element_type, 0, 0xffff);
+      if (element_which == TYPE_STRUCT) {
+        int child_dwords, child_pwords;
+        struct_shape(nodes, capnp_get_u64(&element_type, 8, 0),
+                     &child_dwords, &child_pwords);
+        fprintf(out, "(defn %s-init-%s [ptr count]\n", sname, fname);
+        emit_union_select(out, sname, fname, is_union_member);
+        fprintf(out, "  (capnp/init-struct-list ptr %u count %d %d))\n",
+                (unsigned)offset, child_dwords, child_pwords);
+      }
+      break;
+    }
+    default:
+      break;
+    }
+  }
+
   /* Thin readers for common scalar/text fields */
   for (uint32_t i = 0; i < nf; i++) {
     capnp_ptr_t f;
@@ -518,8 +791,8 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       break;
     case TYPE_DATA:
       fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/getp ptr %u))\n", sname, fname,
-              (unsigned)offset);
+              "(defn %s-get-%s [ptr]\n  (capnp/get-data ptr %u))\n", sname,
+              fname, (unsigned)offset);
       break;
     case TYPE_LIST:
     case TYPE_STRUCT:
