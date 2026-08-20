@@ -205,6 +205,8 @@ static void scalar_default_literal(const capnp_ptr_t *field, uint16_t type,
   capnp_ptr_t value;
   uint32_t bits32;
   uint64_t bits64;
+  int64_t i64;
+  uint64_t u64;
   float f32;
   double f64;
 
@@ -227,8 +229,13 @@ static void scalar_default_literal(const capnp_ptr_t *field, uint16_t type,
     snprintf(out, outn, "%d", (int32_t)capnp_get_u32(&value, 4, 0));
     break;
   case TYPE_INT64:
-    snprintf(out, outn, "%lld",
-             (long long)(int64_t)capnp_get_u64(&value, 8, 0));
+    bits64 = capnp_get_u64(&value, 8, 0);
+    memcpy(&i64, &bits64, sizeof(i64));
+    if (i64 < INT64_C(-9007199254740992) ||
+        i64 > INT64_C(9007199254740992))
+      snprintf(out, outn, "(int/s64 \"%lld\")", (long long)i64);
+    else
+      snprintf(out, outn, "%lld", (long long)i64);
     break;
   case TYPE_UINT8:
     snprintf(out, outn, "%u", (unsigned)capnp_get_u8(&value, 2, 0));
@@ -241,8 +248,12 @@ static void scalar_default_literal(const capnp_ptr_t *field, uint16_t type,
     snprintf(out, outn, "%u", (unsigned)capnp_get_u32(&value, 4, 0));
     break;
   case TYPE_UINT64:
-    snprintf(out, outn, "%llu",
-             (unsigned long long)capnp_get_u64(&value, 8, 0));
+    u64 = capnp_get_u64(&value, 8, 0);
+    if (u64 > UINT64_C(9007199254740992))
+      snprintf(out, outn, "(int/u64 \"%llu\")",
+               (unsigned long long)u64);
+    else
+      snprintf(out, outn, "%llu", (unsigned long long)u64);
     break;
   case TYPE_FLOAT32:
     bits32 = capnp_get_u32(&value, 4, 0);
@@ -850,7 +861,8 @@ static int write_module(const char *filename, const capnp_ptr_t *nodes,
           filename);
   fprintf(out, "# Requires the capnp/ Janet module (capnp-janet runtime).\n\n");
   fprintf(out, "(import capnp)\n\n");
-  fprintf(out, "(def file-id 0x%llx)\n", (unsigned long long)file_id);
+  fprintf(out, "(def file-id (int/u64 \"0x%llx\"))\n",
+          (unsigned long long)file_id);
 
   uint32_t nn = capnp_list_len(nodes);
   for (uint32_t i = 0; i < nn; i++) {
