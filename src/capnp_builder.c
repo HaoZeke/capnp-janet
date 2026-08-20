@@ -535,23 +535,36 @@ static int set_list_prim(const capnp_bptr_t *body, uint16_t dwords,
        * little-endian and the caller's array is in host order, so a bulk
        * memcpy is only right by accident on a little-endian host. */
       uint8_t *dst = wbytes(body->b, start_seg, start_word);
+      const uint8_t *src = (const uint8_t *)items;
       uint32_t i;
       switch (elem_bytes) {
       case 1:
         memcpy(dst, items, nbytes);
         break;
-      case 2:
-        for (i = 0; i < nitems; i++)
-          capnp_store_le16(dst + (size_t)i * 2, ((const uint16_t *)items)[i]);
+      case 2: {
+        for (i = 0; i < nitems; i++) {
+          uint16_t value;
+          memcpy(&value, src + (size_t)i * 2, sizeof(value));
+          capnp_store_le16(dst + (size_t)i * 2, value);
+        }
         break;
-      case 4:
-        for (i = 0; i < nitems; i++)
-          capnp_store_le32(dst + (size_t)i * 4, ((const uint32_t *)items)[i]);
+      }
+      case 4: {
+        for (i = 0; i < nitems; i++) {
+          uint32_t value;
+          memcpy(&value, src + (size_t)i * 4, sizeof(value));
+          capnp_store_le32(dst + (size_t)i * 4, value);
+        }
         break;
-      case 8:
-        for (i = 0; i < nitems; i++)
-          capnp_store_le64(dst + (size_t)i * 8, ((const uint64_t *)items)[i]);
+      }
+      case 8: {
+        for (i = 0; i < nitems; i++) {
+          uint64_t value;
+          memcpy(&value, src + (size_t)i * 8, sizeof(value));
+          capnp_store_le64(dst + (size_t)i * 8, value);
+        }
         break;
+      }
       default:
         return CAPNP_ERR_ARG;
       }
@@ -583,6 +596,11 @@ int capnp_builder_set_list_u64(const capnp_bptr_t *body, uint16_t dwords,
                                uint16_t ptr_index, const uint64_t *items,
                                uint32_t nitems) {
   return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_EIGHT, nitems, 8, items);
+}
+int capnp_builder_set_list_f32(const capnp_bptr_t *body, uint16_t dwords,
+                               uint16_t ptr_index, const float *items,
+                               uint32_t nitems) {
+  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_FOUR, nitems, 4, items);
 }
 int capnp_builder_set_list_f64(const capnp_bptr_t *body, uint16_t dwords,
                                uint16_t ptr_index, const double *items,

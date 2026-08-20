@@ -77,6 +77,8 @@ CAPNP_JANET_EXPORT uint32_t capnp_get_u32(const capnp_ptr_t *s, uint32_t byte_of
                        uint32_t dflt);
 CAPNP_JANET_EXPORT uint64_t capnp_get_u64(const capnp_ptr_t *s, uint32_t byte_offset,
                        uint64_t dflt);
+CAPNP_JANET_EXPORT float capnp_get_f32(const capnp_ptr_t *s,
+                    uint32_t byte_offset, float dflt);
 CAPNP_JANET_EXPORT double capnp_get_f64(const capnp_ptr_t *s, uint32_t byte_offset, double dflt);
 CAPNP_JANET_EXPORT int capnp_get_bool(const capnp_ptr_t *s, uint32_t bit_offset, int dflt);
 
@@ -107,6 +109,8 @@ CAPNP_JANET_EXPORT uint32_t capnp_list_get_u32(const capnp_ptr_t *list, uint32_t
                             uint32_t dflt);
 CAPNP_JANET_EXPORT uint64_t capnp_list_get_u64(const capnp_ptr_t *list, uint32_t index,
                             uint64_t dflt);
+CAPNP_JANET_EXPORT float capnp_list_get_f32(const capnp_ptr_t *list,
+                         uint32_t index, float dflt);
 CAPNP_JANET_EXPORT double capnp_list_get_f64(const capnp_ptr_t *list, uint32_t index, double dflt);
 
 /* List(Bool) bit-list element (esize = CAPNP_SZ_BIT). */

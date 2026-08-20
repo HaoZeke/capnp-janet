@@ -389,6 +389,18 @@ uint64_t capnp_get_u64(const capnp_ptr_t *s, uint32_t byte_offset,
   return capnp_load_le64(data_bytes(s) + byte_offset);
 }
 
+float capnp_get_f32(const capnp_ptr_t *s, uint32_t byte_offset, float dflt) {
+  uint32_t bits;
+  float value;
+  if (!s || s->kind != CAPNP_PK_STRUCT)
+    return dflt;
+  if ((byte_offset + 4u) * 8u > data_bit_count(s))
+    return dflt;
+  bits = capnp_load_le32(data_bytes(s) + byte_offset);
+  memcpy(&value, &bits, sizeof(value));
+  return value;
+}
+
 double capnp_get_f64(const capnp_ptr_t *s, uint32_t byte_offset, double dflt) {
   if (!s || s->kind != CAPNP_PK_STRUCT)
     return dflt;
@@ -615,6 +627,21 @@ uint64_t capnp_list_get_u64(const capnp_ptr_t *list, uint32_t index,
   if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
     return capnp_load_le64(composite_elem_data(list, index));
   return dflt;
+}
+
+float capnp_list_get_f32(const capnp_ptr_t *list, uint32_t index, float dflt) {
+  uint32_t bits;
+  float value;
+  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
+    return dflt;
+  if (list->esize == CAPNP_SZ_FOUR)
+    bits = capnp_load_le32(list_elem_bytes(list, index, 4));
+  else if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
+    bits = capnp_load_le32(composite_elem_data(list, index));
+  else
+    return dflt;
+  memcpy(&value, &bits, sizeof(value));
+  return value;
 }
 
 double capnp_list_get_f64(const capnp_ptr_t *list, uint32_t index, double dflt) {
