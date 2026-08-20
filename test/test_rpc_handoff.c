@@ -263,6 +263,13 @@ int main(void)
   CHECK(sidecar.calls == 0, "and not the sidecar");
   CHECK(capnp_rpc_is_answered(&carol_to_bob, q), "the call was answered");
 
+  /* The direct Alice-to-Carol injection queues Carol's Return and the vine
+   * Release without passing through the wire pump above. Deliver both so
+   * the transport observes the complete exchange and owns no frames. */
+  CHECK(c2a.n == 2, "return and vine release queued for Alice");
+  flush_wire(&c2a);
+  CHECK(c2a.n == 0, "Carol-to-Alice transport drained");
+
   if (g_failures != 0) {
     fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;
