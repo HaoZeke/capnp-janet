@@ -124,13 +124,24 @@ grep -q '(defn CodegenFeatures-get-tones-at \[list index\]' codegen-features.jan
 MODULE=${CAPNP_JANET_MODULE:-$BUILD/capnp.so}
 if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then
   cp "$MODULE" "$TMP/capnp.so"
-  ASAN_RUNTIME=$(ldd "$MODULE" 2>/dev/null | awk '$1 ~ /^libasan/ {print $3; exit}')
-  if [[ -n "$ASAN_RUNTIME" ]]; then
-    LD_PRELOAD="$ASAN_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}" \
-      JANET_PATH="$TMP" janet "$ROOT/test/generated_builder_smoke.janet"
-  else
-    JANET_PATH="$TMP" janet "$ROOT/test/generated_builder_smoke.janet"
+  MODULE_DIR=$(cd "$(dirname "$MODULE")" && pwd)
+  RUNTIME_ENV=(env "JANET_PATH=$TMP")
+  case $(uname -s) in
+    Darwin)
+      RUNTIME_ENV+=("DYLD_LIBRARY_PATH=$MODULE_DIR${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}")
+      ;;
+    *)
+      RUNTIME_ENV+=("LD_LIBRARY_PATH=$MODULE_DIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}")
+      ;;
+  esac
+  ASAN_RUNTIME=
+  if command -v ldd >/dev/null 2>&1; then
+    ASAN_RUNTIME=$(ldd "$MODULE" 2>/dev/null | awk '$1 ~ /^libasan/ {print $3; exit}') || true
   fi
+  if [[ -n "$ASAN_RUNTIME" ]]; then
+    RUNTIME_ENV+=("LD_PRELOAD=$ASAN_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}")
+  fi
+  "${RUNTIME_ENV[@]}" janet "$ROOT/test/generated_builder_smoke.janet"
 fi
 
 echo "ok codegen"
