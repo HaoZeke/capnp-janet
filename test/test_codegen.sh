@@ -69,5 +69,11 @@ grep -Eq 'capnp/get-u64 ptr [0-9]+ 9007199254740991' codegen-features.janet
 grep -Eq 'capnp/get-f32 ptr [0-9]+ 1\.5' codegen-features.janet
 grep -Eq 'capnp/get-f64 ptr [0-9]+ 2\.5' codegen-features.janet
 grep -Eq 'capnp/get-u16 ptr [0-9]+ 1' codegen-features.janet
+grep -q '(defn CodegenFeatures-which \[ptr\]' codegen-features.janet
+grep -q '(def CodegenFeatures-none-tag 0)' codegen-features.janet
+grep -q '(def CodegenFeatures-number-tag 1)' codegen-features.janet
+grep -q '(def CodegenFeatures-detail-tag 2)' codegen-features.janet
+grep -q '(defn CodegenFeatures-detail \[ptr\]' codegen-features.janet
+grep -q '(defn CodegenFeatures-detail-get-label \[ptr\]' codegen-features.janet
 
 echo "ok codegen"
