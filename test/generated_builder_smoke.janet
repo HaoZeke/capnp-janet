@@ -20,6 +20,13 @@
 (codegen-features/CodegenFeatures-set-ratio32 root 3.5)
 (codegen-features/CodegenFeatures-set-ratio64 root 4.5)
 (codegen-features/CodegenFeatures-set-tone root 0)
+(codegen-features/CodegenFeatures-set-flags root @[true false true])
+(codegen-features/CodegenFeatures-set-scores root @[-2 0 5])
+(codegen-features/CodegenFeatures-set-samples root @[1.5 -2.25])
+(codegen-features/CodegenFeatures-set-names root @["one" "t\x00wo"])
+(codegen-features/CodegenFeatures-set-empty root 4)
+(codegen-features/CodegenFeatures-set-big-values root @[0 huge-value])
+(codegen-features/CodegenFeatures-set-tones root @[0 1])
 
 (codegen-features/CodegenFeatures-init-detail root)
 (codegen-features/CodegenFeatures-detail-set-label root "stale")
@@ -73,6 +80,27 @@
 (assert (= 3.5 (codegen-features/CodegenFeatures-get-ratio32 decoded)))
 (assert (= 4.5 (codegen-features/CodegenFeatures-get-ratio64 decoded)))
 (assert (= 0 (codegen-features/CodegenFeatures-get-tone decoded)))
+(def flags (codegen-features/CodegenFeatures-get-flags decoded))
+(assert (deep= @[true false true]
+               (map |(codegen-features/CodegenFeatures-get-flags-at flags $)
+                    (range 3))))
+(def scores (codegen-features/CodegenFeatures-get-scores decoded))
+(assert (deep= @[-2 0 5]
+               (map |(codegen-features/CodegenFeatures-get-scores-at scores $)
+                    (range 3))))
+(def samples (codegen-features/CodegenFeatures-get-samples decoded))
+(assert (deep= @[1.5 -2.25]
+               (map |(codegen-features/CodegenFeatures-get-samples-at samples $)
+                    (range 2))))
+(def names (codegen-features/CodegenFeatures-get-names decoded))
+(assert (= "t\x00wo"
+           (string (codegen-features/CodegenFeatures-get-names-at names 1))))
+(assert (= 4 (length (codegen-features/CodegenFeatures-get-empty decoded))))
+(def big-values (codegen-features/CodegenFeatures-get-big-values decoded))
+(assert (= huge-value
+           (codegen-features/CodegenFeatures-get-big-values-at big-values 1)))
+(def tones (codegen-features/CodegenFeatures-get-tones decoded))
+(assert (= 1 (codegen-features/CodegenFeatures-get-tones-at tones 1)))
 (assert (= "detail" (string
                        (codegen-features/CodegenFeatures-detail-get-label
                          decoded))))

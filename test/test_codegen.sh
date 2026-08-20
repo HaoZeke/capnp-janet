@@ -107,6 +107,19 @@ grep -q '(defn CodegenFeatures-init-child \[ptr\]' codegen-features.janet
 grep -Eq 'capnp/init-struct ptr [0-9]+ [0-9]+ [0-9]+' codegen-features.janet
 grep -q '(defn CodegenFeatures-init-children \[ptr count\]' codegen-features.janet
 grep -Eq 'capnp/init-struct-list ptr [0-9]+ count [0-9]+ [0-9]+' codegen-features.janet
+grep -Eq 'capnp/set-list-bool ptr [0-9]+ values' codegen-features.janet
+grep -Eq 'capnp/set-list-i32 ptr [0-9]+ values' codegen-features.janet
+grep -Eq 'capnp/set-list-f32 ptr [0-9]+ values' codegen-features.janet
+grep -Eq 'capnp/set-list-text ptr [0-9]+ values' codegen-features.janet
+grep -Eq 'capnp/set-list-void ptr [0-9]+ count' codegen-features.janet
+grep -Eq 'capnp/set-list-u64 ptr [0-9]+ values' codegen-features.janet
+grep -Eq 'capnp/set-list-u16 ptr [0-9]+ values' codegen-features.janet
+grep -q '(defn CodegenFeatures-get-flags-at \[list index\]' codegen-features.janet
+grep -q '(defn CodegenFeatures-get-scores-at \[list index\]' codegen-features.janet
+grep -q '(defn CodegenFeatures-get-samples-at \[list index\]' codegen-features.janet
+grep -q '(defn CodegenFeatures-get-names-at \[list index\]' codegen-features.janet
+grep -q '(defn CodegenFeatures-get-big-values-at \[list index\]' codegen-features.janet
+grep -q '(defn CodegenFeatures-get-tones-at \[list index\]' codegen-features.janet
 
 MODULE=${CAPNP_JANET_MODULE:-$BUILD/capnp.so}
 if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then

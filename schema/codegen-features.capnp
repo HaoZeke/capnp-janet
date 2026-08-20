@@ -32,6 +32,13 @@ struct CodegenFeatures {
   children @17 :List(Child);
   huge @18 :UInt64 = 18446744073709551615;
   lowest @19 :Int64 = -9223372036854775808;
+  flags @20 :List(Bool);
+  scores @21 :List(Int32);
+  samples @22 :List(Float32);
+  names @23 :List(Text);
+  empty @24 :List(Void);
+  bigValues @25 :List(UInt64);
+  tones @26 :List(Tone);
 
   struct Child {
     code @0 :UInt32;
