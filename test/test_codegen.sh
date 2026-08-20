@@ -124,7 +124,13 @@ grep -q '(defn CodegenFeatures-get-tones-at \[list index\]' codegen-features.jan
 MODULE=${CAPNP_JANET_MODULE:-$BUILD/capnp.so}
 if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then
   cp "$MODULE" "$TMP/capnp.so"
-  JANET_PATH="$TMP" janet "$ROOT/test/generated_builder_smoke.janet"
+  ASAN_RUNTIME=$(ldd "$MODULE" 2>/dev/null | awk '$1 ~ /^libasan/ {print $3; exit}')
+  if [[ -n "$ASAN_RUNTIME" ]]; then
+    LD_PRELOAD="$ASAN_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}" \
+      JANET_PATH="$TMP" janet "$ROOT/test/generated_builder_smoke.janet"
+  else
+    JANET_PATH="$TMP" janet "$ROOT/test/generated_builder_smoke.janet"
+  fi
 fi
 
 echo "ok codegen"
