@@ -19,7 +19,7 @@ struct CodegenFeatures {
   ratio64 @10 :Float64 = 2.5;
   tone @11 :Tone = loud;
 
-  choice :union {
+  union {
     none @12 :Void;
     number @13 :UInt32;
     detail :group {
