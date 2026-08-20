@@ -172,6 +172,50 @@ janet -e '
 janet -e '
 (import capnp)
 (def builder (capnp/new-builder))
+(def root (capnp/init-root builder 0 9))
+(def huge (int/u64 "18446744073709551615"))
+(capnp/set-list-bool root 0 @[true false true])
+(capnp/set-list-i8 root 1 @[-128 0 127])
+(capnp/set-list-u16 root 2 @[0 65000 65535])
+(capnp/set-list-i32 root 3 @[-2147483648 0 2147483647])
+(capnp/set-list-u64 root 4 @[0 huge])
+(capnp/set-list-f32 root 5 @[1.5 -2.0 3.25])
+(capnp/set-list-f64 root 6 @[1.25 -4.5])
+(capnp/set-list-text root 7 @["alpha" "b\x00eta"])
+(capnp/set-list-void root 8 3)
+(def decoded (:root (capnp/message-from-buffer (capnp/finish-builder builder))))
+(def bools (:ptr decoded 0))
+(assert (= 3 (length bools)))
+(assert (capnp/list-get-bool bools 0))
+(assert (not (capnp/list-get-bool bools 1)))
+(assert (capnp/list-get-bool bools 2))
+(def i8s (:ptr decoded 1))
+(assert (deep= @[-128 0 127]
+               (map |(capnp/list-get-i8 i8s $) (range 3))))
+(def u16s (:ptr decoded 2))
+(assert (deep= @[0 65000 65535]
+               (map |(capnp/list-get-u16 u16s $) (range 3))))
+(def i32s (:ptr decoded 3))
+(assert (deep= @[-2147483648 0 2147483647]
+               (map |(capnp/list-get-i32 i32s $) (range 3))))
+(def u64s (:ptr decoded 4))
+(assert (= 0 (capnp/list-get-u64 u64s 0)))
+(assert (= huge (capnp/list-get-u64 u64s 1)))
+(def f32s (:ptr decoded 5))
+(assert (deep= @[1.5 -2 3.25]
+               (map |(capnp/list-get-f32 f32s $) (range 3))))
+(def f64s (:ptr decoded 6))
+(assert (deep= @[1.25 -4.5]
+               (map |(capnp/list-get-f64 f64s $) (range 2))))
+(def texts (:ptr decoded 7))
+(assert (= "alpha" (string (capnp/list-get-text texts 0))))
+(assert (= "b\x00eta" (string (capnp/list-get-text texts 1))))
+(assert (= 3 (length (:ptr decoded 8))))
+(print "primitive list builders ok")'
+
+janet -e '
+(import capnp)
+(def builder (capnp/new-builder))
 (def root (capnp/init-root builder 0 2))
 (def child (capnp/init-struct root 0 1 1))
 (capnp/set-u32 child 0 77)
