@@ -21,5 +21,5 @@ changes small and leave `meson test` green.
 
 ## Scope
 
-Prefer wire-format and codegen work here. Product policy packs belong in
-downstream repos (e.g. grok-policyd), not this library.
+Prefer wire-format and codegen work here. Application policy packs belong in
+their downstream repositories, not this library.

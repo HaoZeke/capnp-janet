@@ -128,7 +128,7 @@ $ meson test -C build
 Optional Janet module: configure with a `janet` pkg-config package visible,
 or `-Djanet=enabled`.
 
-### C embed (e.g. policyd)
+### C embed
 
 ```c
 #include <capnp-janet/capnp_message.h>

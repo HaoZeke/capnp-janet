@@ -19,7 +19,7 @@
 #include <capnp-janet/capnp_message.h>
 #include <capnp-janet/capnp_rpc.h>
 
-/* Mirrors the id in compiler/adder.capnp. */
+/* Mirrors the id in schema/adder.capnp. */
 #define ADDER_IFACE 0xea01e10cbc414411ULL
 
 static int g_fd = -1;

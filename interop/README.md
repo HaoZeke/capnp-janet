@@ -1,4 +1,4 @@
-# Interop with official Cap'n C++ / c-capnproto
+# Interop with official Cap'n Proto
 
 ## Official CLI goldens (wired)
 
@@ -23,19 +23,21 @@ Assertions:
 - **Canonical**: our `capnp_canonicalize` is **byte-identical** to
   `binary:canonical` on AddressBook
 
-## c-capnproto golden-master (planned)
+## Live capnp-C++ RPC peer
 
-Same idea as
-[capnp-fortran/interop](https://github.com/HaoZeke/capnp-fortran/tree/main/interop):
+When the C++ toolchain, `capnp-rpc`, and compiler tools are present, Meson
+generates C++ bindings for `schema/adder.capnp` and builds two processes:
 
-1. Clone reference (untracked):
+- `rpc_peer_server`: an official `capnp::EzRpcServer` implementation.
+- `rpc_client_c`: the C vat from this runtime.
 
-   ```console
-   git clone https://github.com/HaoZeke/c-capnproto third_party/c-capnproto
-   ```
+The client bootstraps the remote capability, calls `add(-20, 22)`, and requires
+the C++ peer to return `2`. Run the isolated gate with:
 
-2. Build the same demo message with c-capnproto and with this runtime.
-3. `memcmp` framed bytes; cross-decode both ways.
+```console
+meson test -C build rpc_interop_cpp --print-errorlogs
+```
 
-Enable with `-Dinterop=true` once the builder allocation order is locked for
-that suite.
+Level 3 `Provide`, `Accept`, embargo, and handoff frames use
+`schema/rpc-threeparty.capnp`. `scripts/gen-rpc-frames.sh --check` compares the
+checked-in frames with the official `capnp encode` output.

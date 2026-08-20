@@ -1,7 +1,7 @@
 #ifndef CAPNP_JANET_H
 #define CAPNP_JANET_H
 
-/* Public C headers for embedders (e.g. libgrok_policyd). */
+/* Public C headers for applications embedding the Janet module. */
 
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_kinds.h>

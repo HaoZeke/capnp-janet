@@ -1,7 +1,7 @@
 # Serialization-only subset of the Cap'n Proto calculator sample (C++/pycapnp).
-# Full Calculator is RPC (interfaces, promise pipelining); that is out of scope
-# for this runtime. Expression / EvaluateRequest / EvaluateResponse exercise
-# Float64, nested unions, composite List(Expression), and enum packing.
+# Expression / EvaluateRequest / EvaluateResponse exercise Float64, nested
+# unions, composite List(Expression), and enum packing. RPC compatibility uses
+# the Adder and three-party schemas so serialization fixtures stay deterministic.
 @0x85150b117366d14b;
 
 enum Operator {

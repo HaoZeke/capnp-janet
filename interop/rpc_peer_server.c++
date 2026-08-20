@@ -1,5 +1,5 @@
 // Reference RPC peer: capnp-C++ serving Adder over rpc-twoparty on
-// 127.0.0.1:<argv[1]>. The Fortran vat (rpc_client.f90) bootstraps it and
+// 127.0.0.1:<argv[1]>. The C vat (rpc_client.c) bootstraps it and
 // calls add(), proving protocol-level compatibility with the reference
 // implementation, not just wire-format byte equality.
 #include "adder.capnp.h"
