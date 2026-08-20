@@ -47,6 +47,11 @@ jobs:
           pixi run -e janet -- meson setup build-janet -Djanet=enabled
           pixi run -e janet -- meson compile -C build-janet
           test -f build-janet/capnp.so
+      - name: generated builders execute through the native module
+        run: |
+          CAPNP_JANET_BUILD="$PWD/build-janet" \
+          CAPNP_JANET_MODULE="$PWD/build-janet/capnp.so" \
+          pixi run -e janet -- bash test/test_codegen.sh
 
   packaging:
     name: downstream consumption
