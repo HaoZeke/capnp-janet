@@ -123,6 +123,34 @@ static void test_list_f64(void) {
   capnp_message_free(&m);
 }
 
+static void test_f32(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body;
+  float items[] = {1.5f, -2.0f, 3.25f};
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m;
+  capnp_ptr_t r, list;
+
+  capnp_builder_init(&b);
+  capnp_builder_root(&b, &root);
+  capnp_builder_struct(&root, 1, 1, &body);
+  CHECK(capnp_builder_set_f32(&body, 0, -7.25f) == CAPNP_OK, "set f32");
+  CHECK(capnp_builder_set_list_f32(&body, 1, 0, items, 3) == CAPNP_OK,
+        "set list f32");
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
+  capnp_builder_free(&b);
+  CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "flat");
+  free(flat);
+  CHECK(capnp_root(&m, &r) == CAPNP_OK, "root");
+  CHECK_NEAR(capnp_get_f32(&r, 0, 0), -7.25, 1e-6, "struct f32");
+  CHECK(capnp_getp(&r, 0, &list) == CAPNP_OK, "list");
+  CHECK_NEAR(capnp_list_get_f32(&list, 0, 0), 1.5, 1e-6, "f32 1.5");
+  CHECK_NEAR(capnp_list_get_f32(&list, 1, 0), -2.0, 1e-6, "f32 -2");
+  CHECK_NEAR(capnp_list_get_f32(&list, 2, 0), 3.25, 1e-6, "f32 3.25");
+  capnp_message_free(&m);
+}
+
 static void test_copy_flat(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body;
@@ -217,6 +245,7 @@ int main(void) {
   test_struct_u64();
   test_list_u64();
   test_data_blob();
+  test_f32();
   test_list_f64();
   test_copy_flat();
   return harness_finish();
