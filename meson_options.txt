@@ -1,4 +1,2 @@
 option('janet', type: 'feature', value: 'auto',
        description: 'Build Janet native module')
-option('interop', type: 'boolean', value: false,
-       description: 'Build c-capnproto golden-master parity tests')
