@@ -96,4 +96,20 @@ janet -e '
 (assert (= "tuple" (string (:text root 0))) "tuple-literal build-message text")
 (print "tuple-literal build-message ok")'
 
+# Scalar schema defaults are XOR bases on the wire. A zeroed data word must
+# therefore read as the requested logical default for every exposed width.
+janet -e '
+(import capnp)
+(def root (:root (capnp/message-from-buffer
+                   (capnp/build-message 1 0 @[]))))
+(assert (= 255 (capnp/get-u8 root 0 255)) "u8 schema default")
+(assert (= -7 (capnp/get-i8 root 0 -7)) "i8 schema default")
+(assert (= -700 (capnp/get-i16 root 0 -700)) "i16 schema default")
+(assert (= -70000 (capnp/get-i32 root 0 -70000)) "i32 schema default")
+(assert (= -700000 (capnp/get-i64 root 0 -700000)) "i64 schema default")
+(assert (= 2.5 (capnp/get-f32 root 0 2.5)) "f32 schema default")
+(assert (= 2.5 (capnp/get-f64 root 0 2.5)) "f64 schema default")
+(assert (capnp/get-bool root 0 true) "bool schema default")
+(print "scalar schema defaults ok")'
+
 echo "ok janet-bundle-smoke"
