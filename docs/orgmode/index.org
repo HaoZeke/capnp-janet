@@ -10,7 +10,7 @@ C library embedders can link without the Janet VM.
 #+end_export
 
 Sibling runtimes: [[https://c-capnproto.rgoswami.me][c-capnproto]] and
-[[https://capnp-fortran.rgoswami.me][capnp-fortran]]. Status: =0.2.0-dev=.
+[[https://capnp-fortran.rgoswami.me][capnp-fortran]]. Status: =0.2.5=.
 AddressBook encode matches official =capnp encode= when fields are set
 in schema order.
 
@@ -24,13 +24,16 @@ $ pixi install && pixi run configure && pixi run build && pixi run test
 
 * First message (Janet)
 
-=build-message= takes a data-word count, a pointer-word count, and an array
-of =[kind byte-offset value]= fields:
+Allocate the root and its nested values in one growable arena:
 
 #+begin_src janet
 (import capnp)
 
-(def buf (capnp/build-message 1 1 @[[:u32 0 42] [:text 0 "hello"]]))
+(def builder (capnp/new-builder))
+(def body (capnp/init-root builder 1 1))
+(capnp/set-u32 body 0 42)
+(capnp/set-text body 0 "hello")
+(def buf (capnp/finish-builder builder))
 (def root (capnp/root (capnp/message-from-buffer buf)))
 (print (capnp/get-u32 root 0))        # 42
 (print (capnp/get-text root 0))       # hello
@@ -52,9 +55,9 @@ protocols, so it answers to the same forms as an array:
 #+end_src
 
 =(:verb receiver ...)= reaches the same accessors as the =capnp/=
-functions: =:kind=, =:ptr=, =:u16=, =:u32=, =:u64=, =:f64=, =:bool=,
-=:text=, and =:text-at= for an element of a =List(Text)=. A message
-answers to =:root=.
+functions: =:kind=, =:ptr=, every signed and unsigned scalar width,
+=:f32=, =:f64=, =:bool=, =:text=, and typed =:*-at= list readers. A
+message answers to =:root=.
 
 C embed (no Janet VM):
 

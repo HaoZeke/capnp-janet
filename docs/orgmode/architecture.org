@@ -4,15 +4,15 @@
 * Layers
 
 #+begin_example
-  capnp_kinds / capnp_pointer   (headers: constants + word codecs)
+  capnpc-janet                 (schema -> typed Janet helpers)
            |
-     capnp_message              (segment arena view, resolve, readers)
+     janet_mod                 (native module + register for embeds)
            |
-     capnp_builder              (multi-segment arena + far/double-far)
+     capnp_builder             (multi-segment arena + far/double-far)
            |
-     janet_mod                  (Janet native module + register for embeds)
+     capnp_message             (segment arena view, resolve, readers)
            |
-     capnpc-janet (planned)     (capnp compile -o plugin)
+  capnp_kinds / capnp_pointer  (constants + word codecs)
 #+end_example
 
 * Design choices
@@ -21,14 +21,14 @@
 
 Janet embeds as a C amalgamation. The wire runtime is C so:
 
-- =libgrok_policyd= can link Cap'n readers without the Janet VM for host-side
+- a C application can link Cap'n readers without the Janet VM for host-side
   framing, and
 - the same readers register into the sealed Janet pack environment for
   zero-copy field access on the Cap'n message the host already built.
 
 This mirrors =capnp-fortran= (native language runtime, not a thin FFI over
-C++) more than pycapnp (C++ wrapper). c-capnproto remains the golden-master
-peer for byte parity, not a required runtime dependency.
+C++) more than pycapnp (C++ wrapper). The official Cap'n Proto CLI and live
+C++ peers provide compatibility checks without becoming runtime dependencies.
 
 ** Zero-copy contract
 
@@ -38,10 +38,9 @@ abstract lifetime. =message-from-buffer= copies so the buffer may be reused.
 
 ** What packs see
 
-Packs never receive parallel C DTO tables. Host builds a Cap'n =ShellView=
-(or other schema type) with c-capnproto or this builder; the pack opens the
-message with =capnp/*= and decides. Named readers live in =janet/policy.janet=
-(compiled into pack images). =capnpc-janet= will emit that file from schema.
+Packs can open a message through =capnp/*= without a parallel C DTO table.
+Named readers may live in hand-written Janet code or an importable module
+emitted by =capnpc-janet= from the schema.
 
 ** Compiled images (=.jimage=)
 
@@ -52,11 +51,11 @@ re-registers them then unmarshals with =janet_env_lookup= /
 Cap'n) unmarshal with core lookup only. The optional =capnp.so= module is
 for the Janet CLI compile path: =(import capnp)= then =janet -c=.
 
-* Embed sketch (policyd)
+* Embed sketch
 
 #+begin_example
   C host:
-    build Policy.ShellView with c-capnproto
+    build an application schema with c-capnproto or this builder
     serialize or pass segment pointer
     janet_init; capnp_janet_register(env); load pack
     pack reads Cap'n; returns decision (Janet values or Cap'n builder)
@@ -70,19 +69,12 @@ for the Janet CLI compile path: =(import capnp)= then =janet -c=.
 
 * Testing surface (Janet)
 
-C wire tests (=meson test=) cover =capnp_get_u64= / =capnp_builder_set_u64=
-and list-u64. Codegen smoke (=test/test_codegen.sh=) asserts generated
-=UInt64=/=Int64= getters call =capnp/get-u64=.
-
-**Testament / Judge suite for generated modules.** Not wired in-tree yet:
-product hosts amalgamate Janet (no standalone =janet= pkg-config / jpm on
-the remote builder path this library uses). A pure Testament suite would
-need either (1) a system Janet + jpm install of Testament as a *test-only*
-dep outside product packs, or (2) a small C host that links the
-amalgamation, registers =capnp_janet_register=, and =dofile=s generated
-helpers. Prefer (1) when a builder image gains Janet without pulling
-product amalgamation into this repo. Until then, C + codegen smoke is the
-regression gate for the get-u64 path.
+C wire tests (=meson test=) cover every scalar width, typed primitive lists,
+arena ownership, packed/canonical transforms, and live C++ interoperability.
+=test/test_codegen.sh= generates modules from multiple schemas, checks their
+typed surface, then runs =test/generated_builder_smoke.janet= through the
+native module. The executable test covers scalar defaults, exact 64-bit
+values, unions, groups, nested structs, and primitive/struct lists.
 
 * List upgrade and bit/void lists
 
@@ -97,7 +89,7 @@ Supported schema-evolution list views match =capnp-fortran= parity tests
 =List(Bool)=: =capnp_list_get_bool= / =capnp_builder_set_list_bool= (LSB-first bits).
 =List(Void)=: =capnp_builder_set_list_void= + =capnp_list_len= only.
 
-Full esize×esize upgrade matrix is an explicit non-goal; see README.
+Other esize×esize combinations return =CAPNP_ERR_KIND=; see README.
 
 * Builder segment policy
 

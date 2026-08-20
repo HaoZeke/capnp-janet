@@ -12,16 +12,20 @@ $ pixi run test
 
 Bare Meson: =meson setup build && meson compile -C build && meson test -C build=.
 
-* Janet: demo buffer
+* Janet: arena builder
 
-The in-tree demo builder writes a struct with a =UInt32=, a =Text=, and
-a =List(Text)=. After =(import capnp)= (or after the host calls
-=capnp_janet_register=):
+The arena builder writes nested values without rebuilding the message. After
+=(import capnp)= (or after the host calls =capnp_janet_register=):
 
 #+begin_src janet
 (import capnp)
 
-(def buf (capnp/build-demo 42 "hello" ["a" "bb"]))
+(def builder (capnp/new-builder))
+(def body (capnp/init-root builder 1 2))
+(capnp/set-u32 body 0 42)
+(capnp/set-text body 0 "hello")
+(capnp/set-list-text body 1 @["a" "bb"])
+(def buf (capnp/finish-builder builder))
 (def msg (capnp/message-from-buffer buf))
 (def root (capnp/root msg))
 (print (capnp/get-u32 root 0))        # 42
@@ -33,6 +37,41 @@ a =List(Text)=. After =(import capnp)= (or after the host calls
 =message-from-buffer= copies so the Janet buffer may be reused.
 =message-view-buffer= aliases the caller's buffer and keeps it GC-marked
 for the view lifetime.
+
+The typed setters take the schema default as an optional final argument and
+store =value XOR default=, matching Cap'n Proto's data-field encoding. Use
+=init-struct=, =init-struct-list=, and =struct-list-at= for nested structs.
+
+* Generated helpers
+
+=capnpc-janet= consumes the standard =CodeGeneratorRequest= from =capnp
+compile=. The plugin emits an importable Janet module with typed readers,
+builders, union selectors, group initializers, scalar defaults, interfaces,
+and list helpers:
+
+#+begin_src console
+$ cp schema/codegen-features.capnp build/
+$ cd build
+$ capnp compile -o./capnpc-janet codegen-features.capnp
+#+end_src
+
+With =build= on =JANET_PATH=:
+
+#+begin_src janet
+(import capnp)
+(import codegen-features)
+
+(def builder (capnp/new-builder))
+(def root (codegen-features/CodegenFeatures-init-root builder))
+(codegen-features/CodegenFeatures-set-count root -70001)
+(def decoded
+  (:root (capnp/message-from-buffer (capnp/finish-builder builder))))
+(assert (= -70001
+           (codegen-features/CodegenFeatures-get-count decoded)))
+#+end_src
+
+=test/test_codegen.sh= generates modules from the shipped schemas and executes
+=test/generated_builder_smoke.janet= when Janet and =capnp.so= are present.
 
 * AddressBook
 

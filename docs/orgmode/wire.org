@@ -27,7 +27,7 @@ Same cases as Cap'n C++ and capnp-fortran:
 |----------------+-----------------+-----|
 | =List(UInt8/16/32/64)= | =List(Struct)= with scalar =@0= | =capnp_list_get_struct= then =capnp_get_u*= |
 | =List(pointer)= e.g. =List(Text)= | =List(Struct)= with pointer =@0= | =capnp_list_get_struct= then =capnp_get_text= / =capnp_getp= |
-| =List(Struct)= with data word 0 | =List(UInt*)= field =@0= | =capnp_list_get_u8= / =u16= / =u32= / =u64= / =f64= |
+| =List(Struct)= with data word 0 | =List(UInt*)= field =@0= | =capnp_list_get_u8= / =u16= / =u32= / =u64= / =f32= / =f64= |
 | =List(Struct)= with pointer 0 | =List(Text)= / pointer list | =capnp_list_get_text= |
 
 =List(Bool)= and =List(Void)= do not upgrade to struct views.
@@ -41,4 +41,6 @@ Tests: =test/test_list_evolution.c=.
 | =calculator= | =schema/calculator.capnp= | Expression trees (serialization only) |
 | =wire= / =list_text= | demo shapes | core reader/builder |
 
-Calculator *RPC* (interfaces, pipelining) is out of scope.
+The calculator fixtures exercise expression serialization. Live RPC tests use
+=schema/adder.capnp= with a C++ peer; level 3 frame tests use
+=schema/rpc-threeparty.capnp=.

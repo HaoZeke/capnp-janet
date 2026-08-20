@@ -1,7 +1,7 @@
 # Named Policy.capnp readers for compiled pack images.
 # Import after the capnp native module is on the lookup (host register or
-# `(import capnp)` in the janet CLI). Indices match grok-policyd layout.janet
-# until capnpc-janet emits this file from schema.
+# `(import capnp)` in the janet CLI). The hand-written policy layer and
+# generated schema helpers share the same native API.
 
 (def shell-view-under-workspace-bit 0)
 (def shell-view-argv-ptr 1)
