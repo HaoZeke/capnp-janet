@@ -112,4 +112,66 @@ janet -e '
 (assert (capnp/get-bool root 0 true) "bool schema default")
 (print "scalar schema defaults ok")'
 
+# The arena-backed builder surface is what generated Janet modules target.
+# Values are XORed with schema defaults before storage, exactly as the wire
+# format requires, while pointer children share one growable message arena.
+janet -e '
+(import capnp)
+(def builder (capnp/new-builder))
+(def root (capnp/init-root builder 7 2))
+(capnp/set-u8 root 0 9 11)
+(capnp/set-i8 root 1 -5 -7)
+(capnp/set-u16 root 2 2000 1000)
+(capnp/set-i16 root 4 -2000 -1000)
+(capnp/set-u32 root 8 70000 30000)
+(capnp/set-i32 root 12 -70000 -30000)
+(capnp/set-u64 root 16 700000 300000)
+(capnp/set-i64 root 24 -700000 -300000)
+(capnp/set-f32 root 32 1.5 2.5)
+(capnp/set-f64 root 40 -1.5 -2.5)
+(capnp/set-bool root 384 false true)
+(capnp/set-text root 0 "arena")
+(capnp/set-data root 1 "\x00\x01\xfe\xff")
+(def decoded (:root (capnp/message-from-buffer (capnp/finish-builder builder))))
+(assert (= 9 (:u8 decoded 0 11)) "builder u8 default round-trip")
+(assert (= -5 (:i8 decoded 1 -7)) "builder i8 default round-trip")
+(assert (= 2000 (:u16 decoded 2 1000)) "builder u16 default round-trip")
+(assert (= -2000 (:i16 decoded 4 -1000)) "builder i16 default round-trip")
+(assert (= 70000 (:u32 decoded 8 30000)) "builder u32 default round-trip")
+(assert (= -70000 (:i32 decoded 12 -30000)) "builder i32 default round-trip")
+(assert (= 700000 (:u64 decoded 16 300000)) "builder u64 default round-trip")
+(assert (= -700000 (:i64 decoded 24 -300000)) "builder i64 default round-trip")
+(assert (= 1.5 (:f32 decoded 32 2.5)) "builder f32 default round-trip")
+(assert (= -1.5 (:f64 decoded 40 -2.5)) "builder f64 default round-trip")
+(assert (not (:bool decoded 384 true)) "builder bool default round-trip")
+(assert (= "arena" (string (:text decoded 0))) "builder text round-trip")
+(assert (= "\x00\x01\xfe\xff" (string (capnp/get-data decoded 1)))
+        "builder data round-trip")
+(print "arena scalar and pointer builders ok")'
+
+janet -e '
+(import capnp)
+(def builder (capnp/new-builder))
+(def root (capnp/init-root builder 0 2))
+(def child (capnp/init-struct root 0 1 1))
+(capnp/set-u32 child 0 77)
+(capnp/set-text child 0 "nested")
+(def people (capnp/init-struct-list root 1 2 1 1))
+(def alice (capnp/struct-list-at people 0))
+(capnp/set-u32 alice 0 123)
+(capnp/set-text alice 0 "Alice")
+(def bob (capnp/struct-list-at people 1))
+(capnp/set-u32 bob 0 456)
+(capnp/set-text bob 0 "Bob")
+(def decoded (:root (capnp/message-from-buffer (capnp/finish-builder builder))))
+(def decoded-child (:ptr decoded 0))
+(assert (= 77 (:u32 decoded-child 0)) "nested struct scalar")
+(assert (= "nested" (string (:text decoded-child 0))) "nested struct text")
+(def decoded-people (:ptr decoded 1))
+(assert (= 2 (length decoded-people)) "struct-list length")
+(assert (= @[123 456] (map |(:u32 $ 0) decoded-people)) "struct-list values")
+(assert (= @["Alice" "Bob"] (map |(string (:text $ 0)) decoded-people))
+        "struct-list pointers")
+(print "nested builder views ok")'
+
 echo "ok janet-bundle-smoke"
