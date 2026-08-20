@@ -326,25 +326,36 @@ static Janet cfun_get_i32(int32_t argc, Janet *argv) {
   return janet_wrap_number((double)(int32_t)(raw ^ (uint32_t)dflt));
 }
 
+static Janet wrap_u64_lossless(uint64_t value) {
+  if (value <= (uint64_t)JANET_INTMAX_INT64)
+    return janet_wrap_number((double)value);
+  return janet_wrap_u64(value);
+}
+
+static Janet wrap_i64_lossless(int64_t value) {
+  if (value >= JANET_INTMIN_INT64 && value <= JANET_INTMAX_INT64)
+    return janet_wrap_number((double)value);
+  return janet_wrap_s64(value);
+}
+
 static Janet cfun_get_u64(int32_t argc, Janet *argv) {
   janet_arity(argc, 2, 3);
   capnp_ptr_wrap *p = get_ptr(argv, 0);
   int32_t off = janet_getinteger(argv, 1);
-  /* Number path: mantissa-safe integers (same as build-message :u64). */
-  uint64_t dflt = argc > 2 ? (uint64_t)janet_getnumber(argv, 2) : 0;
+  uint64_t dflt = argc > 2 ? janet_getuinteger64(argv, 2) : 0;
   uint64_t raw = capnp_get_u64(&p->ptr, (uint32_t)off, 0);
-  return janet_wrap_number((double)(raw ^ dflt));
+  return wrap_u64_lossless(raw ^ dflt);
 }
 
 static Janet cfun_get_i64(int32_t argc, Janet *argv) {
   janet_arity(argc, 2, 3);
   capnp_ptr_wrap *p = get_ptr(argv, 0);
   int32_t off = janet_getinteger(argv, 1);
-  int64_t dflt = argc > 2 ? (int64_t)janet_getnumber(argv, 2) : 0;
+  int64_t dflt = argc > 2 ? janet_getinteger64(argv, 2) : 0;
   uint64_t bits = capnp_get_u64(&p->ptr, (uint32_t)off, 0) ^ (uint64_t)dflt;
   int64_t value;
   memcpy(&value, &bits, sizeof(value));
-  return janet_wrap_number((double)value);
+  return wrap_i64_lossless(value);
 }
 
 static Janet cfun_get_f32(int32_t argc, Janet *argv) {
@@ -818,15 +829,9 @@ static Janet cfun_build_message(int32_t argc, Janet *argv) {
       if (capnp_builder_set_u32(&body, (uint32_t)off, (uint32_t)v))
         janet_panic("capnp/build-message: set-u32 failed");
     } else if (strcmp((const char *)kind, "u64") == 0) {
-      /* Number (mantissa-safe ints). */
-      if (!janet_checktype(tup[2], JANET_NUMBER))
-        janet_panic("capnp/build-message: u64 value must be number");
-      {
-        double dv = janet_unwrap_number(tup[2]);
-        uint64_t v = (uint64_t)dv;
-        if (capnp_builder_set_u64(&body, (uint32_t)off, v))
-          janet_panic("capnp/build-message: set-u64 failed");
-      }
+      uint64_t v = janet_getuinteger64(&tup[2], 0);
+      if (capnp_builder_set_u64(&body, (uint32_t)off, v))
+        janet_panic("capnp/build-message: set-u64 failed");
     } else if (strcmp((const char *)kind, "f64") == 0) {
       if (!janet_checktype(tup[2], JANET_NUMBER))
         janet_panic("capnp/build-message: f64 value must be number");
