@@ -64,7 +64,7 @@ static int g_failures = 0;
     }                                                                          \
   } while (0)
 
-static int harness_finish(void) {
+static inline int harness_finish(void) {
   if (g_failures) {
     fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;
