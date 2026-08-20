@@ -291,6 +291,21 @@ static void struct_shape(const capnp_ptr_t *nodes, uint64_t id, int *dw,
   }
 }
 
+static int node_type_name(const capnp_ptr_t *nodes, uint64_t id, char *out,
+                          size_t outn) {
+  uint32_t i, n = capnp_list_len(nodes);
+  for (i = 0; i < n; i++) {
+    capnp_ptr_t node;
+    if (capnp_list_getp(nodes, i, &node) != CAPNP_OK)
+      continue;
+    if (capnp_get_u64(&node, 0, 0) != id)
+      continue;
+    type_short_name(get_text(&node, 0), out, outn);
+    return 1;
+  }
+  return 0;
+}
+
 /* Emit an interface's id and one entry per method.
  *
  * The caller needs three things the schema already carries: which
@@ -335,7 +350,8 @@ static void emit_interface(FILE *out, const capnp_ptr_t *node,
   fprintf(out, "})\n");
 }
 
-static void emit_struct(FILE *out, const capnp_ptr_t *node) {
+static void emit_struct(FILE *out, const capnp_ptr_t *node,
+                        const capnp_ptr_t *nodes) {
   /* Node struct group: dataWordCount @bits 112-128 = byte 14 as u16?
    * From compile: dataWordCount @7 :UInt16 bits[112, 128)
    * pointerCount @8 bits[192, 208)
@@ -351,6 +367,8 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node) {
 
   uint16_t dwords = capnp_get_u16(node, 14, 0);
   uint16_t pwords = capnp_get_u16(node, 24, 0); /* bits 192 = byte 24 */
+  uint16_t discriminant_count = capnp_get_u16(node, 30, 0);
+  uint32_t discriminant_byte = capnp_get_u32(node, 32, 0) * 2u;
 
   fprintf(out, "\n# struct %s\n", sname);
   fprintf(out, "(def %s-data-words %u)\n", sname, (unsigned)dwords);
@@ -361,6 +379,27 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node) {
     return;
 
   uint32_t nf = capnp_list_len(&fields);
+  if (discriminant_count > 0) {
+    fprintf(out, "(def %s-discriminant-byte %u)\n", sname,
+            (unsigned)discriminant_byte);
+    fprintf(out,
+            "(defn %s-which [ptr]\n  (capnp/get-u16 ptr %u))\n", sname,
+            (unsigned)discriminant_byte);
+    for (uint32_t i = 0; i < nf; i++) {
+      capnp_ptr_t f;
+      char fname[128];
+      uint16_t discriminant;
+      if (capnp_list_getp(&fields, i, &f) != CAPNP_OK)
+        continue;
+      discriminant = capnp_get_u16(&f, 2, 0) ^ UINT16_C(0xffff);
+      if (discriminant == UINT16_C(0xffff))
+        continue;
+      janet_ident(get_text(&f, 0), fname, sizeof(fname));
+      fprintf(out, "(def %s-%s-tag %u)\n", sname, fname,
+              (unsigned)discriminant);
+    }
+  }
+
   fprintf(out, "(def %s-fields\n  @{", sname);
   for (uint32_t i = 0; i < nf; i++) {
     capnp_ptr_t f;
@@ -369,8 +408,12 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node) {
     char fname[128];
     janet_ident(get_text(&f, 0), fname, sizeof(fname));
     uint16_t fwhich = capnp_get_u16(&f, 8, 0xffff);
+    if (fwhich == FIELD_GROUP) {
+      fprintf(out, "\n    :%s @{:type :group}", fname);
+      continue;
+    }
     if (fwhich != FIELD_SLOT)
-      continue; /* skip groups for v1 */
+      continue;
     uint32_t offset = capnp_get_u32(&f, 4, 0);
     capnp_ptr_t typ;
     uint16_t tw = 0xffff;
@@ -394,6 +437,13 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node) {
       continue;
     janet_ident(get_text(&f, 0), fname, sizeof(fname));
     uint16_t fwhich = capnp_get_u16(&f, 8, 0xffff);
+    if (fwhich == FIELD_GROUP) {
+      char group_name[256];
+      uint64_t group_id = capnp_get_u64(&f, 16, 0);
+      if (node_type_name(nodes, group_id, group_name, sizeof(group_name)))
+        fprintf(out, "(defn %s-%s [ptr]\n  ptr)\n", sname, fname);
+      continue;
+    }
     if (fwhich != FIELD_SLOT)
       continue;
     uint32_t offset = capnp_get_u32(&f, 4, 0);
@@ -543,7 +593,7 @@ static int write_module(const char *filename, const capnp_ptr_t *nodes,
      * for v1 emit every struct/enum in the request (small schemas). */
     (void)scope;
     if (which == NODE_STRUCT)
-      emit_struct(out, &node);
+      emit_struct(out, &node, nodes);
     else if (which == NODE_ENUM)
       emit_enum(out, &node);
     else if (which == NODE_IFACE)
