@@ -312,7 +312,7 @@ static Janet cfun_get_u32(int32_t argc, Janet *argv) {
   janet_arity(argc, 2, 3);
   capnp_ptr_wrap *p = get_ptr(argv, 0);
   int32_t off = janet_getinteger(argv, 1);
-  uint32_t dflt = argc > 2 ? (uint32_t)janet_getinteger(argv, 2) : 0;
+  uint32_t dflt = argc > 2 ? janet_getuinteger(argv, 2) : 0;
   uint32_t raw = capnp_get_u32(&p->ptr, (uint32_t)off, 0);
   return janet_wrap_number((double)(raw ^ dflt));
 }
