@@ -63,8 +63,10 @@ enum {
 
 struct capnp_rpc_conn;
 
-/* Handle one call on an exported capability. Write the reply into
- * `results`; return 0 to answer with it, non-zero for an exception. */
+/* Handle one call on an exported capability. `results` is the empty
+ * content pointer in the return Payload. Allocate the result struct
+ * with capnp_builder_struct at whatever size the method returns, then
+ * fill that body. Return 0 to answer, non-zero for an exception. */
 typedef int (*capnp_rpc_dispatch_fn)(void *server, uint64_t interface_id,
                                      uint16_t method_id,
                                      const capnp_ptr_t *params,

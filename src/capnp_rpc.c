@@ -571,11 +571,9 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
   if (rc == CAPNP_OK) {
-    capnp_bptr_t slot;
-    /* One data word and one pointer word covers the replies the bundled
-     * servers make; a richer server allocates inside dispatch. */
-    if (capnp_builder_slot(&payload, PAYLOAD_DW, 0, &slot) ||
-        capnp_builder_struct(&slot, 1, 1, &results))
+    /* The server allocates the result struct. A fixed 1-word body would
+     * drop every field past that, which C++ does not do. */
+    if (capnp_builder_slot(&payload, PAYLOAD_DW, 0, &results))
       rc = CAPNP_ERR_ALLOC;
     else
       rc = c->exports[eid].dispatch(c->exports[eid].server,

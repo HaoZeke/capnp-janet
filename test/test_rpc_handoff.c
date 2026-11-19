@@ -85,11 +85,14 @@ static int marked_dispatch(void *server, uint64_t iface, uint16_t method,
                            const capnp_bptr_t *results)
 {
   marked_t *m = (marked_t *)server;
+  capnp_bptr_t body;
   (void)iface;
   (void)method;
   (void)params;
   m->calls++;
-  return capnp_builder_set_u32(results, 0, m->mark);
+  if (capnp_builder_struct(results, 1, 0, &body))
+    return CAPNP_ERR_ALLOC;
+  return capnp_builder_set_u32(&body, 0, m->mark);
 }
 
 /* Alice -> Carol: a call whose params name the capability Bob hosts.

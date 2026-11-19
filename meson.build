@@ -332,6 +332,44 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
     ],
   )
 
+  wide_cpp = custom_target(
+    'wide-capnp-cpp',
+    input: 'schema' / 'wide.capnp',
+    output: ['wide.capnp.c++', 'wide.capnp.h'],
+    command: [
+      capnp_tool, 'compile',
+      '--src-prefix=' + meson.current_source_dir() / 'schema',
+      '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
+      '@INPUT@',
+    ],
+  )
+
+  wide_server = executable(
+    'wide_server',
+    'interop' / 'wide_server.c',
+    dependencies: capnp_janet_dep,
+    c_args: ['-D_POSIX_C_SOURCE=200809L'],
+  )
+
+  wide_client = executable(
+    'wide_client',
+    ['interop' / 'wide_client.c++', wide_cpp],
+    dependencies: capnp_rpc_dep,
+    override_options: ['cpp_std=c++17'],
+  )
+
+  test(
+    'wide_result',
+    bash,
+    args: [meson.project_source_root() / 'test/test_wide.sh'],
+    depends: [wide_server, wide_client],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+    timeout: 60,
+  )
+
   rpc_peer_client = executable(
     'rpc_peer_client',
     ['interop' / 'rpc_peer_client.c++', adder_cpp],

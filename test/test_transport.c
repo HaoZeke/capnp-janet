@@ -29,13 +29,16 @@ static void check(int cond, const char *what) {
 
 static int adder_dispatch(void *server, uint64_t interface_id, uint16_t method_id,
                           const capnp_ptr_t *params, const capnp_bptr_t *results) {
+  capnp_bptr_t body;
   int64_t a, b;
   (void)server;
   (void)interface_id;
   (void)method_id;
   a = (int64_t)capnp_get_u64(params, 0, 0);
   b = (int64_t)capnp_get_u64(params, 8, 0);
-  return capnp_builder_set_u64(results, 0, (uint64_t)(a + b));
+  if (capnp_builder_struct(results, 1, 0, &body))
+    return CAPNP_ERR_ALLOC;
+  return capnp_builder_set_u64(&body, 0, (uint64_t)(a + b));
 }
 
 static void fill_add(void *ctx, const capnp_bptr_t *params) {

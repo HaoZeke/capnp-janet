@@ -66,11 +66,14 @@ static int counting_dispatch(void *server, uint64_t iid, uint16_t mid,
                              const capnp_bptr_t *results)
 {
   int *calls = (int *)server;
+  capnp_bptr_t body;
   (void)iid;
   (void)mid;
   (void)params;
   (*calls)++;
-  return capnp_builder_set_u32(results, 0, (uint32_t)*calls);
+  if (capnp_builder_struct(results, 1, 0, &body))
+    return CAPNP_ERR_ALLOC;
+  return capnp_builder_set_u32(&body, 0, (uint32_t)*calls);
 }
 
 /* Send one Join part naming `export_id`. */

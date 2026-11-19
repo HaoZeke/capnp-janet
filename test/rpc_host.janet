@@ -7,9 +7,10 @@
 (def conn (capnp/rpc-accept listener))
 
 (defn on-call [iface method params results]
+  (def body (capnp/alloc-struct results 1 0))
   (def a (capnp/get-u64 params 0 0))
   (def b (capnp/get-u64 params 8 0))
-  (capnp/set-u64 results 0 (+ a b)))
+  (capnp/set-u64 body 0 (+ a b)))
 
 (capnp/rpc-serve conn on-call)
 (for i 0 8

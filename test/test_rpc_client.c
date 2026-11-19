@@ -72,14 +72,17 @@ static int doubler_dispatch(void *server, uint64_t iid, uint16_t mid,
   (void)server;
   (void)iid;
   (void)mid;
+  capnp_bptr_t body;
   doubler_calls++;
   if (doubler_calls >= doubler_fail_from)
     return CAPNP_ERR_ARG;
+  if (capnp_builder_struct(results, 1, 0, &body))
+    return CAPNP_ERR_ALLOC;
   {
     uint32_t in = params->kind == CAPNP_PK_STRUCT
                       ? capnp_get_u32(params, 0, 0)
                       : 0;
-    return capnp_builder_set_u32(results, 0, in * 2);
+    return capnp_builder_set_u32(&body, 0, in * 2);
   }
 }
 

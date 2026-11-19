@@ -545,6 +545,17 @@ static Janet cfun_init_struct(int32_t argc, Janet *argv) {
   return make_builder_ptr(parent->builder_abs, &body, dwords, pwords);
 }
 
+static Janet cfun_alloc_struct(int32_t argc, Janet *argv) {
+  capnp_builder_ptr_wrap *slot = get_builder_ptr(argv, 0);
+  uint16_t dwords = get_word_count(argv, 1, "capnp/alloc-struct");
+  uint16_t pwords = get_word_count(argv, 2, "capnp/alloc-struct");
+  capnp_bptr_t body;
+  janet_fixarity(argc, 3);
+  if (capnp_builder_struct(&slot->body, dwords, pwords, &body))
+    janet_panic("capnp/alloc-struct: allocation failed");
+  return make_builder_ptr(slot->builder_abs, &body, dwords, pwords);
+}
+
 static Janet cfun_init_struct_list(int32_t argc, Janet *argv) {
   janet_fixarity(argc, 5);
   capnp_builder_ptr_wrap *parent = get_builder_ptr(argv, 0);
@@ -1536,7 +1547,9 @@ static int janet_dispatch(void *server, uint64_t interface_id, uint16_t method_i
   args[0] = janet_wrap_u64(interface_id);
   args[1] = janet_wrap_number((double)method_id);
   args[2] = make_ptr(janet_wrap_abstract(msg), params);
-  args[3] = make_builder_ptr(janet_wrap_nil(), results, 1, 1);
+  /* `results` is the empty content slot. The handler allocates the
+   * struct at the method's real size with capnp/alloc-struct. */
+  args[3] = make_builder_ptr(janet_wrap_nil(), results, 0, 0);
   res = janet_call(janet_unwrap_function(w->handler), 4, args);
   if (janet_checktype(res, JANET_NUMBER) && janet_unwrap_number(res) != 0)
     return -1;
@@ -1841,6 +1854,9 @@ static const JanetReg capnp_cfuns[] = {
     {"init-root", cfun_init_root,
      "(capnp/init-root builder data-words pointer-words)\n\n"
      "Initialize and return the root struct body."},
+    {"alloc-struct", cfun_alloc_struct,
+     "(capnp/alloc-struct slot data-words pointer-words)\n\n"
+     "Allocate a struct at a bare pointer slot, such as an RPC result."},
     {"init-struct", cfun_init_struct,
      "(capnp/init-struct body pointer-index data-words pointer-words)\n\n"
      "Initialize and return a nested struct body."},
