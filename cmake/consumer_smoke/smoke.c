@@ -6,6 +6,7 @@
 
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_message.h>
+#include <capnp-janet/capnp_transport.h>
 
 int main(void) {
 	capnp_builder_t b;
@@ -52,6 +53,10 @@ int main(void) {
 	}
 	capnp_message_free(&msg);
 	free(flat);
+	if (capnp_read_frame(-1, NULL, 0, NULL) != CAPNP_ERR_ARG) {
+		fprintf(stderr, "transport symbol missing\n");
+		return 1;
+	}
 	printf("capnp-janet consumer smoke ok\n");
 	return 0;
 }

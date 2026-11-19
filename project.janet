@@ -26,4 +26,5 @@
              "include/capnp-janet/capnp_dyn.h"
              "include/capnp-janet/capnp_packed.h"
              "include/capnp-janet/capnp_pointer.h"
-             "include/capnp-janet/capnp_rpc.h"])
+             "include/capnp-janet/capnp_rpc.h"
+             "include/capnp-janet/capnp_transport.h"])
