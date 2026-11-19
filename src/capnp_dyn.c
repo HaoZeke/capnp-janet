@@ -151,6 +151,10 @@ struct capnp_dyn {
   uint32_t nenums;
   uint32_t ecap;
   char err[384];
+  /* JSON value that failed a type or range check. Points into the
+   * input, which outlives the decode. Not owned. */
+  const char *bad_src;
+  size_t bad_n;
 };
 
 static int buf_add(buf_t *b, const char *s, size_t n) {
@@ -3152,6 +3156,9 @@ struct vnode {
   vnode_t **kids;
   uint32_t count;
   uint32_t cap;
+  /* JSON source span, including quotes for strings. Not owned. */
+  const char *src;
+  size_t src_n;
 };
 
 static void free_vnode(vnode_t *v) {
@@ -3513,7 +3520,7 @@ static vnode_t *parse_json_obj(scan_t *sc) {
   return obj;
 }
 
-static vnode_t *parse_json_val(scan_t *sc) {
+static vnode_t *parse_json_val_raw(scan_t *sc) {
   int c = jpeek(sc);
   if (c == 0)
     return NULL;
@@ -3566,6 +3573,19 @@ static vnode_t *parse_json_val(scan_t *sc) {
   if (c == '-' || (c >= '0' && c <= '9'))
     return parse_json_num(sc);
   return NULL;
+}
+
+static vnode_t *parse_json_val(scan_t *sc) {
+  size_t start;
+  vnode_t *v;
+  jskip(sc);
+  start = sc->i;
+  v = parse_json_val_raw(sc);
+  if (v && sc->s && sc->i >= start) {
+    v->src = sc->s + start;
+    v->src_n = sc->i - start;
+  }
+  return v;
 }
 /* --- Cap'n Proto Text format parser --- */
 
@@ -4492,6 +4512,67 @@ static void clear_field_wire(const capnp_dyn_t *d, const dyn_struct_t *st,
   }
   free_rtype(&ft);
 }
+static void dyn_note_bad(const capnp_dyn_t *d, const vnode_t *v) {
+  capnp_dyn_t *w = (capnp_dyn_t *)d;
+  if (!w || w->bad_src || !v || !v->src || v->src_n == 0)
+    return;
+  w->bad_src = v->src;
+  w->bad_n = v->src_n;
+}
+
+static void dyn_err_bad_json(const capnp_dyn_t *d, const char *field) {
+  char tok[49];
+  char name[97];
+  size_t i, n, fn;
+  capnp_dyn_t *w = (capnp_dyn_t *)d;
+  if (!w || w->err[0])
+    return;
+  fn = field ? strlen(field) : 0;
+  if (fn > sizeof(name) - 1)
+    fn = sizeof(name) - 1;
+  for (i = 0; i < fn; i++) {
+    unsigned char c = (unsigned char)field[i];
+    name[i] = (c < 32 || c == '"') ? '?' : (char)c;
+  }
+  name[fn] = 0;
+  n = w->bad_n;
+  if (n > sizeof(tok) - 1)
+    n = sizeof(tok) - 1;
+  if (!w->bad_src)
+    n = 0;
+  for (i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)w->bad_src[i];
+    tok[i] = (c < 32 || c == 127) ? '?' : (char)c;
+  }
+  tok[n] = 0;
+  if (n == 0)
+    snprintf(w->err, sizeof(w->err), "bad value for field %s", name);
+  else
+    snprintf(w->err, sizeof(w->err), "bad value for field %s: %s", name, tok);
+  w->bad_src = NULL;
+  w->bad_n = 0;
+}
+
+static const char *field_json_name(const dyn_field_t *f) {
+  if (f && f->json_name[0])
+    return f->json_name;
+  return f ? f->name : "";
+}
+
+/* Emit a field error once a type or range check has failed. An earlier
+ * nested field may already have written err, in which case it stands. */
+static void dyn_finish_json_field(const capnp_dyn_t *d, const dyn_field_t *f,
+                                  const vnode_t *v, int rc, int value_bad) {
+  if (!d || rc == 0 || d->err[0])
+    return;
+  if (!value_bad && !d->bad_src)
+    return;
+  if (!d->bad_src)
+    dyn_note_bad(d, v);
+  if (d->bad_src)
+    dyn_err_bad_json(d, field_json_name(f));
+}
+
 static int build_json_value_struct(const vnode_t *v, const capnp_bptr_t *body,
                                    int depth) {
   uint32_t i;
@@ -4585,8 +4666,10 @@ static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
   switch (elem_rt->which) {
   case TY_VOID:
     for (i = 0; i < n; i++) {
-      if (json ? (v->kids[i]->kind != VK_NULL) : (v->kids[i]->kind != VK_VOID))
+      if (json ? (v->kids[i]->kind != VK_NULL) : (v->kids[i]->kind != VK_VOID)) {
+        dyn_note_bad(d, v->kids[i]);
         return -1;
+      }
     }
     return capnp_builder_set_list_void(body, dwords, index, n);
   case TY_BOOL: {
@@ -4596,6 +4679,7 @@ static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
       return -1;
     for (i = 0; i < n; i++) {
       if (v->kids[i]->kind != VK_BOOL) {
+        dyn_note_bad(d, v->kids[i]);
         free(items);
         return -1;
       }
@@ -4614,6 +4698,7 @@ static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
     for (i = 0; i < n; i++) {
       uint64_t bits = 0;
       if (vnode_to_int(v->kids[i], elem_rt->which, json, &bits)) {
+        dyn_note_bad(d, v->kids[i]);
         free(items);
         return -1;
       }
@@ -4633,12 +4718,14 @@ static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
     for (i = 0; i < n; i++) {
       if (elem_rt->which == TY_ENUM) {
         if (vnode_to_enum(d, elem_rt->type_id, v->kids[i], json, &items[i])) {
+          dyn_note_bad(d, v->kids[i]);
           free(items);
           return -1;
         }
       } else {
         uint64_t bits = 0;
         if (vnode_to_int(v->kids[i], elem_rt->which, json, &bits)) {
+          dyn_note_bad(d, v->kids[i]);
           free(items);
           return -1;
         }
@@ -4662,6 +4749,7 @@ static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
                     ? vnode_to_float(v->kids[i], TY_F32, json, &bits)
                     : vnode_to_int(v->kids[i], elem_rt->which, json, &bits);
       if (err) {
+        dyn_note_bad(d, v->kids[i]);
         free(items);
         return -1;
       }
@@ -4684,6 +4772,7 @@ static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
                     ? vnode_to_float(v->kids[i], TY_F64, json, &bits)
                     : vnode_to_int(v->kids[i], elem_rt->which, json, &bits);
       if (err) {
+        dyn_note_bad(d, v->kids[i]);
         free(items);
         return -1;
       }
@@ -4705,6 +4794,7 @@ static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
     }
     for (i = 0; i < n; i++) {
       if (v->kids[i]->kind != VK_STR) {
+        dyn_note_bad(d, v->kids[i]);
         free(texts);
         free(lens);
         return -1;
@@ -4739,6 +4829,7 @@ static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
           uint64_t bval = 0;
           if (kv->kids[j]->kind == VK_STR ||
               vnode_to_int(kv->kids[j], TY_U8, 1, &bval)) {
+            dyn_note_bad(d, kv->kids[j]);
             free(bytes);
             return -1;
           }
@@ -4749,6 +4840,7 @@ static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
         if (rc)
           return -1;
       } else {
+        dyn_note_bad(d, kv);
         return -1;
       }
     }
@@ -4787,6 +4879,7 @@ static int build_field_from_vnode(const capnp_dyn_t *d, const dyn_struct_t *st,
                                   int json, int depth) {
   rtype_t ft;
   int rc = 0;
+  int value_bad = 0;
 
   if (depth > MAX_DEPTH || !v)
     return -1;
@@ -4799,27 +4892,39 @@ static int build_field_from_vnode(const capnp_dyn_t *d, const dyn_struct_t *st,
     if (!g)
       return -1;
     clear_group_wire(d, g, env, body, depth + 1);
-    return build_struct_from_vnode(d, g, env, v, body, json, depth + 1);
+    rc = build_struct_from_vnode(d, g, env, v, body, json, depth + 1);
+    if (json && v->kind != VK_OBJ)
+      value_bad = 1;
+    if (json)
+      dyn_finish_json_field(d, f, v, rc, value_bad);
+    return rc;
   }
   if (resolve_field_type(d, f, env, &ft))
     return -1;
   if (ft.list_depth > 0) {
     rtype_t elem = ft;
     elem.list_depth--;
+    if (json && v->kind != VK_LIST)
+      value_bad = 1;
     rc = build_list_from_vnode(d, &elem, v, body, st->dwords,
                                (uint16_t)f->offset, json, depth + 1);
     free_rtype(&ft);
+    if (json)
+      dyn_finish_json_field(d, f, v, rc, value_bad);
     return rc;
   }
   switch (ft.which) {
   case TY_VOID:
-    if (json ? (v->kind != VK_NULL) : (v->kind != VK_VOID))
+    if (json ? (v->kind != VK_NULL) : (v->kind != VK_VOID)) {
       rc = -1;
+      value_bad = 1;
+    }
     break;
   case TY_BOOL:
-    if (v->kind != VK_BOOL)
+    if (v->kind != VK_BOOL) {
       rc = -1;
-    else
+      value_bad = 1;
+    } else
       rc = store_bits_for_type(body, f, TY_BOOL, v->bval ? 1 : 0);
     break;
   case TY_I8:
@@ -4831,33 +4936,37 @@ static int build_field_from_vnode(const capnp_dyn_t *d, const dyn_struct_t *st,
   case TY_U32:
   case TY_U64: {
     uint64_t bits = 0;
-    if (vnode_to_int(v, ft.which, json, &bits))
+    if (vnode_to_int(v, ft.which, json, &bits)) {
       rc = -1;
-    else
+      value_bad = 1;
+    } else
       rc = store_bits_for_type(body, f, ft.which, bits);
     break;
   }
   case TY_F32:
   case TY_F64: {
     uint64_t bits = 0;
-    if (vnode_to_float(v, ft.which, json, &bits))
+    if (vnode_to_float(v, ft.which, json, &bits)) {
       rc = -1;
-    else
+      value_bad = 1;
+    } else
       rc = store_bits_for_type(body, f, ft.which, bits);
     break;
   }
   case TY_ENUM: {
     uint16_t ord = 0;
-    if (vnode_to_enum(d, ft.type_id, v, json, &ord))
+    if (vnode_to_enum(d, ft.type_id, v, json, &ord)) {
       rc = -1;
-    else
+      value_bad = 1;
+    } else
       rc = store_bits_for_type(body, f, TY_ENUM, ord);
     break;
   }
   case TY_TEXT:
-    if (v->kind != VK_STR)
+    if (v->kind != VK_STR) {
       rc = -1;
-    else
+      value_bad = 1;
+    } else
       rc = capnp_builder_set_text(body, st->dwords, (uint16_t)f->offset,
                                   v->str ? v->str : "", v->slen);
     break;
@@ -4872,18 +4981,20 @@ static int build_field_from_vnode(const capnp_dyn_t *d, const dyn_struct_t *st,
     } else if (f->json_data_mode == 1) {
       uint8_t *raw = NULL;
       size_t rlen = 0;
-      if (v->kind != VK_STR || decode_base64_str(v->str, v->slen, &raw, &rlen))
+      if (v->kind != VK_STR || decode_base64_str(v->str, v->slen, &raw, &rlen)) {
         rc = -1;
-      else
+        value_bad = 1;
+      } else
         rc = capnp_builder_set_data(body, st->dwords, (uint16_t)f->offset, raw,
                                     rlen);
       free(raw);
     } else if (f->json_data_mode == 2) {
       uint8_t *raw = NULL;
       size_t rlen = 0;
-      if (v->kind != VK_STR || decode_hex_str(v->str, v->slen, &raw, &rlen))
+      if (v->kind != VK_STR || decode_hex_str(v->str, v->slen, &raw, &rlen)) {
         rc = -1;
-      else
+        value_bad = 1;
+      } else
         rc = capnp_builder_set_data(body, st->dwords, (uint16_t)f->offset, raw,
                                     rlen);
       free(raw);
@@ -4894,21 +5005,24 @@ static int build_field_from_vnode(const capnp_dyn_t *d, const dyn_struct_t *st,
         free_rtype(&ft);
         return -1;
       }
-      for (i = 0; i < bn; i++) {
+      for (i = 0; i < bn && rc == 0; i++) {
         uint64_t bval = 0;
         if (v->kids[i]->kind == VK_STR ||
             vnode_to_int(v->kids[i], TY_U8, 1, &bval)) {
-          free(bytes);
-          free_rtype(&ft);
-          return -1;
+          dyn_note_bad(d, v->kids[i]);
+          rc = -1;
+          value_bad = 1;
+        } else {
+          bytes[i] = (uint8_t)bval;
         }
-        bytes[i] = (uint8_t)bval;
       }
-      rc = capnp_builder_set_data(body, st->dwords, (uint16_t)f->offset, bytes,
-                                  bn);
+      if (rc == 0)
+        rc = capnp_builder_set_data(body, st->dwords, (uint16_t)f->offset,
+                                    bytes, bn);
       free(bytes);
     } else {
       rc = -1;
+      value_bad = 1;
     }
     break;
   case TY_STRUCT: {
@@ -4944,14 +5058,20 @@ static int build_field_from_vnode(const capnp_dyn_t *d, const dyn_struct_t *st,
         rc = -1;
     } else {
       rc = -1;
+      if (json)
+        value_bad = 1;
     }
     break;
   }
   default:
     rc = -1;
+    if (json)
+      value_bad = 1;
     break;
   }
   free_rtype(&ft);
+  if (json)
+    dyn_finish_json_field(d, f, v, rc, value_bad);
   return rc;
 }
 typedef struct {
@@ -5138,8 +5258,11 @@ static int decode_json_field_entry(
 
   /* 1. Check if `key` is the union discriminator tag */
   if (tag_name && strcmp(key, tag_name) == 0) {
-    if (val->kind != VK_STR)
+    if (val->kind != VK_STR) {
+      dyn_note_bad(d, val);
+      dyn_err_bad_json(d, key);
       return -1;
+    }
     for (i = 0; i < st->nfields; i++) {
       const dyn_field_t *uf = &st->fields[i];
       if (uf->disc != 0xffff && st->disc_count &&
@@ -5327,6 +5450,8 @@ static int build_struct_from_vnode(const capnp_dyn_t *d,
       return build_field_from_vnode(d, st, &st->fields[0], env, v, body, 0,
                                     depth + 1);
     }
+    if (json)
+      dyn_note_bad(d, v);
     return -1;
   }
 
@@ -5441,6 +5566,8 @@ static int decode_root_impl(const capnp_dyn_t *d, const char *type_name,
   *out = NULL;
   *out_len = 0;
   dyn_set_err(d, "");
+  ((capnp_dyn_t *)d)->bad_src = NULL;
+  ((capnp_dyn_t *)d)->bad_n = 0;
   if (resolve_root_type_name(d, type_name, &rt, &st) != CAPNP_OK) {
     dyn_set_err(d, "unknown type");
     return CAPNP_ERR_KIND;

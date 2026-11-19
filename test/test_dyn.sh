@@ -170,6 +170,11 @@ EOF
 "$BIN" reject "$TMP/request.bin" Conform text '(nope = 1)' nope
 "$BIN" reject "$TMP/request.bin" Conform json '{"nope":1,"nope":2}' nope
 "$BIN" reject "$TMP/request.bin" Conform text '(tiny = 1) junk' junk
+"$BIN" reject "$TMP/request.bin" Conform json '{"tiny":"abc"}' 'bad value for field tiny: "abc"'
+"$BIN" reject "$TMP/request.bin" Conform json '{"tiny":999}' 'bad value for field tiny: 999'
+"$BIN" reject "$TMP/request.bin" Conform json '{"tiny":1.5}' 'bad value for field tiny: 1.5'
+"$BIN" reject "$TMP/request.bin" Conform json '{"inner":1}' 'bad value for field inner: 1'
+"$BIN" reject "$TMP/request.bin" Conform json '{"buckets":[{"scores":["no"]}]}' 'bad value for field scores: "no"'
 printf '%s\n' '{"tiny":1,"nope":9}' >"$TMP/unk.json"
 "$BIN" json-decode "$TMP/request.bin" "$TMP/unk.json" "$TMP/unk.bin"
 

@@ -26,7 +26,9 @@ CAPNP_JANET_EXPORT int capnp_dyn_init(capnp_dyn_t **out, const uint8_t *request,
 CAPNP_JANET_EXPORT void capnp_dyn_free(capnp_dyn_t *d);
 
 /* Empty string when the last decode succeeded or no decode has run.
- * Otherwise a short message that names the field or token. */
+ * Otherwise a short message. A JSON value of the wrong type or out of
+ * range names the field and the offending token. Unknown JSON fields
+ * are ignored. */
 CAPNP_JANET_EXPORT const char *capnp_dyn_error(const capnp_dyn_t *d);
 
 CAPNP_JANET_EXPORT int capnp_dyn_get_bool(const capnp_dyn_t *d, const capnp_ptr_t *s,
