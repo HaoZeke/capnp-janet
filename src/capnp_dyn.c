@@ -471,7 +471,7 @@ static int buf_fmt_i(buf_t *b, long long v) {
   return buf_str(b, tmp);
 }
 
-static int quote_text(buf_t *b, const char *s, size_t n) {
+static int quote_text(buf_t *b, const char *s, size_t n, int json) {
   size_t i;
   if (buf_str(b, "\""))
     return -1;
@@ -486,8 +486,11 @@ static int quote_text(buf_t *b, const char *s, size_t n) {
     } else if (c == '\n') {
       if (buf_str(b, "\\n"))
         return -1;
-    } else if (c < 0x20 || c > 0x7e) {
-      snprintf(esc, sizeof(esc), "\\x%02x", c);
+    } else if (c < 0x20) {
+      if (json)
+        snprintf(esc, sizeof(esc), "\\u%04x", c);
+      else
+        snprintf(esc, sizeof(esc), "\\x%02x", c);
       if (buf_str(b, esc))
         return -1;
     } else if (buf_add(b, (const char *)&c, 1)) {
@@ -536,7 +539,7 @@ static int encode_list(buf_t *b, const capnp_dyn_t *d, const dyn_field *f,
       size_t tn = 0;
       if (capnp_list_get_text(list, i, &t, &tn) != CAPNP_OK)
         return -1;
-      if (quote_text(b, t, tn))
+      if (quote_text(b, t, tn, json))
         return -1;
     } else if (f->elem_which == TY_LIST) {
       capnp_ptr_t el;
@@ -578,7 +581,7 @@ static int encode_list(buf_t *b, const capnp_dyn_t *d, const dyn_field *f,
 static int encode_data(buf_t *b, const uint8_t *p, size_t n, int json) {
   size_t i;
   if (!json)
-    return quote_text(b, (const char *)p, n);
+    return quote_text(b, (const char *)p, n, json);
   if (buf_str(b, "["))
     return -1;
   for (i = 0; i < n; i++) {
@@ -609,7 +612,7 @@ static int encode_struct(buf_t *b, const capnp_dyn_t *d, const dyn_struct *st,
     if (!first && buf_str(b, ", "))
       return -1;
     if (json) {
-      if (quote_text(b, f->name, strlen(f->name)) || buf_str(b, ": "))
+      if (quote_text(b, f->name, strlen(f->name), json) || buf_str(b, ": "))
         return -1;
     } else if (buf_str(b, f->name) || buf_str(b, " = ")) {
       return -1;
@@ -635,7 +638,7 @@ static int encode_struct(buf_t *b, const capnp_dyn_t *d, const dyn_struct *st,
         continue;
       }
       if (capnp_get_text(s, (uint16_t)f->offset, &t, &tn) != CAPNP_OK ||
-          quote_text(b, t, tn))
+          quote_text(b, t, tn, json))
         return -1;
     } else if (f->type_which == TY_DATA) {
       const uint8_t *p = NULL;
