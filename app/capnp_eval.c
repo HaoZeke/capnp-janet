@@ -16,6 +16,7 @@
 #include <capnp-janet/capnp_pointer.h>
 
 #include <ctype.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -74,10 +75,43 @@ static char *read_all(FILE *f, size_t *len) {
   return buf;
 }
 
+static int cmd_append(char **buf, size_t *len, size_t *cap, const char *fmt, ...) {
+  va_list ap;
+  int need;
+  char *next;
+  size_t ncap;
+  va_start(ap, fmt);
+  need = vsnprintf(NULL, 0, fmt, ap);
+  va_end(ap);
+  if (need < 0 || *len > SIZE_MAX - (size_t)need - 1)
+    return -1;
+  if (*len + (size_t)need + 1 > *cap) {
+    ncap = *cap ? *cap : 128u;
+    while (ncap < *len + (size_t)need + 1) {
+      if (ncap > SIZE_MAX / 2u)
+        return -1;
+      ncap *= 2u;
+    }
+    next = (char *)realloc(*buf, ncap);
+    if (!next)
+      return -1;
+    *buf = next;
+    *cap = ncap;
+  }
+  va_start(ap, fmt);
+  if (vsnprintf(*buf + *len, *cap - *len, fmt, ap) != need) {
+    va_end(ap);
+    return -1;
+  }
+  va_end(ap);
+  *len += (size_t)need;
+  return 0;
+}
+
 static int compile_schema(const char *schema_path, const char **import_dirs,
                           int nimports, capnp_dyn_t **out_dyn) {
-  char cmd[4096];
-  size_t pos = 0;
+  char *cmd = NULL;
+  size_t len = 0, cap = 0;
   FILE *pipe;
   char *req = NULL;
   size_t req_len = 0;
@@ -90,31 +124,37 @@ static int compile_schema(const char *schema_path, const char **import_dirs,
       return -1;
     }
   }
-  pos += (size_t)snprintf(
-      cmd + pos, sizeof(cmd) - pos,
-      "INC=$(dirname \"$(dirname \"$(command -v capnp)\")\")/include; "
-      "capnp compile");
-  if (nimports == 0 && pos < sizeof(cmd))
-    pos += (size_t)snprintf(cmd + pos, sizeof(cmd) - pos, " -I\"$INC\"");
+  if (cmd_append(&cmd, &len, &cap,
+                 "INC=$(dirname \"$(dirname \"$(command -v capnp)\")\")/include; "
+                 "capnp compile"))
+    goto fail;
+  if (nimports == 0 && cmd_append(&cmd, &len, &cap, " -I\"$INC\""))
+    goto fail;
   for (i = 0; i < nimports; i++) {
     int j;
     for (j = 0; import_dirs[i][j]; j++) {
       if (import_dirs[i][j] == '\'' || import_dirs[i][j] == '"' ||
-          import_dirs[i][j] == '\n')
+          import_dirs[i][j] == '\n') {
+        fprintf(stderr, "capnp-eval: import path has a quote\n");
+        free(cmd);
         return -1;
+      }
     }
-    if (pos < sizeof(cmd))
-      pos += (size_t)snprintf(cmd + pos, sizeof(cmd) - pos, " -I'%s'",
-                              import_dirs[i]);
+    if (cmd_append(&cmd, &len, &cap, " -I'%s'", import_dirs[i]))
+      goto fail;
   }
-  if (pos < sizeof(cmd))
-    pos += (size_t)snprintf(cmd + pos, sizeof(cmd) - pos, " -o- '%s'",
-                            schema_path);
+  if (cmd_append(&cmd, &len, &cap, " -o- '%s'", schema_path))
+    goto fail;
   pipe = popen(cmd, "r");
-  if (!pipe)
+  free(cmd);
+  cmd = NULL;
+  if (!pipe) {
+    fprintf(stderr, "capnp-eval: could not run capnp compile\n");
     return -1;
+  }
   req = read_all(pipe, &req_len);
   if (pclose(pipe) != 0 || !req) {
+    fprintf(stderr, "capnp-eval: capnp compile failed\n");
     free(req);
     return -1;
   }
@@ -124,6 +164,10 @@ static int compile_schema(const char *schema_path, const char **import_dirs,
   }
   free(req);
   return 0;
+fail:
+  fprintf(stderr, "capnp-eval: could not build the compile command\n");
+  free(cmd);
+  return -1;
 }
 
 static int copy_ptr_untrimmed(capnp_builder_t *b, uint32_t slot_seg,

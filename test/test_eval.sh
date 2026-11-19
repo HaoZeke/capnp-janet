@@ -52,4 +52,18 @@ check "$PARITY" Parity.vEnum
 check "$PARITY" Parity.vStruct
 check "$PARITY" Parity.vData
 check "$PARITY" 'Parity.lI32[1]'
+
+# A legal path that used to overflow the fixed 4096-byte compile command
+# and leave the shell quote open.
+LONG="$TMP/long"
+part=$(python3 -c 'print("d"*255)')
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+  LONG="$LONG/$part"
+done
+mkdir -p "$LONG"
+tail=$(python3 -c 'print("e"*180)')
+cp "$ROOT/schema/codegen-features.capnp" "$LONG/$tail.capnp"
+SCHEMA_LONG="$LONG/$tail.capnp"
+test "${#SCHEMA_LONG}" -gt 4000
+check "$SCHEMA_LONG" answer
 echo "ok eval"
