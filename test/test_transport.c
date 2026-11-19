@@ -10,6 +10,7 @@
 #include <capnp-janet/capnp_transport.h>
 
 #include <dirent.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -198,6 +199,33 @@ static void test_unix_replaces_only_socket(void) {
   check(lstat(path, &st) == 0 && S_ISLNK(st.st_mode), "symlink remains");
   unlink(path);
   unlink(linkpath);
+  rmdir(dir);
+}
+
+static void test_unix_keeps_live_socket(void) {
+  char dir[] = "/tmp/capnp-janet-XXXXXX";
+  char path[sizeof(dir) + 16];
+  int live = -1, again = -1, client = -1, accepted = -1;
+  check(mkdtemp(dir) != NULL, "live dir");
+  snprintf(path, sizeof(path), "%s/vat.sock", dir);
+  check(capnp_listen_unix(path, &live) == CAPNP_OK, "first listen");
+  check(capnp_listen_unix(path, &again) != CAPNP_OK, "refuse live socket");
+  check(again < 0, "no second fd");
+  if (again >= 0)
+    close(again);
+  check(capnp_dial_unix(path, &client) == CAPNP_OK, "still connectable");
+  if (live >= 0)
+    fcntl(live, F_SETFL, O_NONBLOCK);
+  if (live >= 0)
+    accepted = accept(live, NULL, NULL);
+  check(accepted >= 0, "original accepts");
+  if (accepted >= 0)
+    close(accepted);
+  if (client >= 0)
+    close(client);
+  if (live >= 0)
+    close(live);
+  unlink(path);
   rmdir(dir);
 }
 
@@ -408,6 +436,7 @@ int main(int argc, char **argv) {
   test_write_pipe();
   test_write_closed_socket();
   test_unix_replaces_only_socket();
+  test_unix_keeps_live_socket();
   test_link_setup_closes_fd();
   loopback(1);
   loopback(0);

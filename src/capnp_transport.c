@@ -153,6 +153,27 @@ int capnp_dial_tcp(const char *host, uint16_t port, int *fd) {
   return CAPNP_OK;
 }
 
+/* A bound socket with nobody listening answers ECONNREFUSED. A live
+ * listener accepts the connect, and anything else is left in place. */
+static int unix_socket_is_stale(const char *path) {
+  int s, rc;
+  struct sockaddr_un addr;
+  s = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (s < 0)
+    return 0;
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  memcpy(addr.sun_path, path, strlen(path) + 1);
+  rc = connect(s, (struct sockaddr *)&addr, sizeof(addr));
+  if (rc == 0) {
+    close(s);
+    return 0;
+  }
+  rc = errno;
+  close(s);
+  return rc == ECONNREFUSED;
+}
+
 int capnp_listen_unix(const char *path, int *fd) {
   int s;
   struct sockaddr_un addr;
@@ -165,7 +186,7 @@ int capnp_listen_unix(const char *path, int *fd) {
     if (lstat(path, &st) == 0) {
       if (!S_ISSOCK(st.st_mode))
         return CAPNP_ERR_IO;
-      if (unlink(path) != 0)
+      if (!unix_socket_is_stale(path) || unlink(path) != 0)
         return CAPNP_ERR_IO;
     } else if (errno != ENOENT) {
       return CAPNP_ERR_IO;
