@@ -399,6 +399,17 @@ static void test_bootstrap_frame_little_endian(void) {
         "word count high bytes clear");
 }
 
+static void test_size_to_i32(void) {
+  int32_t n = -1;
+  check(capnp_size_to_i32(4, &n) == CAPNP_OK && n == 4, "i32 4");
+  check(capnp_size_to_i32(2147483647u, &n) == CAPNP_OK && n == 2147483647,
+        "i32 max");
+#if SIZE_MAX > 4294967295u
+  check(capnp_size_to_i32((size_t)2147483648u, &n) != CAPNP_OK, "i32 overflow");
+#endif
+  check(capnp_size_to_i32(1, NULL) != CAPNP_OK, "i32 null");
+}
+
 static void test_write_pipe(void) {
   int p[2];
   uint8_t byte = 7, got = 0;
@@ -433,6 +444,7 @@ int main(int argc, char **argv) {
   test_ipv4_literal();
   test_frame_little_endian();
   test_bootstrap_frame_little_endian();
+  test_size_to_i32();
   test_write_pipe();
   test_write_closed_socket();
   test_unix_replaces_only_socket();

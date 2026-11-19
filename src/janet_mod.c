@@ -1539,10 +1539,24 @@ static Janet cfun_rpc_flush(int32_t argc, Janet *argv) {
   JanetArray *arr;
   uint32_t i;
   janet_fixarity(argc, 1);
-  arr = janet_array((int32_t)w->nframes);
+  {
+    int32_t nframes = 0;
+    if (capnp_size_to_i32(w->nframes, &nframes))
+      janet_panic("capnp/rpc-flush: too many frames");
+    for (i = 0; i < w->nframes; i++) {
+      int32_t nbytes = 0;
+      if (capnp_size_to_i32(w->frames[i].len, &nbytes))
+        janet_panic("capnp/rpc-flush: frame exceeds a Janet buffer");
+    }
+    arr = janet_array(nframes);
+  }
   for (i = 0; i < w->nframes; i++) {
-    JanetBuffer *buf = janet_buffer((int32_t)w->frames[i].len);
-    janet_buffer_push_bytes(buf, w->frames[i].data, (int32_t)w->frames[i].len);
+    int32_t nbytes = 0;
+    JanetBuffer *buf;
+    if (capnp_size_to_i32(w->frames[i].len, &nbytes))
+      janet_panic("capnp/rpc-flush: frame exceeds a Janet buffer");
+    buf = janet_buffer(nbytes);
+    janet_buffer_push_bytes(buf, w->frames[i].data, nbytes);
     janet_array_push(arr, janet_wrap_buffer(buf));
     free(w->frames[i].data);
   }

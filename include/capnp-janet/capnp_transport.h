@@ -24,6 +24,15 @@ CAPNP_JANET_EXPORT int capnp_accept_fd(int listen_fd, int *fd);
 CAPNP_JANET_EXPORT int capnp_write_all(int fd, const uint8_t *data, size_t len);
 CAPNP_JANET_EXPORT int capnp_read_frame(int fd, uint8_t *buf, size_t cap, size_t *out_len);
 
+/* Janet buffers count bytes in an int32_t. A longer frame cannot be
+ * copied into one. */
+static inline int capnp_size_to_i32(size_t len, int32_t *out) {
+  if (!out || len > 2147483647u)
+    return CAPNP_ERR_BOUNDS;
+  *out = (int32_t)len;
+  return CAPNP_OK;
+}
+
 CAPNP_JANET_EXPORT int capnp_link_from_fd(capnp_link_t *link, int fd);
 CAPNP_JANET_EXPORT int capnp_link_dial_tcp(capnp_link_t *link, const char *host,
                                            uint16_t port);
