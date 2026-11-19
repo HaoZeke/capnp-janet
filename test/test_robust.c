@@ -224,7 +224,7 @@ static void test_many_segments_roundtrip(void) {
 }
 
 static void test_text_requires_nul(void) {
-  uint8_t seg[24];
+  uint8_t seg[32];
   capnp_segment_t s;
   capnp_message_t m;
   capnp_ptr_t root;
@@ -254,6 +254,29 @@ static void test_text_requires_nul(void) {
   CHECK(capnp_root(&m, &root) == CAPNP_OK, "root nul");
   CHECK(capnp_get_text(&root, 0, &text, &n) == CAPNP_OK, "terminated text");
   CHECK(n == 4 && text && memcmp(text, "abcd", 4) == 0, "abcd");
+  capnp_message_free(&m);
+
+  /* Empty byte lists are valid Data but never valid Text. */
+  memset(seg, 0, sizeof(seg));
+  capnp_store_le64(seg, capnp_wp_make_struct(0, 0, 1));
+  capnp_store_le64(seg + 8, capnp_wp_make_list(0, CAPNP_SZ_BYTE, 0));
+  s.words = 2;
+  CHECK(capnp_message_from_segments(&m, &s, 1) == CAPNP_OK, "empty bytes view");
+  CHECK(capnp_root(&m, &root) == CAPNP_OK, "empty bytes root");
+  CHECK(capnp_get_text(&root, 0, &text, &n) == CAPNP_ERR_KIND,
+        "empty bytes are not text");
+  capnp_message_free(&m);
+
+  /* A composite text upgrade needs its field-zero pointer section. */
+  memset(seg, 0, sizeof(seg));
+  capnp_store_le64(seg, capnp_wp_make_list(0, CAPNP_SZ_COMPOSITE, 1));
+  capnp_store_le64(seg + 8, capnp_wp_make_struct(1, 1, 0));
+  capnp_store_le64(seg + 16, 0);
+  s.words = 3;
+  CHECK(capnp_message_from_segments(&m, &s, 1) == CAPNP_OK, "data-only list");
+  CHECK(capnp_root(&m, &root) == CAPNP_OK, "data-only root");
+  CHECK(capnp_list_get_text(&root, 0, &text, &n) == CAPNP_ERR_KIND,
+        "data-only composite is not text");
   capnp_message_free(&m);
 }
 
