@@ -348,4 +348,20 @@ EOF
 EOF
 cmp "$TMP/gtxt-ref.bin" "$TMP/gtxt-our.bin"
 
+# A second discriminator tag is an error. A single tag still matches,
+# and a repeated ordinary field still keeps the last value.
+set +e
+printf '%s\n' '{"u_tag":"optA","aVal":"x","u_tag":"b_tag","bNum":9}' | capnp convert -I"$INC" json:binary "$ROOT/schema/parity.capnp" Parity >"$TMP/duptag-ref.bin" 2>"$TMP/duptag-ref.err"
+ref=$?
+printf '%s\n' '{"u_tag":"optA","aVal":"x","u_tag":"b_tag","bNum":9}' | "$CLI" convert -I"$INC" json:binary "$ROOT/schema/parity.capnp" Parity >"$TMP/duptag-our.bin" 2>"$TMP/duptag-our.err"
+our=$?
+set -e
+test "$ref" -ne 0
+test "$our" -ne 0
+test ! -s "$TMP/duptag-ref.bin"
+test ! -s "$TMP/duptag-our.bin"
+printf '%s\n' '{"u_tag":"b_tag","bNum":9}' | capnp convert -I"$INC" json:binary "$ROOT/schema/parity.capnp" Parity >"$TMP/onetag-ref.bin"
+printf '%s\n' '{"u_tag":"b_tag","bNum":9}' | "$CLI" convert -I"$INC" json:binary "$ROOT/schema/parity.capnp" Parity >"$TMP/onetag-our.bin"
+cmp "$TMP/onetag-ref.bin" "$TMP/onetag-our.bin"
+
 echo "ok dyn"

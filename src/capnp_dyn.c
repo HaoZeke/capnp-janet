@@ -5289,8 +5289,9 @@ static int has_union_seen(const union_seen_set_t *us, const dyn_struct_t *st) {
 }
 
 static int mark_union_seen(union_seen_set_t *us, const dyn_struct_t *st) {
+  /* json.c++ inserts the tag and throws when that row exists. */
   if (has_union_seen(us, st))
-    return 0;
+    return -1;
   if (us->count == us->cap) {
     uint32_t ncap = us->cap ? us->cap * 2u : 8u;
     union_seen_t *ni =
