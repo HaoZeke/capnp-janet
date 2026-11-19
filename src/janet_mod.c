@@ -29,11 +29,20 @@ typedef struct {
   int root_initialized;
 } capnp_builder_wrap;
 
+/* A stack builder lives only for the RPC callback that created it.
+ * Heap builders leave this NULL. The epoch is heap memory so a check
+ * after the callback returns is not a use of the builder itself. */
+typedef struct {
+  int live;
+  int refs;
+} builder_scope_t;
+
 typedef struct {
   capnp_bptr_t body;
   uint16_t dwords;
   uint16_t pwords;
   Janet builder_abs;
+  builder_scope_t *scope;
 } capnp_builder_ptr_wrap;
 
 typedef struct {
@@ -42,7 +51,41 @@ typedef struct {
   uint16_t elem_pwords;
   uint32_t count;
   Janet builder_abs;
+  builder_scope_t *scope;
 } capnp_builder_list_wrap;
+
+static void scope_retain(builder_scope_t *s) {
+  if (s)
+    s->refs++;
+}
+
+static void scope_release(builder_scope_t *s) {
+  if (!s)
+    return;
+  if (--s->refs <= 0)
+    free(s);
+}
+
+static builder_scope_t *scope_open(void) {
+  builder_scope_t *s = (builder_scope_t *)calloc(1, sizeof(*s));
+  if (!s)
+    janet_panic("capnp: out of memory");
+  s->live = 1;
+  s->refs = 1;
+  return s;
+}
+
+static void scope_close(builder_scope_t *s) {
+  if (!s)
+    return;
+  s->live = 0;
+  scope_release(s);
+}
+
+static void require_live_scope(builder_scope_t *s) {
+  if (s && !s->live)
+    janet_panic("capnp/builder: value is no longer valid");
+}
 
 static int msg_gc(void *p, size_t len) {
   (void)len;
@@ -75,10 +118,26 @@ static int builder_gc(void *p, size_t len) {
   return 0;
 }
 
+static int builder_ptr_gc(void *p, size_t len) {
+  (void)len;
+  capnp_builder_ptr_wrap *w = (capnp_builder_ptr_wrap *)p;
+  scope_release(w->scope);
+  w->scope = NULL;
+  return 0;
+}
+
 static int builder_ptr_gcmark(void *p, size_t len) {
   (void)len;
   capnp_builder_ptr_wrap *w = (capnp_builder_ptr_wrap *)p;
   janet_mark(w->builder_abs);
+  return 0;
+}
+
+static int builder_list_gc(void *p, size_t len) {
+  (void)len;
+  capnp_builder_list_wrap *w = (capnp_builder_list_wrap *)p;
+  scope_release(w->scope);
+  w->scope = NULL;
   return 0;
 }
 
@@ -149,12 +208,14 @@ static const JanetAbstractType builder_type = {
 
 static const JanetAbstractType builder_ptr_type = {
     .name = "capnp/builder-ptr",
+    .gc = builder_ptr_gc,
     .gcmark = builder_ptr_gcmark,
     .tostring = builder_ptr_tostring,
 };
 
 static const JanetAbstractType builder_list_type = {
     .name = "capnp/builder-list",
+    .gc = builder_list_gc,
     .gcmark = builder_list_gcmark,
     .tostring = builder_list_tostring,
 };
@@ -192,29 +253,36 @@ static capnp_builder_wrap *get_builder(Janet *argv, int32_t n) {
 }
 
 static capnp_builder_ptr_wrap *get_builder_ptr(Janet *argv, int32_t n) {
-  return (capnp_builder_ptr_wrap *)janet_getabstract(argv, n,
-                                                      &builder_ptr_type);
+  capnp_builder_ptr_wrap *w = (capnp_builder_ptr_wrap *)janet_getabstract(
+      argv, n, &builder_ptr_type);
+  require_live_scope(w->scope);
+  return w;
 }
 
 static capnp_builder_list_wrap *get_builder_list(Janet *argv, int32_t n) {
-  return (capnp_builder_list_wrap *)janet_getabstract(argv, n,
-                                                       &builder_list_type);
+  capnp_builder_list_wrap *w = (capnp_builder_list_wrap *)janet_getabstract(
+      argv, n, &builder_list_type);
+  require_live_scope(w->scope);
+  return w;
 }
 
 static Janet make_builder_ptr(Janet builder_abs, const capnp_bptr_t *body,
-                              uint16_t dwords, uint16_t pwords) {
+                              uint16_t dwords, uint16_t pwords,
+                              builder_scope_t *scope) {
   capnp_builder_ptr_wrap *w =
       janet_abstract(&builder_ptr_type, sizeof(capnp_builder_ptr_wrap));
   w->body = *body;
   w->dwords = dwords;
   w->pwords = pwords;
   w->builder_abs = builder_abs;
+  w->scope = scope;
+  scope_retain(scope);
   return janet_wrap_abstract(w);
 }
 
 static Janet make_builder_list(Janet builder_abs, const capnp_bptr_t *first,
                                uint32_t count, uint16_t elem_dwords,
-                               uint16_t elem_pwords) {
+                               uint16_t elem_pwords, builder_scope_t *scope) {
   capnp_builder_list_wrap *w =
       janet_abstract(&builder_list_type, sizeof(capnp_builder_list_wrap));
   w->first = *first;
@@ -222,6 +290,8 @@ static Janet make_builder_list(Janet builder_abs, const capnp_bptr_t *first,
   w->elem_dwords = elem_dwords;
   w->elem_pwords = elem_pwords;
   w->builder_abs = builder_abs;
+  w->scope = scope;
+  scope_retain(scope);
   return janet_wrap_abstract(w);
 }
 
@@ -525,7 +595,7 @@ static Janet cfun_init_root(int32_t argc, Janet *argv) {
   w->root_initialized = 1;
   check_builder_result(capnp_builder_struct(&root, dwords, pwords, &body),
                        "capnp/init-root");
-  return make_builder_ptr(argv[0], &body, dwords, pwords);
+  return make_builder_ptr(argv[0], &body, dwords, pwords, NULL);
 }
 
 static Janet cfun_init_struct(int32_t argc, Janet *argv) {
@@ -542,7 +612,8 @@ static Janet cfun_init_struct(int32_t argc, Janet *argv) {
       "capnp/init-struct");
   check_builder_result(capnp_builder_struct(&slot, dwords, pwords, &body),
                        "capnp/init-struct");
-  return make_builder_ptr(parent->builder_abs, &body, dwords, pwords);
+  return make_builder_ptr(parent->builder_abs, &body, dwords, pwords,
+                          parent->scope);
 }
 
 static Janet cfun_alloc_struct(int32_t argc, Janet *argv) {
@@ -553,7 +624,7 @@ static Janet cfun_alloc_struct(int32_t argc, Janet *argv) {
   janet_fixarity(argc, 3);
   if (capnp_builder_struct(&slot->body, dwords, pwords, &body))
     janet_panic("capnp/alloc-struct: allocation failed");
-  return make_builder_ptr(slot->builder_abs, &body, dwords, pwords);
+  return make_builder_ptr(slot->builder_abs, &body, dwords, pwords, slot->scope);
 }
 
 static Janet cfun_init_struct_list(int32_t argc, Janet *argv) {
@@ -569,7 +640,8 @@ static Janet cfun_init_struct_list(int32_t argc, Janet *argv) {
                            &parent->body, parent->dwords, index, count, dwords,
                            pwords, &first),
                        "capnp/init-struct-list");
-  return make_builder_list(parent->builder_abs, &first, count, dwords, pwords);
+  return make_builder_list(parent->builder_abs, &first, count, dwords, pwords,
+                           parent->scope);
 }
 
 static Janet cfun_init_ptr_list(int32_t argc, Janet *argv) {
@@ -581,7 +653,8 @@ static Janet cfun_init_ptr_list(int32_t argc, Janet *argv) {
   check_builder_result(capnp_builder_init_ptr_list(&parent->body, parent->dwords,
                                                    index, count, &first),
                        "capnp/init-ptr-list");
-  return make_builder_list(parent->builder_abs, &first, count, 0, 1);
+  return make_builder_list(parent->builder_abs, &first, count, 0, 1,
+                           parent->scope);
 }
 
 static Janet cfun_struct_list_at(int32_t argc, Janet *argv) {
@@ -594,7 +667,7 @@ static Janet cfun_struct_list_at(int32_t argc, Janet *argv) {
     janet_panic("capnp/struct-list-at: index out of range");
   body = capnp_bptr_add(list->first, (size_t)index * step);
   return make_builder_ptr(list->builder_abs, &body, list->elem_dwords,
-                          list->elem_pwords);
+                          list->elem_pwords, list->scope);
 }
 
 static uint8_t get_u8_arg(const Janet *argv, int32_t n, const char *where) {
@@ -1469,8 +1542,16 @@ typedef struct {
 
 static void rpc_fill_cb(void *ctx, const capnp_bptr_t *params) {
   rpc_fill *f = (rpc_fill *)ctx;
-  Janet ptr = make_builder_ptr(janet_wrap_nil(), params, f->dwords, f->pwords);
-  janet_call(janet_unwrap_function(f->fill), 1, &ptr);
+  builder_scope_t *scope = scope_open();
+  Janet ptr =
+      make_builder_ptr(janet_wrap_nil(), params, f->dwords, f->pwords, scope);
+  Janet out;
+  JanetFiber *fib = NULL;
+  JanetSignal sig =
+      janet_pcall(janet_unwrap_function(f->fill), 1, &ptr, &out, &fib);
+  scope_close(scope);
+  if (sig != JANET_SIGNAL_OK)
+    janet_signalv(sig, out);
 }
 
 static Janet cfun_rpc_call(int32_t argc, Janet *argv) {
@@ -1541,6 +1622,9 @@ static int janet_dispatch(void *server, uint64_t interface_id, uint16_t method_i
   capnp_msg_wrap *msg;
   Janet args[4];
   Janet res;
+  JanetFiber *fib = NULL;
+  JanetSignal sig;
+  builder_scope_t *scope;
   capnp_ptr_t owned;
   if (!w->has_handler || !params)
     return -1;
@@ -1563,9 +1647,15 @@ static int janet_dispatch(void *server, uint64_t interface_id, uint16_t method_i
   args[1] = janet_wrap_number((double)method_id);
   args[2] = make_ptr(janet_wrap_abstract(msg), &owned);
   /* `results` is the empty content slot. The handler allocates the
-   * struct at the method's real size with capnp/alloc-struct. */
-  args[3] = make_builder_ptr(janet_wrap_nil(), results, 0, 0);
-  res = janet_call(janet_unwrap_function(w->handler), 4, args);
+   * struct at the method's real size with capnp/alloc-struct.
+   * The slot is a stack builder; close it when the handler returns
+   * so a stashed handle cannot write into a dead frame. */
+  scope = scope_open();
+  args[3] = make_builder_ptr(janet_wrap_nil(), results, 0, 0, scope);
+  sig = janet_pcall(janet_unwrap_function(w->handler), 4, args, &res, &fib);
+  scope_close(scope);
+  if (sig != JANET_SIGNAL_OK)
+    janet_signalv(sig, res);
   if (janet_checktype(res, JANET_NUMBER) && janet_unwrap_number(res) != 0)
     return -1;
   return 0;

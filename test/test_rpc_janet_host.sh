@@ -16,6 +16,7 @@ export LD_LIBRARY_PATH="$MODDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 janet "$ROOT/test/rpc_borrow.janet"
 janet "$ROOT/test/rpc_level3.janet"
+janet "$ROOT/test/builder_scope.janet"
 
 PORTFILE=$(mktemp)
 janet "$ROOT/test/rpc_host.janet" >"$PORTFILE" &
