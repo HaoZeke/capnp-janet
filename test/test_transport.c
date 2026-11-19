@@ -6,11 +6,13 @@
  */
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_message.h>
+#include <capnp-janet/capnp_pointer.h>
 #include <capnp-janet/capnp_transport.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -165,11 +167,41 @@ static int serve_peer(uint16_t port) {
   return 0;
 }
 
+/* Segment table is little-endian on the wire. The sizes below are
+ * asymmetric (1 word, then 2) so a big-endian load of the same bytes
+ * is a different count and misses the payload word. */
+static void test_frame_little_endian(void) {
+  int sv[2];
+  uint8_t frame[40];
+  uint8_t buf[64];
+  size_t n = 0;
+  memset(frame, 0, sizeof(frame));
+  capnp_store_le32(frame, 1);
+  capnp_store_le32(frame + 4, 1);
+  capnp_store_le32(frame + 8, 2);
+  capnp_store_le64(frame + 16, 0x1122334455667788ULL);
+  capnp_store_le64(frame + 24, 0x0102030405060708ULL);
+  capnp_store_le64(frame + 32, 0xaabbccddeeff0011ULL);
+  check(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+  check(capnp_write_all(sv[0], frame, sizeof(frame)) == CAPNP_OK, "write frame");
+  check(capnp_read_frame(sv[1], buf, sizeof(buf), &n) == CAPNP_OK, "read frame");
+  check(n == sizeof(frame), "frame length");
+  check(capnp_load_le32(buf) == 1, "segment count minus one");
+  check(capnp_load_le32(buf + 4) == 1, "first segment words");
+  check(capnp_load_le32(buf + 8) == 2, "second segment words");
+  check(capnp_load_le64(buf + 16) == 0x1122334455667788ULL, "seg0");
+  check(capnp_load_le64(buf + 24) == 0x0102030405060708ULL, "seg1 word0");
+  check(capnp_load_le64(buf + 32) == 0xaabbccddeeff0011ULL, "seg1 word1");
+  close(sv[0]);
+  close(sv[1]);
+}
+
 int main(int argc, char **argv) {
   if (argc >= 3 && strcmp(argv[1], "dial") == 0)
     return dial_peer((uint16_t)atoi(argv[2]));
   if (argc >= 3 && strcmp(argv[1], "serve") == 0)
     return serve_peer((uint16_t)atoi(argv[2]));
+  test_frame_little_endian();
   loopback(1);
   loopback(0);
   if (g_fail) {

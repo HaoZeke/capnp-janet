@@ -1,4 +1,5 @@
 #define _POSIX_C_SOURCE 200809L
+#include <capnp-janet/capnp_pointer.h>
 #include <capnp-janet/capnp_transport.h>
 
 #include <arpa/inet.h>
@@ -47,7 +48,7 @@ int capnp_read_frame(int fd, uint8_t *buf, size_t cap, size_t *out_len) {
     return CAPNP_ERR_ARG;
   if (read_full(fd, buf, 4))
     return CAPNP_ERR_FRAMING;
-  memcpy(&nsegs, buf, 4);
+  nsegs = capnp_load_le32(buf);
   nsegs += 1;
   if (nsegs == 0 || nsegs > 512)
     return CAPNP_ERR_FRAMING;
@@ -59,8 +60,7 @@ int capnp_read_frame(int fd, uint8_t *buf, size_t cap, size_t *out_len) {
   if (read_full(fd, buf + 4, table_bytes - 4))
     return CAPNP_ERR_FRAMING;
   for (i = 0; i < nsegs; i++) {
-    uint32_t w;
-    memcpy(&w, buf + 4 + i * 4, 4);
+    uint32_t w = capnp_load_le32(buf + 4 + (size_t)i * 4);
     if (total_words > UINT32_MAX - w)
       return CAPNP_ERR_BOUNDS;
     total_words += w;
