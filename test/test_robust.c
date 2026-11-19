@@ -257,6 +257,40 @@ static void test_text_requires_nul(void) {
   capnp_message_free(&m);
 }
 
+/* C++ ReaderOptions.traversalLimitInWords: each pointer and its body is
+ * charged, and a read past the budget fails instead of walking the rest. */
+static void test_traversal_budget(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body, slot, child;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m;
+  capnp_ptr_t r, k;
+
+  capnp_builder_init(&b);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  CHECK(capnp_builder_struct(&root, 4, 1, &body) == CAPNP_OK, "body");
+  CHECK(capnp_builder_set_u64(&body, 0, 1) == CAPNP_OK, "word");
+  CHECK(capnp_builder_slot(&body, 4, 0, &slot) == CAPNP_OK, "slot");
+  CHECK(capnp_builder_struct(&slot, 2, 0, &child) == CAPNP_OK, "child");
+  CHECK(capnp_builder_set_u64(&child, 0, 9) == CAPNP_OK, "child word");
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
+  capnp_builder_free(&b);
+
+  CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "parse");
+  /* One pointer word plus a 5-word body (4 data + 1 pointer) is more than 3. */
+  m.traversal_left = 3;
+  CHECK(capnp_root(&m, &r) == CAPNP_ERR_TRAVERSAL, "root over budget");
+  capnp_message_free(&m);
+
+  CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "parse again");
+  free(flat);
+  m.traversal_left = 8;
+  CHECK(capnp_root(&m, &r) == CAPNP_OK, "root within budget");
+  CHECK(capnp_getp(&r, 0, &k) == CAPNP_ERR_TRAVERSAL, "child over budget");
+  capnp_message_free(&m);
+}
+
 int main(void) {
   test_truncated_framing();
   test_inline_struct_out_of_bounds();
@@ -267,5 +301,6 @@ int main(void) {
   test_text_requires_nul();
   test_builder_offset_overflow();
   test_many_segments_roundtrip();
+  test_traversal_budget();
   return harness_finish();
 }

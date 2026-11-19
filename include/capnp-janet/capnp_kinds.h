@@ -65,6 +65,9 @@ enum {
 };
 
 #define CAPNP_WORD_BYTES 8u
+/* Same defaults as C++ ReaderOptions: 8 Mi words, nesting depth 64.
+ * capnp_message_init stores them on the message. A read that would pass
+ * either limit returns CAPNP_ERR_TRAVERSAL or CAPNP_ERR_DEPTH. */
 #define CAPNP_DEFAULT_TRAVERSAL_WORDS 8388608ull
 #define CAPNP_DEFAULT_DEPTH_LIMIT 64
 
