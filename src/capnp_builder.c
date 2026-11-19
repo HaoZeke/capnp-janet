@@ -694,6 +694,37 @@ size_t capnp_builder_ptr_word(size_t body_word, uint16_t dwords,
   return body_word + dwords + ptr_index;
 }
 
+int capnp_builder_init_ptr_list(const capnp_bptr_t *body, uint16_t dwords,
+                                uint16_t ptr_index, uint32_t nitems,
+                                capnp_bptr_t *first) {
+  size_t list_ptr_word;
+  uint32_t list_seg;
+  size_t list_start;
+  if (!body || !body->b)
+    return CAPNP_ERR_ARG;
+  list_ptr_word = body->word + dwords + ptr_index;
+  if (list_ptr_word >= body->b->segs[body->seg].words)
+    return CAPNP_ERR_BOUNDS;
+  if (nitems) {
+    if (alloc_words(body->b, nitems, &list_seg, &list_start))
+      return CAPNP_ERR_ALLOC;
+    memset(wbytes(body->b, list_seg, list_start), 0,
+           (size_t)nitems * CAPNP_WORD_BYTES);
+  } else {
+    list_seg = body->seg;
+    list_start = list_ptr_word + 1;
+  }
+  if (write_list_ptr(body->b, body->seg, list_ptr_word, list_seg, list_start,
+                     CAPNP_SZ_PTR, nitems))
+    return CAPNP_ERR_ALLOC;
+  if (first) {
+    first->b = body->b;
+    first->seg = list_seg;
+    first->word = list_start;
+  }
+  return CAPNP_OK;
+}
+
 int capnp_builder_set_list_struct(const capnp_bptr_t *body, uint16_t dwords,
                                   uint16_t ptr_index, uint32_t nitems,
                                   uint16_t elem_dwords, uint16_t elem_pwords,

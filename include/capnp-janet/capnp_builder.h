@@ -136,6 +136,11 @@ CAPNP_JANET_EXPORT int capnp_builder_set_list_struct(const capnp_bptr_t *body, u
                                   uint16_t elem_dwords, uint16_t elem_pwords,
                                   capnp_bptr_t *first_elem);
 
+/* Zeroed pointer list. `first` is element 0; element i is `i` words later. */
+CAPNP_JANET_EXPORT int capnp_builder_init_ptr_list(const capnp_bptr_t *body, uint16_t dwords,
+                                uint16_t ptr_index, uint32_t nitems,
+                                capnp_bptr_t *first);
+
 CAPNP_JANET_EXPORT size_t capnp_builder_ptr_word(size_t body_word, uint16_t dwords,
                               uint16_t ptr_index);
 
