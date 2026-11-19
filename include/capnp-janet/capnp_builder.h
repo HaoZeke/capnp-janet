@@ -35,12 +35,18 @@ typedef struct capnp_bseg {
   size_t cap;   /* capacity in words */
 } capnp_bseg_t;
 
+struct capnp_oref;
+
 typedef struct capnp_builder {
   capnp_bseg_t *segs;
   uint32_t nsegs;
   uint32_t segs_cap;
   size_t max_seg_words; /* 0 => CAPNP_BUILDER_MAX_SEGMENT_WORDS */
   int force_single;     /* grow last seg instead of appending */
+  /* One record per live orphan. Copies share the index and generation. */
+  struct capnp_oref *orefs;
+  uint32_t norefs;
+  uint32_t orefs_cap;
 } capnp_builder_t;
 
 typedef struct capnp_bptr {
@@ -159,6 +165,8 @@ typedef struct capnp_orphan {
   int esize;
   uint32_t count;
   int live;
+  uint32_t oref;
+  uint32_t generation;
 } capnp_orphan_t;
 
 CAPNP_JANET_EXPORT int capnp_builder_new_orphan_struct(capnp_builder_t *b,

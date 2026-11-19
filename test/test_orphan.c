@@ -559,6 +559,35 @@ static void test_zero_size_struct_list_orphan(void) {
   capnp_message_free(&m);
 }
 
+/* A copied orphan shares one object. Freeing or adopting one copy
+ * must make the other copy a no-op, so a later object in those words
+ * is left alone. */
+static void test_copied_orphan_second_free(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body, slot, obody;
+  capnp_orphan_t orphan, copy;
+  uint64_t got;
+
+  capnp_builder_init(&b);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "c root");
+  check(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "c body");
+  check(capnp_builder_new_orphan_struct(&b, 1, 0, &orphan, &obody) == CAPNP_OK,
+        "c orphan");
+  copy = orphan;
+  check(capnp_builder_slot(&body, 0, 0, &slot) == CAPNP_OK, "c slot");
+  check(capnp_builder_adopt(&slot, &orphan) == CAPNP_OK, "c adopt");
+  check(orphan.live == 0, "c original retired");
+  check(copy.live == 1, "c copy still marked live");
+  check(capnp_builder_set_u64(&obody, 0, 0xabcdef) == CAPNP_OK, "c sentinel");
+  check(capnp_builder_orphan_free(&copy) == CAPNP_ERR_ARG, "c second free");
+  got = capnp_load_le64(b.segs[obody.seg].data + obody.word * 8);
+  check(got == 0xabcdef, "c sentinel kept");
+  check(capnp_builder_orphan_free(&orphan) == CAPNP_ERR_ARG, "c free original");
+  got = capnp_load_le64(b.segs[obody.seg].data + obody.word * 8);
+  check(got == 0xabcdef, "c sentinel kept again");
+  capnp_builder_free(&b);
+}
+
 int main(void) {
   test_adopt_matches_direct();
   test_list_orphan_roundtrip();
@@ -575,6 +604,7 @@ int main(void) {
   test_zero_list_past_end();
   test_adopt_zeroes_occupied();
   test_orphan_free_zeroes();
+  test_copied_orphan_second_free();
   if (g_fail) {
     fprintf(stderr, "%d orphan checks failed\n", g_fail);
     return 1;

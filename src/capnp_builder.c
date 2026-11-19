@@ -294,6 +294,7 @@ void capnp_builder_free(capnp_builder_t *b) {
   for (i = 0; i < b->nsegs; i++)
     free(b->segs[i].data);
   free(b->segs);
+  free(b->orefs);
   memset(b, 0, sizeof(*b));
 }
 
@@ -1224,6 +1225,64 @@ static void drop_slot(capnp_builder_t *b, uint32_t seg, size_t word) {
   drop_ptr(b, seg, word, 0);
 }
 
+struct capnp_oref {
+  uint32_t generation;
+  int live;
+};
+
+/* Copies of an orphan share oref and generation. The first free or
+ * successful adopt retires the record, so a later copy cannot zero
+ * the same words. */
+static int orphan_register(capnp_builder_t *b, capnp_orphan_t *o) {
+  struct capnp_oref *slot = NULL;
+  uint32_t i;
+  for (i = 0; i < b->norefs; i++) {
+    if (!b->orefs[i].live) {
+      slot = &b->orefs[i];
+      o->oref = i;
+      break;
+    }
+  }
+  if (!slot) {
+    if (b->norefs == b->orefs_cap) {
+      uint32_t cap = b->orefs_cap ? b->orefs_cap * 2u : 8u;
+      struct capnp_oref *grown =
+          (struct capnp_oref *)realloc(b->orefs, (size_t)cap * sizeof(*grown));
+      if (!grown)
+        return CAPNP_ERR_ALLOC;
+      b->orefs = grown;
+      b->orefs_cap = cap;
+    }
+    o->oref = b->norefs;
+    slot = &b->orefs[b->norefs++];
+    slot->generation = 0;
+  }
+  slot->live = 1;
+  o->generation = slot->generation;
+  o->live = 1;
+  return CAPNP_OK;
+}
+
+static int orphan_is_live(const capnp_orphan_t *o) {
+  const struct capnp_oref *rec;
+  if (!o || !o->live || !o->b || o->oref >= o->b->norefs)
+    return 0;
+  rec = &o->b->orefs[o->oref];
+  return rec->live && rec->generation == o->generation;
+}
+
+static void orphan_retire(capnp_orphan_t *o) {
+  struct capnp_oref *rec;
+  if (!o || !o->b || o->oref >= o->b->norefs)
+    return;
+  rec = &o->b->orefs[o->oref];
+  if (!rec->live || rec->generation != o->generation)
+    return;
+  rec->live = 0;
+  rec->generation++;
+  o->live = 0;
+}
+
 int capnp_builder_new_orphan_struct(capnp_builder_t *b, uint16_t dwords,
                                     uint16_t pwords, capnp_orphan_t *o,
                                     capnp_bptr_t *body) {
@@ -1246,7 +1305,8 @@ int capnp_builder_new_orphan_struct(capnp_builder_t *b, uint16_t dwords,
   o->kind = CAPNP_PK_STRUCT;
   o->dwords = dwords;
   o->pwords = pwords;
-  o->live = 1;
+  if (orphan_register(b, o))
+    return CAPNP_ERR_ALLOC;
   if (body) {
     body->b = b;
     body->seg = seg;
@@ -1278,7 +1338,8 @@ int capnp_builder_new_orphan_list(capnp_builder_t *b, int esize, uint32_t count,
   o->kind = CAPNP_PK_LIST;
   o->esize = esize;
   o->count = count;
-  o->live = 1;
+  if (orphan_register(b, o))
+    return CAPNP_ERR_ALLOC;
   if (start) {
     start->b = b;
     start->seg = seg;
@@ -1315,7 +1376,8 @@ int capnp_builder_new_orphan_struct_list(capnp_builder_t *b, uint32_t count,
   o->count = (uint32_t)content;
   o->dwords = elem_dwords;
   o->pwords = elem_pwords;
-  o->live = 1;
+  if (orphan_register(b, o))
+    return CAPNP_ERR_ALLOC;
   if (first) {
     first->b = b;
     first->seg = seg;
@@ -1330,11 +1392,11 @@ int capnp_builder_new_orphan_struct_list(capnp_builder_t *b, uint32_t count,
 int capnp_builder_orphan_free(capnp_orphan_t *o) {
   capnp_builder_t *b;
   size_t n = 0;
-  if (!o || !o->live || !o->b)
+  if (!orphan_is_live(o))
     return CAPNP_ERR_ARG;
   b = o->b;
   if (o->seg >= b->nsegs) {
-    o->live = 0;
+    orphan_retire(o);
     return CAPNP_ERR_SEGMENT;
   }
   if (o->kind == CAPNP_PK_STRUCT) {
@@ -1351,7 +1413,7 @@ int capnp_builder_orphan_free(capnp_orphan_t *o) {
     size_t step, i, elems;
     n = (size_t)o->count + 1u;
     if (o->word >= b->segs[o->seg].words) {
-      o->live = 0;
+      orphan_retire(o);
       return CAPNP_ERR_BOUNDS;
     }
     tag = load_w(b, o->seg, o->word);
@@ -1370,7 +1432,7 @@ int capnp_builder_orphan_free(capnp_orphan_t *o) {
     }
   } else if (o->kind == CAPNP_PK_LIST) {
     if (list_nwords(o->esize, o->count, &n)) {
-      o->live = 0;
+      orphan_retire(o);
       return CAPNP_ERR_KIND;
     }
     if (o->esize == CAPNP_SZ_PTR) {
@@ -1382,19 +1444,19 @@ int capnp_builder_orphan_free(capnp_orphan_t *o) {
       }
     }
   } else {
-    o->live = 0;
+    orphan_retire(o);
     return CAPNP_ERR_KIND;
   }
   if (n)
     zero_words(b, o->seg, o->word, n);
   reclaim_tail(b, o->seg, o->word, n);
-  o->live = 0;
+  orphan_retire(o);
   return CAPNP_OK;
 }
 
 int capnp_builder_adopt(const capnp_bptr_t *slot, capnp_orphan_t *o) {
   int rc;
-  if (!slot || !slot->b || !o || !o->live || o->b != slot->b)
+  if (!slot || !slot->b || !orphan_is_live(o) || o->b != slot->b)
     return CAPNP_ERR_ARG;
   if ((rc = raw_slot_checked(slot)) != CAPNP_OK)
     return rc;
@@ -1415,7 +1477,7 @@ int capnp_builder_adopt(const capnp_bptr_t *slot, capnp_orphan_t *o) {
   } else {
     return CAPNP_ERR_KIND;
   }
-  o->live = 0;
+  orphan_retire(o);
   return CAPNP_OK;
 }
 
@@ -1576,9 +1638,10 @@ int capnp_builder_disown(const capnp_bptr_t *slot, capnp_orphan_t *o) {
   rc = orphan_from_word(slot->b, slot->seg, slot->word, o);
   if (rc)
     return rc;
-  store_w(slot->b, slot->seg, slot->word, 0);
   o->b = slot->b;
-  o->live = 1;
+  if (orphan_register(slot->b, o))
+    return CAPNP_ERR_ALLOC;
+  store_w(slot->b, slot->seg, slot->word, 0);
   return CAPNP_OK;
 }
 
