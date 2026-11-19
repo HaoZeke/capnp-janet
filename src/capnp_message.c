@@ -237,7 +237,7 @@ static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
     int32_t elems;
     uint16_t dw, pw;
     uint32_t step;
-    if (count == 0 || bounds_word(m, seg, start))
+    if (bounds_word(m, seg, start))
       return CAPNP_ERR_BOUNDS;
     if (charge(m, 1))
       return CAPNP_ERR_TRAVERSAL;
@@ -250,14 +250,14 @@ static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
     dw = capnp_wp_struct_dwords(tag);
     pw = capnp_wp_struct_pwords(tag);
     step = (uint32_t)dw + (uint32_t)pw;
-    if ((uint64_t)elems * (uint64_t)step > (uint64_t)count - 1u)
+    if ((uint64_t)elems * (uint64_t)step > (uint64_t)count)
       return CAPNP_ERR_BOUNDS;
     out->count = (uint32_t)elems;
     out->dwords = dw;
     out->pwords = pw;
     out->step_words = step;
     out->word = start + 1;
-    need = (uint64_t)count - 1u;
+    need = count;
     if (need) {
       if (out->word > SIZE_MAX - (size_t)(need - 1))
         return CAPNP_ERR_BOUNDS;

@@ -780,7 +780,7 @@ int capnp_builder_set_list_struct(const capnp_bptr_t *body, uint16_t dwords,
   store_w(body->b, tag_seg, tag_word,
           capnp_wp_make_struct((int32_t)nitems, elem_dwords, elem_pwords));
   if (write_list_ptr(body->b, body->seg, list_ptr_word, tag_seg, tag_word,
-                     CAPNP_SZ_COMPOSITE, (uint32_t)need))
+                     CAPNP_SZ_COMPOSITE, (uint32_t)content_words))
     return CAPNP_ERR_ALLOC;
   if (first_elem) {
     first_elem->b = body->b;
@@ -916,7 +916,7 @@ int capnp_builder_new_orphan_struct_list(capnp_builder_t *b, uint32_t count,
   o->word = word;
   o->kind = CAPNP_PK_LIST;
   o->esize = CAPNP_SZ_COMPOSITE;
-  o->count = (uint32_t)need;
+  o->count = (uint32_t)content;
   o->dwords = elem_dwords;
   o->pwords = elem_pwords;
   o->live = 1;

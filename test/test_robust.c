@@ -292,7 +292,7 @@ static void test_traversal_budget(void) {
 }
 
 static void test_zero_size_and_far_validation(void) {
-  uint8_t seg0[8], seg1[16], seg2[24];
+  uint8_t seg0[8], seg1[16], seg2[32];
   capnp_segment_t segs[3];
   capnp_message_t m;
   capnp_ptr_t root;
@@ -334,7 +334,7 @@ static void test_zero_size_and_far_validation(void) {
   capnp_store_le64(seg2, capnp_wp_make_list(0, CAPNP_SZ_COMPOSITE, 2));
   capnp_store_le64(seg2 + 8, capnp_wp_make_struct(1, 1, 0));
   capnp_store_le64(seg2 + 16, 0);
-  segs[0] = (capnp_segment_t){seg2, 3};
+  segs[0] = (capnp_segment_t){seg2, 4};
   CHECK(capnp_message_from_segments(&m, segs, 1) == CAPNP_OK, "composite view");
   CHECK(capnp_root(&m, &root) == CAPNP_OK && capnp_list_len(&root) == 1,
         "over-allocated composite accepted");
