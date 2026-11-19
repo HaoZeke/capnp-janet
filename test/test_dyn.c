@@ -15,35 +15,127 @@
 #endif
 
 #if !defined(__SANITIZE_ADDRESS__)
-/* Fail the second of a back-to-back growth of an existing block. The
- * text and JSON list builders used to realloc both arrays and then free
- * the new pointers, leaving the struct holding the block realloc had
- * already released. */
+/* The text and JSON encoders grow their piece lists with malloc.
+ * Fail the second 128-byte malloc, which is the size array of the
+ * 8-to-16 growth, and count every block handed out while armed. */
+static void *(*real_malloc)(size_t);
+static void (*real_free)(void *);
 static void *(*real_realloc)(void *, size_t);
+static int hook_ready;
 static int grow_arm;
-static int grow_prev_ok;
-static size_t grow_prev_n;
+/* malloc is a compiler builtin. A plain int is not a visible side
+ * effect of the call, so an optimizing build deletes the store that
+ * tells malloc this realloc is a fresh buffer. */
+static volatile int in_realloc;
+static int seen128;
+static int double_free;
+static int track_fail;
+static void **livep;
+static size_t nlive, clive;
+static void **deadp;
+static size_t ndead, cdead;
 
-__attribute__((constructor)) static void init_realloc_hook(void) {
+__attribute__((constructor)) static void init_alloc_hook(void) {
+  real_malloc = (void *(*)(size_t))dlsym(RTLD_NEXT, "malloc");
+  real_free = (void (*)(void *))dlsym(RTLD_NEXT, "free");
   real_realloc = (void *(*)(void *, size_t))dlsym(RTLD_NEXT, "realloc");
+  hook_ready = 1;
+}
+
+static int push_ptr(void ***arr, size_t *n, size_t *c, void *p) {
+  if (*n == *c) {
+    size_t nc = *c ? *c * 2 : 32;
+    void **ni = (void **)real_realloc(*arr, nc * sizeof(void *));
+    if (!ni) {
+      track_fail = 1;
+      return -1;
+    }
+    *arr = ni;
+    *c = nc;
+  }
+  (*arr)[(*n)++] = p;
+  return 0;
+}
+
+static int take_live(void *p) {
+  size_t i;
+  for (i = 0; i < nlive; i++) {
+    if (livep[i] == p) {
+      livep[i] = livep[--nlive];
+      return 1;
+    }
+  }
+  return 0;
+}
+
+static int was_dead(void *p) {
+  size_t i;
+  for (i = 0; i < ndead; i++) {
+    if (deadp[i] == p)
+      return 1;
+  }
+  return 0;
+}
+
+static void grow_reset(void) {
+  nlive = 0;
+  ndead = 0;
+  double_free = 0;
+  track_fail = 0;
+  seen128 = 0;
+}
+
+void *malloc(size_t n) {
+  void *r;
+  if (!hook_ready || !real_malloc)
+    return NULL;
+  /* realloc(NULL, n) is a fresh buffer, not a piece-list growth. */
+  if (grow_arm && !in_realloc && n == 128) {
+    seen128++;
+    if (seen128 == 2)
+      return NULL;
+  }
+  r = real_malloc(n);
+  if (grow_arm && r)
+    push_ptr(&livep, &nlive, &clive, r);
+  return r;
+}
+
+void free(void *p) {
+  if (!p)
+    return;
+  if (!hook_ready || !real_free)
+    return;
+  if (grow_arm) {
+    if (take_live(p))
+      push_ptr(&deadp, &ndead, &cdead, p);
+    else if (was_dead(p))
+      double_free = 1;
+  }
+  real_free(p);
 }
 
 void *realloc(void *p, size_t n) {
   void *r;
-  if (!real_realloc)
-    return NULL;
-  if (grow_arm && p && grow_prev_ok && n == grow_prev_n && n == 128) {
-    grow_prev_ok = 0;
-    grow_arm = 0;
-    return NULL;
+  int was;
+  if (!p) {
+    void *fresh;
+    in_realloc = 1;
+    fresh = malloc(n);
+    in_realloc = 0;
+    return fresh;
   }
+  if (!hook_ready || !real_realloc)
+    return NULL;
+  was = grow_arm && take_live(p);
   r = real_realloc(p, n);
-  if (grow_arm && p && r) {
-    grow_prev_ok = 1;
-    grow_prev_n = n;
-  } else {
-    grow_prev_ok = 0;
+  if (!r) {
+    if (was)
+      push_ptr(&livep, &nlive, &clive, p);
+    return NULL;
   }
+  if (grow_arm)
+    push_ptr(&livep, &nlive, &clive, r);
   return r;
 }
 #endif
@@ -556,14 +648,7 @@ static int cmd_grow(const char *req, const char *msg_path) {
   int rc;
   if (open_root(req, msg_path, &d, &m, &root))
     return 1;
-#if !defined(__SANITIZE_ADDRESS__)
-  grow_arm = 1;
-  grow_prev_ok = 0;
-#endif
   rc = capnp_dyn_encode_text(d, "Conform", &root, &text, &n);
-#if !defined(__SANITIZE_ADDRESS__)
-  grow_arm = 0;
-#endif
   if (rc != CAPNP_OK || !text || !strstr(text, "scores")) {
     free(text);
     capnp_message_free(&m);
@@ -571,21 +656,41 @@ static int cmd_grow(const char *req, const char *msg_path) {
     return 1;
   }
   free(text);
-#if !defined(__SANITIZE_ADDRESS__)
-  grow_arm = 1;
-  grow_prev_ok = 0;
-#endif
+  text = NULL;
   rc = capnp_dyn_encode_json(d, "Conform", &root, &json, &jn);
-#if !defined(__SANITIZE_ADDRESS__)
-  grow_arm = 0;
-#endif
-  capnp_message_free(&m);
-  capnp_dyn_free(d);
   if (rc != CAPNP_OK || !json || !strstr(json, "scores")) {
     free(json);
+    capnp_message_free(&m);
+    capnp_dyn_free(d);
     return 1;
   }
   free(json);
+  json = NULL;
+#if !defined(__SANITIZE_ADDRESS__)
+  grow_reset();
+  grow_arm = 1;
+  rc = capnp_dyn_encode_text(d, "Conform", &root, &text, &n);
+  grow_arm = 0;
+  free(text);
+  text = NULL;
+  if (rc != CAPNP_ERR_ALLOC || nlive || double_free || track_fail) {
+    capnp_message_free(&m);
+    capnp_dyn_free(d);
+    return 1;
+  }
+  grow_reset();
+  grow_arm = 1;
+  rc = capnp_dyn_encode_json(d, "Conform", &root, &json, &jn);
+  grow_arm = 0;
+  free(json);
+  if (rc != CAPNP_ERR_ALLOC || nlive || double_free || track_fail) {
+    capnp_message_free(&m);
+    capnp_dyn_free(d);
+    return 1;
+  }
+#endif
+  capnp_message_free(&m);
+  capnp_dyn_free(d);
   return 0;
 }
 

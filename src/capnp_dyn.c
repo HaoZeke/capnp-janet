@@ -1623,6 +1623,10 @@ static void free_pieces(piece_list_t *pl) {
   memset(pl, 0, sizeof(*pl));
 }
 
+/* Set when a list growth malloc fails, so the public encoder can
+ * report allocation failure instead of a type error. */
+static int encode_oom;
+
 static int add_piece(piece_list_t *pl, char *s, size_t len) {
   if (pl->count == pl->cap) {
     uint32_t ncap;
@@ -1641,6 +1645,7 @@ static int add_piece(piece_list_t *pl, char *s, size_t len) {
     if (!ni || !nl) {
       free(ni);
       free(nl);
+      encode_oom = 1;
       return -1;
     }
     if (pl->count) {
@@ -2234,6 +2239,7 @@ static int add_json_item(json_list_t *jl, char *s, size_t len, int multi) {
       free(ni);
       free(nl);
       free(nm);
+      encode_oom = 1;
       return -1;
     }
     if (jl->count) {
@@ -3097,6 +3103,7 @@ static int encode_root_impl(const capnp_dyn_t *d, const char *type_name,
     return CAPNP_ERR_ARG;
   *out = NULL;
   *len = 0;
+  encode_oom = 0;
   if (resolve_root_type_name(d, type_name, &rt, &st) != CAPNP_OK)
     return CAPNP_ERR_KIND;
   memset(&b, 0, sizeof(b));
@@ -3111,6 +3118,8 @@ static int encode_root_impl(const capnp_dyn_t *d, const char *type_name,
   free_rtype(&rt);
   if (rc || !b.data) {
     free(b.data);
+    if (encode_oom)
+      return CAPNP_ERR_ALLOC;
     return CAPNP_ERR_KIND;
   }
   *out = b.data;
