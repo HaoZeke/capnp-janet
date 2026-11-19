@@ -134,10 +134,30 @@ static void test_struct_list_orphan(void) {
   capnp_message_free(&m);
 }
 
+static void test_empty_builder_orphan(void) {
+  capnp_builder_t b;
+  capnp_orphan_t o;
+  memset(&b, 0, sizeof(b));
+  check(capnp_builder_new_orphan_struct(&b, 0, 0, &o, NULL) == CAPNP_ERR_ALLOC,
+        "zero struct on empty builder");
+  check(capnp_builder_new_orphan_list(&b, CAPNP_SZ_VOID, 0, &o, NULL) ==
+            CAPNP_ERR_ALLOC,
+        "zero list on empty builder");
+  capnp_builder_init(&b);
+  check(capnp_builder_new_orphan_struct(&b, 0, 0, &o, NULL) == CAPNP_OK,
+        "zero struct on live builder");
+  check(o.live == 1, "struct orphan live");
+  check(capnp_builder_new_orphan_list(&b, CAPNP_SZ_VOID, 0, &o, NULL) ==
+            CAPNP_OK,
+        "zero list on live builder");
+  capnp_builder_free(&b);
+}
+
 int main(void) {
   test_adopt_matches_direct();
   test_list_orphan_roundtrip();
   test_struct_list_orphan();
+  test_empty_builder_orphan();
   if (g_fail) {
     fprintf(stderr, "%d orphan checks failed\n", g_fail);
     return 1;

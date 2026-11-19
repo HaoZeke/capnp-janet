@@ -106,6 +106,14 @@ static int append_segment(capnp_builder_t *b, size_t cap_words) {
   return CAPNP_OK;
 }
 
+static int tail_slot(capnp_builder_t *b, uint32_t *seg, size_t *word) {
+  if (!b || b->nsegs == 0 || !b->segs)
+    return CAPNP_ERR_ALLOC;
+  *seg = b->nsegs - 1;
+  *word = b->segs[*seg].words;
+  return CAPNP_OK;
+}
+
 static int alloc_words(capnp_builder_t *b, size_t n, uint32_t *out_seg,
                        size_t *out_word) {
   capnp_bseg_t *last;
@@ -541,9 +549,8 @@ int capnp_builder_set_data(const capnp_bptr_t *body, uint16_t dwords,
            nwords * CAPNP_WORD_BYTES);
     if (data_len)
       memcpy(wbytes(body->b, start_seg, start_word), data, data_len);
-  } else {
-    start_seg = body->b->nsegs - 1;
-    start_word = body->b->segs[start_seg].words;
+  } else if (tail_slot(body->b, &start_seg, &start_word)) {
+    return CAPNP_ERR_ALLOC;
   }
   return write_list_ptr(body->b, body->seg, ptr_word, start_seg, start_word,
                         CAPNP_SZ_BYTE, (uint32_t)data_len);
@@ -607,9 +614,8 @@ static int set_list_prim(const capnp_bptr_t *body, uint16_t dwords,
         return CAPNP_ERR_ARG;
       }
     }
-  } else {
-    start_seg = body->b->nsegs - 1;
-    start_word = body->b->segs[start_seg].words;
+  } else if (tail_slot(body->b, &start_seg, &start_word)) {
+    return CAPNP_ERR_ALLOC;
   }
   return write_list_ptr(body->b, body->seg, ptr_word, start_seg, start_word,
                         esize, nitems);
@@ -671,9 +677,8 @@ int capnp_builder_set_list_bool(const capnp_bptr_t *body, uint16_t dwords,
         }
       }
     }
-  } else {
-    start_seg = body->b->nsegs - 1;
-    start_word = body->b->segs[start_seg].words;
+  } else if (tail_slot(body->b, &start_seg, &start_word)) {
+    return CAPNP_ERR_ALLOC;
   }
   return write_list_ptr(body->b, body->seg, ptr_word, start_seg, start_word,
                         CAPNP_SZ_BIT, nitems);
@@ -698,9 +703,8 @@ int capnp_builder_set_list_text_n(const capnp_bptr_t *body, uint16_t dwords,
   if (nitems) {
     if (alloc_words(body->b, nitems, &list_seg, &list_start))
       return CAPNP_ERR_ALLOC;
-  } else {
-    list_seg = body->b->nsegs - 1;
-    list_start = body->b->segs[list_seg].words;
+  } else if (tail_slot(body->b, &list_seg, &list_start)) {
+    return CAPNP_ERR_ALLOC;
   }
   if (write_list_ptr(body->b, body->seg, list_ptr_word, list_seg, list_start,
                      CAPNP_SZ_PTR, nitems))
@@ -741,9 +745,8 @@ int capnp_builder_init_ptr_list(const capnp_bptr_t *body, uint16_t dwords,
       return CAPNP_ERR_ALLOC;
     memset(wbytes(body->b, list_seg, list_start), 0,
            (size_t)nitems * CAPNP_WORD_BYTES);
-  } else {
-    list_seg = body->b->nsegs - 1;
-    list_start = body->b->segs[list_seg].words;
+  } else if (tail_slot(body->b, &list_seg, &list_start)) {
+    return CAPNP_ERR_ALLOC;
   }
   if (write_list_ptr(body->b, body->seg, list_ptr_word, list_seg, list_start,
                      CAPNP_SZ_PTR, nitems))
@@ -843,9 +846,8 @@ int capnp_builder_new_orphan_struct(capnp_builder_t *b, uint16_t dwords,
     if (alloc_words(b, n, &seg, &word))
       return CAPNP_ERR_ALLOC;
     memset(wbytes(b, seg, word), 0, n * CAPNP_WORD_BYTES);
-  } else {
-    seg = b->nsegs - 1;
-    word = b->segs[seg].words;
+  } else if (tail_slot(b, &seg, &word)) {
+    return CAPNP_ERR_ALLOC;
   }
   o->b = b;
   o->seg = seg;
@@ -876,9 +878,8 @@ int capnp_builder_new_orphan_list(capnp_builder_t *b, int esize, uint32_t count,
     if (alloc_words(b, n, &seg, &word))
       return CAPNP_ERR_ALLOC;
     memset(wbytes(b, seg, word), 0, n * CAPNP_WORD_BYTES);
-  } else {
-    seg = b->nsegs - 1;
-    word = b->segs[seg].words;
+  } else if (tail_slot(b, &seg, &word)) {
+    return CAPNP_ERR_ALLOC;
   }
   o->b = b;
   o->seg = seg;
