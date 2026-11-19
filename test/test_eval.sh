@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# capnp-eval matches `capnp eval` on consts and field defaults.
+# capnp-eval matches `capnp eval` on consts and field defaults across text,
+# JSON, and binary formats.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${CAPNP_JANET_BUILD:-$ROOT/build}"
@@ -8,13 +9,15 @@ if [[ ! -x "$BIN" ]]; then
   echo "SKIP: capnp-eval not built" >&2
   exit 0
 fi
+INC="$(dirname "$(dirname "$(command -v capnp)")")/include"
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 check() {
   local schema="$1" expr="$2"
-  capnp eval "$schema" "$expr" >"$TMP/ref.txt"
-  "$BIN" "$schema" "$expr" >"$TMP/ours.txt"
-  diff -u "$TMP/ref.txt" "$TMP/ours.txt"
+  shift 2
+  capnp eval -I"$INC" "$@" "$schema" "$expr" >"$TMP/ref.txt"
+  "$BIN" eval -I"$INC" "$@" "$schema" "$expr" >"$TMP/ours.txt"
+  cmp "$TMP/ref.txt" "$TMP/ours.txt"
 }
 check "$ROOT/schema/codegen-features.capnp" answer
 check "$ROOT/schema/codegen-features.capnp" greeting
@@ -33,4 +36,20 @@ check "$DEEP" 'sample.meta.note'
 check "$DEEP" 'sample.tag'
 check "$DEEP" 'sample.meta'
 check "$DEEP" 'sample.items'
+check "$DEEP" 'sample'
+check "$DEEP" 'sample' --short
+check "$DEEP" 'sample' -ojson
+check "$DEEP" 'sample' -ojson --short
+check "$DEEP" 'sample' -b
+check "$DEEP" 'sample' -p
+check "$DEEP" 'sample' --flat
+check "$DEEP" 'sample' -ocanonical
+PARITY="$ROOT/schema/parity.capnp"
+check "$PARITY" kColor
+check "$PARITY" kBig
+check "$PARITY" kPoint
+check "$PARITY" Parity.vEnum
+check "$PARITY" Parity.vStruct
+check "$PARITY" Parity.vData
+check "$PARITY" 'Parity.lI32[1]'
 echo "ok eval"
