@@ -23,4 +23,14 @@ check "$ROOT/schema/defaults.capnp" Wrap.origin
 check "$ROOT/schema/defaults.capnp" Wrap.origin.x
 check "$ROOT/schema/defaults.capnp" Wrap.labels
 check "$ROOT/schema/defaults.capnp" 'Wrap.labels[0]'
+DEEP="$ROOT/schema/evaldeep.capnp"
+check "$DEEP" 'sample.items[1].name'
+check "$DEEP" 'sample.nested[1][0].n'
+check "$DEEP" 'sample.nested[0][0].name'
+check "$DEEP" 'sample.scores[2]'
+check "$DEEP" 'sample.meta.rev'
+check "$DEEP" 'sample.meta.note'
+check "$DEEP" 'sample.tag'
+check "$DEEP" 'sample.meta'
+check "$DEEP" 'sample.items'
 echo "ok eval"
