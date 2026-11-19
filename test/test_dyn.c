@@ -3,7 +3,9 @@
 #include <capnp-janet/capnp_canonical.h>
 #include <capnp-janet/capnp_dyn.h>
 #include <capnp-janet/capnp_message.h>
+#include <capnp-janet/capnp_pointer.h>
 
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -69,18 +71,36 @@ static int cmd_read(const char *req, const char *msg) {
   capnp_ptr_t root, inner, matrix, row;
   int flag = 1;
   int64_t tiny = 0, wide = 0, n = 0;
-  const char *text = NULL;
+  uint64_t wide_u = 0;
+  double ratio = 0.0;
+  const char *text = NULL, *wname = NULL;
   size_t len = 0;
+  uint8_t *empty_msg = NULL;
+  size_t empty_len = 0;
+  capnp_message_t em;
+  capnp_ptr_t eroot;
+
   if (open_root(req, msg, &d, &m, &root))
     return 1;
   CHECK(capnp_dyn_get_bool(d, &root, "Conform", "flag", &flag) == CAPNP_OK,
         "flag");
   CHECK(flag == 0, "flag false");
-  CHECK(capnp_dyn_get_i64(d, &root, "Conform", "tiny", &tiny) == CAPNP_OK, "tiny");
+  CHECK(capnp_dyn_get_i64(d, &root, "Conform", "tiny", &tiny) == CAPNP_OK,
+        "tiny");
   CHECK(tiny == 3, "tiny 3");
-  CHECK(capnp_dyn_get_i64(d, &root, "Conform", "wide", &wide) == CAPNP_OK, "wide");
+  CHECK(capnp_dyn_get_i64(d, &root, "Conform", "wide", &wide) == CAPNP_OK,
+        "wide");
   CHECK(wide == 99, "wide 99");
-  CHECK(capnp_dyn_get_text(d, &root, "Conform", "title", &text, &len) == CAPNP_OK,
+  CHECK(capnp_dyn_get_u64(d, &root, "Conform", "wide", &wide_u) == CAPNP_OK,
+        "wide u64");
+  CHECK(wide_u == 99u, "wide u64 99");
+  CHECK(capnp_dyn_get_f64(d, &root, "Conform", "ratio", &ratio) == CAPNP_OK,
+        "ratio f64");
+  CHECK_NEAR(ratio, 2.5, 1e-12, "ratio 2.5");
+  CHECK(capnp_dyn_which(d, &root, "Conform", &wname) == CAPNP_OK, "which");
+  CHECK(wname && strcmp(wname, "note") == 0, "which note");
+  CHECK(capnp_dyn_get_text(d, &root, "Conform", "title", &text, &len) ==
+            CAPNP_OK,
         "title");
   CHECK_STREQ(text, len, "hi", "title hi");
   CHECK(capnp_dyn_get_ptr(d, &root, "Conform", "inner", &inner) == CAPNP_OK,
@@ -92,43 +112,248 @@ static int cmd_read(const char *req, const char *msg) {
   CHECK(capnp_list_getp(&matrix, 0, &row) == CAPNP_OK, "row");
   CHECK(capnp_list_get_text(&row, 0, &text, &len) == CAPNP_OK, "cell");
   CHECK_STREQ(text, len, "x", "matrix x");
-  {
-    const char *b_in = "(name = \"a\", scores = [])";
-    const char *bad_str = "(title = \"unterminated";
-    const char *bad_lst = "(buckets = [(name = \"a\", scores = [1, \"bad\"])])";
-    uint8_t *msg_out = NULL;
-    size_t msg_len = 0;
-    capnp_message_t bm;
-    capnp_ptr_t broot, scores;
-    CHECK(capnp_dyn_decode_text(d, "Bucket", b_in, strlen(b_in), &msg_out,
-                                &msg_len) == CAPNP_OK,
-          "decode empty scores");
-    CHECK(capnp_message_from_flat(&bm, msg_out, msg_len) == CAPNP_OK &&
-              capnp_root(&bm, &broot) == CAPNP_OK &&
-              capnp_getp(&broot, 1, &scores) == CAPNP_OK,
-          "open bucket");
-    free(msg_out);
-    CHECK(scores.kind == CAPNP_PK_LIST && scores.esize == CAPNP_SZ_FOUR &&
-              scores.count == 0,
-          "empty scores has CAPNP_SZ_FOUR");
-    capnp_message_free(&bm);
-    msg_out = NULL;
-    CHECK(capnp_dyn_decode_text(d, "Conform", bad_str, strlen(bad_str),
-                                &msg_out, &msg_len) != CAPNP_OK,
-          "reject unterminated string without leak");
-    free(msg_out);
-    msg_out = NULL;
-    CHECK(capnp_dyn_decode_text(d, "Conform", bad_lst, strlen(bad_lst),
-                                &msg_out, &msg_len) != CAPNP_OK,
-          "reject bad list without leak");
-    free(msg_out);
-  }
+
+  /* Check defaults and union active checks on an empty () message */
+  CHECK(capnp_dyn_decode_text(d, "Conform", "()", 2, &empty_msg, &empty_len) ==
+            CAPNP_OK,
+        "decode empty");
+  CHECK(capnp_message_from_flat(&em, empty_msg, empty_len) == CAPNP_OK &&
+            capnp_root(&em, &eroot) == CAPNP_OK,
+        "open empty");
+  free(empty_msg);
+  CHECK(capnp_dyn_get_text(d, &eroot, "Conform", "title", &text, &len) ==
+            CAPNP_OK,
+        "default title");
+  CHECK_STREQ(text, len, "untitled", "default title untitled");
+  CHECK(capnp_dyn_get_f64(d, &eroot, "Conform", "ratio", &ratio) == CAPNP_OK,
+        "default ratio");
+  CHECK_NEAR(ratio, 1.5, 1e-12, "default ratio 1.5");
+  CHECK(capnp_dyn_which(d, &eroot, "Conform", &wname) == CAPNP_OK &&
+            strcmp(wname, "quiet") == 0,
+        "default which quiet");
+  CHECK(capnp_dyn_get_text(d, &eroot, "Conform", "note", &text, &len) ==
+            CAPNP_ERR_KIND,
+        "inactive union arm rejected");
+  capnp_message_free(&em);
+
   capnp_message_free(&m);
   capnp_dyn_free(d);
   return harness_finish();
 }
 
-static int cmd_encode(const char *req, const char *msg, const char *out, int json) {
+static int cmd_edges(const char *conform_req, const char *parity_req) {
+  capnp_dyn_t *dc = NULL, *dp = NULL;
+  uint8_t *reqb = NULL, *msg = NULL;
+  size_t rn = 0, mn = 0;
+  capnp_message_t m;
+  capnp_ptr_t root, buckets, b0, scores, pts, pt, raw_ptr;
+  uint64_t u64v = 0;
+  double f64v = 0.0;
+  const char *txt = NULL;
+  size_t tlen = 0;
+  char *big_list = NULL;
+  size_t pos = 0;
+  int i;
+
+  if (load_file(conform_req, &reqb, &rn) ||
+      capnp_dyn_init(&dc, reqb, rn) != CAPNP_OK) {
+    free(reqb);
+    return 1;
+  }
+  free(reqb);
+  if (load_file(parity_req, &reqb, &rn) ||
+      capnp_dyn_init(&dp, reqb, rn) != CAPNP_OK) {
+    free(reqb);
+    capnp_dyn_free(dc);
+    return 1;
+  }
+  free(reqb);
+
+  /* 1. Empty primitive list must encode wire ElementSize FOUR_BYTES (4), not
+   * POINTER (6) */
+  {
+    const char *b_in = "(name = \"a\", scores = [])";
+    CHECK(capnp_dyn_decode_text(dc, "Bucket", b_in, strlen(b_in), &msg, &mn) ==
+              CAPNP_OK,
+          "decode empty scores");
+  }
+  CHECK(capnp_message_from_flat(&m, msg, mn) == CAPNP_OK &&
+            capnp_root(&m, &b0) == CAPNP_OK,
+        "open bucket");
+  free(msg);
+  CHECK(capnp_getp(&b0, 1, &scores) == CAPNP_OK, "scores ptr");
+  CHECK(scores.kind == CAPNP_PK_LIST && scores.esize == CAPNP_SZ_FOUR &&
+            scores.count == 0,
+        "empty scores has CAPNP_SZ_FOUR");
+  capnp_message_free(&m);
+
+  /* 2. >64 elements in List(Struct) (70 elements) */
+  big_list = (char *)malloc(8192);
+  CHECK(big_list != NULL, "alloc big_list");
+  pos += (size_t)snprintf(big_list + pos, 8192 - pos, "(buckets = [");
+  for (i = 0; i < 70; i++) {
+    pos += (size_t)snprintf(big_list + pos, 8192 - pos,
+                            "%s(name = \"b%d\", scores = [%d])",
+                            i ? ", " : "", i, i);
+  }
+  pos += (size_t)snprintf(big_list + pos, 8192 - pos, "])");
+  CHECK(capnp_dyn_decode_text(dc, "Conform", big_list, pos, &msg, &mn) ==
+            CAPNP_OK,
+        "decode 70 buckets");
+  free(big_list);
+  CHECK(capnp_message_from_flat(&m, msg, mn) == CAPNP_OK &&
+            capnp_root(&m, &root) == CAPNP_OK,
+        "open 70 buckets");
+  free(msg);
+  CHECK(capnp_dyn_get_ptr(dc, &root, "Conform", "buckets", &buckets) ==
+            CAPNP_OK,
+        "get buckets");
+  CHECK(capnp_list_len(&buckets) == 70, "70 buckets len");
+  CHECK(capnp_list_getp(&buckets, 69, &b0) == CAPNP_OK, "bucket 69");
+  CHECK(capnp_dyn_get_text(dc, &b0, "Bucket", "name", &txt, &tlen) == CAPNP_OK,
+        "bucket 69 name");
+  CHECK_STREQ(txt, tlen, "b69", "bucket 69 name b69");
+  capnp_message_free(&m);
+
+  /* 3. Pointer defaults honoured on Parity () */
+  CHECK(capnp_dyn_decode_text(dp, "Parity", "()", 2, &msg, &mn) == CAPNP_OK,
+        "decode Parity ()");
+  CHECK(capnp_message_from_flat(&m, msg, mn) == CAPNP_OK &&
+            capnp_root(&m, &root) == CAPNP_OK,
+        "open Parity ()");
+  free(msg);
+  CHECK(capnp_dyn_get_u64(dp, &root, "Parity", "vU64", &u64v) == CAPNP_OK &&
+            u64v == UINT64_MAX,
+        "Parity vU64 default UINT64_MAX");
+  CHECK(capnp_dyn_get_f64(dp, &root, "Parity", "vF64", &f64v) == CAPNP_OK &&
+            fabs(f64v - (-2.25)) < 1e-12,
+        "Parity vF64 default -2.25");
+  CHECK(capnp_dyn_get_text(dp, &root, "Parity", "vText", &txt, &tlen) ==
+            CAPNP_OK,
+        "Parity vText default");
+  CHECK_STREQ(txt, tlen, "default-text", "Parity vText default-text");
+  CHECK(capnp_dyn_get_ptr(dp, &root, "Parity", "vStruct", &pt) == CAPNP_OK &&
+            pt.kind == CAPNP_PK_STRUCT,
+        "Parity vStruct pointer default");
+  {
+    int64_t px = 0, py = 0;
+    CHECK(capnp_dyn_get_i64(dp, &pt, "Point", "x", &px) == CAPNP_OK && px == 3,
+          "vStruct default x == 3");
+    CHECK(capnp_dyn_get_i64(dp, &pt, "Point", "y", &py) == CAPNP_OK && py == 4,
+          "vStruct default y == 4");
+  }
+  CHECK(capnp_dyn_get_ptr(dp, &root, "Parity", "lI32", &pts) == CAPNP_OK &&
+            pts.kind == CAPNP_PK_LIST && capnp_list_len(&pts) == 2 &&
+            capnp_list_get_u32(&pts, 0, 0) == 9,
+        "Parity lI32 list default [9, 8]");
+  capnp_message_free(&m);
+
+  /* 4. Unknown enum ordinal in JSON and text */
+  {
+    const char *e_in = "{\"vEnum\": 99, \"lEnum\": [\"emerald\", 77]}";
+    CHECK(capnp_dyn_decode_json(dp, "Parity", e_in, strlen(e_in), &msg, &mn) ==
+              CAPNP_OK,
+          "decode unknown enum ordinal JSON");
+  }
+  CHECK(capnp_message_from_flat(&m, msg, mn) == CAPNP_OK &&
+            capnp_root(&m, &root) == CAPNP_OK,
+        "open unknown enum msg");
+  free(msg);
+  {
+    char *jout = NULL, *tout = NULL;
+    size_t jlen = 0, tlen2 = 0;
+    CHECK(capnp_dyn_encode_json_short(dp, "Parity", &root, &jout, &jlen) ==
+              CAPNP_OK,
+          "encode unknown enum json");
+    CHECK(strstr(jout, "\"vEnum\":99") != NULL &&
+              strstr(jout, "\"lEnum\":[\"emerald\",77]") != NULL,
+          "json preserves unknown enum ordinal");
+    free(jout);
+    CHECK(capnp_dyn_encode_text_short(dp, "Parity", &root, &tout, &tlen2) ==
+              CAPNP_OK,
+          "encode unknown enum text");
+    CHECK(strstr(tout, "vEnum = (99)") != NULL &&
+              strstr(tout, "lEnum = [green, (77)]") != NULL,
+          "text formats unknown enum ordinal as (N)");
+    free(tout);
+  }
+  capnp_message_free(&m);
+
+  /* 5. Strict JSON grammar and trailing-token rejection + error-path leak
+   * check (under ASan/LSan) */
+  {
+    const char *bad_json[] = {
+        "{} trailing",
+        "{,\"vBool\":true}",
+        "{\"vBool\":true,}",
+        "{\"vBool\":true \"vI8\":1}",
+        "{\"vBool\":true,,\"vI8\":1}",
+        "{\"lI8\":[1,,2]}",
+        "{\"lI8\":[1,]}",
+        "{\"lI8\":[,1]}",
+        "{\"vText\":\"\\x41\"}",
+        "{\"vText\":\"\\u12zz\"}",
+        "{\"vI8\":128}",
+        "{\"vI8\":-129}",
+        "{\"vU8\":256}",
+        "{\"vU8\":-1}",
+        "{\"vU64\":\"18446744073709551616\"}",
+        "{\"vI64\":\"9223372036854775808\"}",
+        "{\"vI64\":\"177a\"}",
+        "{\"b64Data\":\"not!base64!\"}",
+        "{\"hexData\":\"123\"}",
+        "{\"hexData\":\"12zz\"}",
+        "{\"vText\":\"unterminated",
+    };
+    const char *bad_text[] = {
+        "() extra",
+        "(vBool = true) (vBool = false)",
+        "(,)",
+        "(vBool = true,, vI8 = 1)",
+        "(lI8 = [1,, 2])",
+        "(lI8 = [, 1])",
+        "(unknownField = 1)",
+        "(vI8 = 200)",
+        "(vU8 = -1)",
+        "(vText = \"\\x4g\")",
+        "(vText = \"unterminated",
+    };
+    size_t k;
+    for (k = 0; k < sizeof(bad_json) / sizeof(bad_json[0]); k++) {
+      uint8_t *out = NULL;
+      size_t olen = 0;
+      CHECK(capnp_dyn_decode_json(dp, "Parity", bad_json[k],
+                                  strlen(bad_json[k]), &out, &olen) != CAPNP_OK,
+            bad_json[k]);
+      free(out);
+    }
+    for (k = 0; k < sizeof(bad_text) / sizeof(bad_text[0]); k++) {
+      uint8_t *out = NULL;
+      size_t olen = 0;
+      CHECK(capnp_dyn_decode_text(dp, "Parity", bad_text[k],
+                                  strlen(bad_text[k]), &out, &olen) != CAPNP_OK,
+            bad_text[k]);
+      free(out);
+    }
+    /* Non-NUL-terminated slice boundary check */
+    {
+      const char raw_slice[] = "(vText = \"\\x41\"GARBAGE";
+      uint8_t *out = NULL;
+      size_t olen = 0;
+      CHECK(capnp_dyn_decode_text(dp, "Parity", raw_slice, 11, &out, &olen) !=
+                CAPNP_OK,
+            "truncated hex escape in non-NUL slice");
+      free(out);
+    }
+  }
+  (void)raw_ptr;
+  capnp_dyn_free(dc);
+  capnp_dyn_free(dp);
+  return harness_finish();
+}
+
+static int cmd_encode(const char *req, const char *msg, const char *out,
+                      int json) {
   capnp_dyn_t *d = NULL;
   capnp_message_t m;
   capnp_ptr_t root;
@@ -204,6 +429,8 @@ static int cmd_canon(const char *msg_path, const char *out) {
 int main(int argc, char **argv) {
   if (argc == 4 && strcmp(argv[1], "read") == 0)
     return cmd_read(argv[2], argv[3]);
+  if (argc == 4 && strcmp(argv[1], "edges") == 0)
+    return cmd_edges(argv[2], argv[3]);
   if (argc == 5 && strcmp(argv[1], "text-encode") == 0)
     return cmd_encode(argv[2], argv[3], argv[4], 0);
   if (argc == 5 && strcmp(argv[1], "json-encode") == 0)

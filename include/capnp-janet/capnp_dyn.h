@@ -31,22 +31,38 @@ CAPNP_JANET_EXPORT int capnp_dyn_get_bool(const capnp_dyn_t *d, const capnp_ptr_
 CAPNP_JANET_EXPORT int capnp_dyn_get_i64(const capnp_dyn_t *d, const capnp_ptr_t *s,
                                          const char *type_name, const char *field,
                                          int64_t *out);
+CAPNP_JANET_EXPORT int capnp_dyn_get_u64(const capnp_dyn_t *d, const capnp_ptr_t *s,
+                                         const char *type_name, const char *field,
+                                         uint64_t *out);
+CAPNP_JANET_EXPORT int capnp_dyn_get_f64(const capnp_dyn_t *d, const capnp_ptr_t *s,
+                                         const char *type_name, const char *field,
+                                         double *out);
 CAPNP_JANET_EXPORT int capnp_dyn_get_text(const capnp_dyn_t *d, const capnp_ptr_t *s,
                                           const char *type_name, const char *field,
                                           const char **out, size_t *len);
 CAPNP_JANET_EXPORT int capnp_dyn_get_ptr(const capnp_dyn_t *d, const capnp_ptr_t *s,
                                          const char *type_name, const char *field,
                                          capnp_ptr_t *out);
+CAPNP_JANET_EXPORT int capnp_dyn_which(const capnp_dyn_t *d, const capnp_ptr_t *s,
+                                       const char *type_name, const char **out);
 
 CAPNP_JANET_EXPORT int capnp_dyn_encode_text(const capnp_dyn_t *d, const char *type_name,
                                              const capnp_ptr_t *s, char **out,
                                              size_t *len);
+CAPNP_JANET_EXPORT int capnp_dyn_encode_text_short(const capnp_dyn_t *d,
+                                                   const char *type_name,
+                                                   const capnp_ptr_t *s,
+                                                   char **out, size_t *len);
 CAPNP_JANET_EXPORT int capnp_dyn_decode_text(const capnp_dyn_t *d, const char *type_name,
                                              const char *text, size_t len, uint8_t **out,
                                              size_t *out_len);
 CAPNP_JANET_EXPORT int capnp_dyn_encode_json(const capnp_dyn_t *d, const char *type_name,
                                              const capnp_ptr_t *s, char **out,
                                              size_t *len);
+CAPNP_JANET_EXPORT int capnp_dyn_encode_json_short(const capnp_dyn_t *d,
+                                                   const char *type_name,
+                                                   const capnp_ptr_t *s,
+                                                   char **out, size_t *len);
 CAPNP_JANET_EXPORT int capnp_dyn_decode_json(const capnp_dyn_t *d, const char *type_name,
                                              const char *text, size_t len, uint8_t **out,
                                              size_t *out_len);
@@ -57,5 +73,11 @@ CAPNP_JANET_EXPORT int capnp_dyn_decode_json(const capnp_dyn_t *d, const char *t
  * newline. */
 CAPNP_JANET_EXPORT int capnp_dyn_eval(const capnp_dyn_t *d, const char *expr,
                                       char **out, size_t *len);
+CAPNP_JANET_EXPORT int capnp_dyn_eval_ex(const capnp_dyn_t *d, const char *expr,
+                                         int json, int pretty, char **out,
+                                         size_t *len);
+CAPNP_JANET_EXPORT int capnp_dyn_eval_struct(const capnp_dyn_t *d,
+                                             const char *expr, uint8_t **out,
+                                             size_t *out_len);
 
 #endif
