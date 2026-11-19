@@ -16,7 +16,6 @@
 typedef struct {
   capnp_message_t msg;
   JanetBuffer *view_buf;
-  int borrow;
 } capnp_msg_wrap;
 
 typedef struct {
@@ -90,8 +89,7 @@ static void require_live_scope(builder_scope_t *s) {
 static int msg_gc(void *p, size_t len) {
   (void)len;
   capnp_msg_wrap *w = (capnp_msg_wrap *)p;
-  if (!w->borrow)
-    capnp_message_free(&w->msg);
+  capnp_message_free(&w->msg);
   w->view_buf = NULL;
   return 0;
 }
