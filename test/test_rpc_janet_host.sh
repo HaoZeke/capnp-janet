@@ -11,6 +11,12 @@ if ! command -v janet >/dev/null 2>&1 || [[ ! -f "$MODULE" || ! -x "$CLIENT" || 
   exit 77
 fi
 MODDIR=$(cd "$(dirname "$MODULE")" && pwd)
+if command -v ldd >/dev/null 2>&1; then
+  ASAN_RUNTIME=$(ldd "$MODULE" 2>/dev/null | awk '$1 ~ /^libasan/ {print $3; exit}') || true
+  if [[ -n "$ASAN_RUNTIME" ]]; then
+    export LD_PRELOAD="$ASAN_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}"
+  fi
+fi
 export JANET_PATH="$MODDIR"
 export LD_LIBRARY_PATH="$MODDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 

@@ -13,6 +13,12 @@ if [[ ! -x "$SERVER" || ! -f "$MODULE" ]]; then
   echo "SKIP: need rpc_peer_server and capnp.so" >&2
   exit 77
 fi
+if command -v ldd >/dev/null 2>&1; then
+  ASAN_RUNTIME=$(ldd "$MODULE" 2>/dev/null | awk '$1 ~ /^libasan/ {print $3; exit}') || true
+  if [[ -n "$ASAN_RUNTIME" ]]; then
+    export LD_PRELOAD="$ASAN_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}"
+  fi
+fi
 PORTFILE=$(mktemp)
 "$SERVER" 0 >"$PORTFILE" &
 SPID=$!
