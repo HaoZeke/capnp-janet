@@ -142,6 +142,10 @@ grep -q '(defn Holder-data-box-get-value \[ptr\]' generic.janet
 grep -q 'capnp/get-data ptr 0' generic.janet
 grep -q '(defn Holder-pair-get-left \[ptr\]' generic.janet
 grep -q '(defn Holder-pair-get-right \[ptr\]' generic.janet
+grep -F -q '(def Holder-annotations @[' generic.janet
+grep -F -q ':value 7' generic.janet
+grep -F -q '(def Holder-text-box-annotations @[' generic.janet
+grep -F -q ':value 3' generic.janet
 
 MODULE=${CAPNP_JANET_MODULE:-$BUILD/capnp.so}
 if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then

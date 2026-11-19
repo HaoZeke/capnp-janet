@@ -580,6 +580,86 @@ static int parameter_name(const capnp_ptr_t *nodes, uint64_t scope,
   return 1;
 }
 
+static void janet_quote(FILE *out, const char *s, size_t n);
+
+static void emit_value_expr(FILE *out, const capnp_ptr_t *value) {
+  uint16_t which;
+  const char *text;
+  size_t text_len;
+  if (!value || value->kind != CAPNP_PK_STRUCT) {
+    fputs("nil", out);
+    return;
+  }
+  which = capnp_get_u16(value, 0, 0xffff);
+  switch (which) {
+  case TYPE_BOOL:
+    fputs(capnp_get_bool(value, 16, 0) ? "true" : "false", out);
+    break;
+  case TYPE_INT8:
+    fprintf(out, "%d", (int)(int8_t)capnp_get_u8(value, 2, 0));
+    break;
+  case TYPE_UINT8:
+    fprintf(out, "%u", (unsigned)capnp_get_u8(value, 2, 0));
+    break;
+  case TYPE_INT16:
+    fprintf(out, "%d", (int)(int16_t)capnp_get_u16(value, 2, 0));
+    break;
+  case TYPE_UINT16:
+  case TYPE_ENUM:
+    fprintf(out, "%u", (unsigned)capnp_get_u16(value, 2, 0));
+    break;
+  case TYPE_INT32:
+    fprintf(out, "%d", (int)(int32_t)capnp_get_u32(value, 4, 0));
+    break;
+  case TYPE_UINT32:
+    fprintf(out, "%u", (unsigned)capnp_get_u32(value, 4, 0));
+    break;
+  case TYPE_INT64: {
+    int64_t i64;
+    uint64_t bits = capnp_get_u64(value, 8, 0);
+    memcpy(&i64, &bits, sizeof(i64));
+    fprintf(out, "%lld", (long long)i64);
+    break;
+  }
+  case TYPE_UINT64:
+    fprintf(out, "%llu", (unsigned long long)capnp_get_u64(value, 8, 0));
+    break;
+  case TYPE_TEXT:
+    if (capnp_get_text(value, 0, &text, &text_len) != CAPNP_OK)
+      fputs("\"\"", out);
+    else
+      janet_quote(out, text, text_len);
+    break;
+  default:
+    fputs("nil", out);
+    break;
+  }
+}
+
+static void emit_annotation_list(FILE *out, const char *title,
+                                 const capnp_ptr_t *list) {
+  uint32_t i, n;
+  if (!list || list->kind != CAPNP_PK_LIST)
+    return;
+  n = capnp_list_len(list);
+  if (n == 0)
+    return;
+  fprintf(out, "(def %s @[\n", title);
+  for (i = 0; i < n; i++) {
+    capnp_ptr_t ann, val;
+    if (capnp_list_getp(list, i, &ann) != CAPNP_OK)
+      continue;
+    fprintf(out, "  {:id (int/u64 \"0x%016llx\") :value ",
+            (unsigned long long)capnp_get_u64(&ann, 0, 0));
+    if (capnp_getp(&ann, 0, &val) == CAPNP_OK)
+      emit_value_expr(out, &val);
+    else
+      fputs("nil", out);
+    fprintf(out, "}\n");
+  }
+  fprintf(out, "])\n");
+}
+
 static void emit_parameters(FILE *out, const capnp_ptr_t *node,
                             const char *sname) {
   capnp_ptr_t params;
@@ -815,6 +895,14 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
   fprintf(out, "(def %s-data-words %u)\n", sname, (unsigned)dwords);
   fprintf(out, "(def %s-pointer-words %u)\n", sname, (unsigned)pwords);
   emit_parameters(out, node, sname);
+  {
+    capnp_ptr_t anns;
+    char title[320];
+    if (capnp_getp(node, 2, &anns) == CAPNP_OK) {
+      snprintf(title, sizeof(title), "%s-annotations", sname);
+      emit_annotation_list(out, title, &anns);
+    }
+  }
 
   capnp_ptr_t fields;
   if (capnp_getp(node, 3, &fields) != CAPNP_OK || fields.kind != CAPNP_PK_LIST)
@@ -885,6 +973,18 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
     fprintf(out, "}");
   }
   fprintf(out, "})\n");
+  for (uint32_t ai = 0; ai < nf; ai++) {
+    capnp_ptr_t f, anns;
+    char fname[128];
+    char title[360];
+    if (capnp_list_getp(&fields, ai, &f) != CAPNP_OK)
+      continue;
+    if (capnp_getp(&f, 1, &anns) != CAPNP_OK || anns.kind != CAPNP_PK_LIST)
+      continue;
+    janet_field_ident(get_text(&f, 0), fname, sizeof(fname));
+    snprintf(title, sizeof(title), "%s-%s-annotations", sname, fname);
+    emit_annotation_list(out, title, &anns);
+  }
 
   if (!capnp_get_bool(node, 224, 0)) {
     fprintf(out,
