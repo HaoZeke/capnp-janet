@@ -1,6 +1,7 @@
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_canonical.h>
 #include <capnp-janet/capnp_message.h>
+#include <capnp-janet/capnp_pointer.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -134,6 +135,50 @@ static void test_struct_list_orphan(void) {
   capnp_message_free(&m);
 }
 
+static void test_disown_double_far(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body, slot, obj;
+  capnp_orphan_t o;
+  uint64_t w, pad0;
+  uint32_t pseg;
+  size_t poff;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m;
+  capnp_ptr_t r, k;
+
+  capnp_builder_init_sized(&b, 3);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "df root");
+  check(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "df outer");
+  check(capnp_builder_slot(&body, 0, 0, &slot) == CAPNP_OK, "df slot");
+  check(capnp_builder_struct(&slot, 2, 0, &obj) == CAPNP_OK, "df spill");
+  memset((void *)(uintptr_t)(capnp_builder_seg_data(&b, slot.seg) +
+                             slot.word * 8),
+         0, 8);
+  capnp_builder_set_max_seg_words(&b, 1);
+  check(capnp_builder_struct(&slot, 1, 0, &obj) == CAPNP_OK, "df obj");
+  check(capnp_builder_set_u64(&obj, 0, 4242) == CAPNP_OK, "df set");
+  w = capnp_load_le64(capnp_builder_seg_data(&b, slot.seg) + slot.word * 8);
+  check(capnp_wp_kind(w) == CAPNP_WK_FAR && capnp_wp_far_two(w) == 1, "df far");
+  pseg = capnp_wp_far_seg(w);
+  poff = capnp_wp_far_off(w);
+  pad0 = capnp_load_le64(capnp_builder_seg_data(&b, pseg) + poff * 8);
+  check(capnp_builder_disown(&slot, &o) == CAPNP_OK, "df disown");
+  w = capnp_load_le64(capnp_builder_seg_data(&b, slot.seg) + slot.word * 8);
+  check(w == 0, "df slot cleared");
+  check(capnp_load_le64(capnp_builder_seg_data(&b, pseg) + poff * 8) == pad0,
+        "df pad kept");
+  check(capnp_builder_adopt(&slot, &o) == CAPNP_OK, "df adopt");
+  check(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "df ser");
+  capnp_builder_free(&b);
+  check(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "df parse");
+  free(flat);
+  check(capnp_root(&m, &r) == CAPNP_OK && capnp_getp(&r, 0, &k) == CAPNP_OK,
+        "df read");
+  check(k.kind == CAPNP_PK_STRUCT && capnp_get_u64(&k, 0, 0) == 4242, "df 4242");
+  capnp_message_free(&m);
+}
+
 static void test_empty_builder_orphan(void) {
   capnp_builder_t b;
   capnp_orphan_t o;
@@ -158,6 +203,7 @@ int main(void) {
   test_list_orphan_roundtrip();
   test_struct_list_orphan();
   test_empty_builder_orphan();
+  test_disown_double_far();
   if (g_fail) {
     fprintf(stderr, "%d orphan checks failed\n", g_fail);
     return 1;

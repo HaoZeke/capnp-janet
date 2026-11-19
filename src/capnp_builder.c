@@ -958,7 +958,58 @@ int capnp_builder_adopt(const capnp_bptr_t *slot, capnp_orphan_t *o) {
   return CAPNP_OK;
 }
 
-/* Follow a near or single-far pointer to the object it names. */
+static int orphan_struct_body(capnp_builder_t *b, uint32_t seg, size_t word,
+                               uint16_t dwords, uint16_t pwords,
+                               capnp_orphan_t *o) {
+  size_t n = (size_t)dwords + pwords;
+  if (seg >= b->nsegs)
+    return CAPNP_ERR_SEGMENT;
+  if (n == 0) {
+    if (word > b->segs[seg].words)
+      return CAPNP_ERR_BOUNDS;
+  } else if (word >= b->segs[seg].words ||
+             word > SIZE_MAX - (n - 1) ||
+             word + (n - 1) >= b->segs[seg].words) {
+    return CAPNP_ERR_BOUNDS;
+  }
+  o->kind = CAPNP_PK_STRUCT;
+  o->dwords = dwords;
+  o->pwords = pwords;
+  o->seg = seg;
+  o->word = word;
+  return CAPNP_OK;
+}
+
+static int orphan_list_body(capnp_builder_t *b, uint32_t seg, size_t start,
+                            int esize, uint32_t count, capnp_orphan_t *o) {
+  if (seg >= b->nsegs)
+    return CAPNP_ERR_SEGMENT;
+  o->kind = CAPNP_PK_LIST;
+  o->esize = esize;
+  o->count = count;
+  o->seg = seg;
+  o->word = start;
+  if (esize == CAPNP_SZ_COMPOSITE) {
+    uint64_t tag;
+    if (start >= b->segs[seg].words)
+      return CAPNP_ERR_BOUNDS;
+    tag = load_w(b, seg, start);
+    if (capnp_wp_kind(tag) != CAPNP_WK_STRUCT)
+      return CAPNP_ERR_KIND;
+    o->dwords = capnp_wp_struct_dwords(tag);
+    o->pwords = capnp_wp_struct_pwords(tag);
+    return CAPNP_OK;
+  }
+  if (count == 0)
+    return CAPNP_OK;
+  if (start >= b->segs[seg].words)
+    return CAPNP_ERR_BOUNDS;
+  return CAPNP_OK;
+}
+
+/* Follow a near, single-far, or double-far pointer to the object it names.
+ * A double-far landing pad is left in place. Only the original slot is
+ * cleared by the caller, matching C++ disown. */
 static int orphan_from_word(capnp_builder_t *b, uint32_t seg, size_t word,
                             capnp_orphan_t *o) {
   uint64_t w;
@@ -967,6 +1018,31 @@ static int orphan_from_word(capnp_builder_t *b, uint32_t seg, size_t word,
     return CAPNP_ERR_BOUNDS;
   w = load_w(b, seg, word);
   kind = capnp_wp_kind(w);
+  if (kind == CAPNP_WK_FAR && capnp_wp_far_two(w)) {
+    uint32_t pseg = capnp_wp_far_seg(w);
+    uint32_t poff = capnp_wp_far_off(w);
+    uint64_t pad, tag;
+    uint32_t cseg, coff;
+    if (poff > UINT32_MAX - 1u)
+      return CAPNP_ERR_BOUNDS;
+    if (pseg >= b->nsegs || (size_t)poff + 1u >= b->segs[pseg].words)
+      return CAPNP_ERR_BOUNDS;
+    pad = load_w(b, pseg, poff);
+    tag = load_w(b, pseg, (size_t)poff + 1u);
+    if (capnp_wp_kind(pad) != CAPNP_WK_FAR || capnp_wp_far_two(pad))
+      return CAPNP_ERR_KIND;
+    if (capnp_wp_offset(tag) != 0)
+      return CAPNP_ERR_KIND;
+    cseg = capnp_wp_far_seg(pad);
+    coff = capnp_wp_far_off(pad);
+    if (capnp_wp_kind(tag) == CAPNP_WK_STRUCT)
+      return orphan_struct_body(b, cseg, coff, capnp_wp_struct_dwords(tag),
+                                capnp_wp_struct_pwords(tag), o);
+    if (capnp_wp_kind(tag) == CAPNP_WK_LIST)
+      return orphan_list_body(b, cseg, coff, capnp_wp_list_esize(tag),
+                              capnp_wp_list_count(tag), o);
+    return CAPNP_ERR_KIND;
+  }
   if (kind == CAPNP_WK_FAR && !capnp_wp_far_two(w)) {
     seg = capnp_wp_far_seg(w);
     word = capnp_wp_far_off(w);
