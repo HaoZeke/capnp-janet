@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
 
@@ -139,7 +140,17 @@ int capnp_listen_unix(const char *path, int *fd) {
     return CAPNP_ERR_ARG;
   if (strlen(path) >= sizeof(addr.sun_path))
     return CAPNP_ERR_BOUNDS;
-  unlink(path);
+  {
+    struct stat st;
+    if (lstat(path, &st) == 0) {
+      if (!S_ISSOCK(st.st_mode))
+        return CAPNP_ERR_IO;
+      if (unlink(path) != 0)
+        return CAPNP_ERR_IO;
+    } else if (errno != ENOENT) {
+      return CAPNP_ERR_IO;
+    }
+  }
   s = socket(AF_UNIX, SOCK_STREAM, 0);
   if (s < 0)
     return CAPNP_ERR_ALLOC;

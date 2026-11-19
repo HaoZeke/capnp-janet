@@ -13,6 +13,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
@@ -91,6 +93,58 @@ static void client_add(capnp_link_t *link, const char *what) {
     capnp_message_free(&m);
   }
   (void)i;
+}
+
+static void test_unix_replaces_only_socket(void) {
+  char dir[] = "/tmp/capnp-janet-XXXXXX";
+  char path[sizeof(dir) + 16];
+  char linkpath[sizeof(dir) + 16];
+  struct stat st;
+  int lfd = -1;
+  int s;
+  struct sockaddr_un addr;
+  FILE *f;
+  check(mkdtemp(dir) != NULL, "mkdtemp");
+  snprintf(path, sizeof(path), "%s/vat.sock", dir);
+  f = fopen(path, "w");
+  check(f != NULL, "create file");
+  if (f) {
+    fputs("keep", f);
+    fclose(f);
+  }
+  check(capnp_listen_unix(path, &lfd) != CAPNP_OK, "refuse regular file");
+  check(lfd < 0, "no fd for file");
+  f = fopen(path, "r");
+  check(f != NULL, "file still there");
+  if (f) {
+    char buf[8] = {0};
+    check(fread(buf, 1, 4, f) == 4 && strcmp(buf, "keep") == 0, "file bytes");
+    fclose(f);
+  }
+  unlink(path);
+  s = socket(AF_UNIX, SOCK_STREAM, 0);
+  check(s >= 0, "stale socket");
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  memcpy(addr.sun_path, path, strlen(path) + 1);
+  check(bind(s, (struct sockaddr *)&addr, sizeof(addr)) == 0, "bind stale");
+  close(s);
+  check(capnp_listen_unix(path, &lfd) == CAPNP_OK, "replace stale socket");
+  check(lstat(path, &st) == 0 && S_ISSOCK(st.st_mode), "path is a socket");
+  if (lfd >= 0)
+    close(lfd);
+  lfd = -1;
+  unlink(path);
+  snprintf(linkpath, sizeof(linkpath), "%s/other", dir);
+  f = fopen(linkpath, "w");
+  if (f)
+    fclose(f);
+  check(symlink(linkpath, path) == 0, "symlink");
+  check(capnp_listen_unix(path, &lfd) != CAPNP_OK, "refuse symlink");
+  check(lstat(path, &st) == 0 && S_ISLNK(st.st_mode), "symlink remains");
+  unlink(path);
+  unlink(linkpath);
+  rmdir(dir);
 }
 
 static void loopback(int unix_sock) {
@@ -202,6 +256,7 @@ int main(int argc, char **argv) {
   if (argc >= 3 && strcmp(argv[1], "serve") == 0)
     return serve_peer((uint16_t)atoi(argv[2]));
   test_frame_little_endian();
+  test_unix_replaces_only_socket();
   loopback(1);
   loopback(0);
   if (g_fail) {
