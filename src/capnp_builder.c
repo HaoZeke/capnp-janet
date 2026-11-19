@@ -1299,8 +1299,6 @@ int capnp_builder_new_orphan_struct_list(capnp_builder_t *b, uint32_t count,
   size_t word = 0;
   if (!b || !o)
     return CAPNP_ERR_ARG;
-  if (count && step == 0)
-    return CAPNP_ERR_KIND;
   if (count && content / count != step)
     return CAPNP_ERR_BOUNDS;
   memset(o, 0, sizeof(*o));

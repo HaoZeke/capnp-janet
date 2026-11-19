@@ -513,10 +513,57 @@ static void test_orphan_free_zeroes(void) {
   free(flat);
 }
 
+/* A composite list of zero-size structs is a tag word and no element
+ * body. C++ 1.4.0 encodes that, and set_list_struct already does too. */
+static void test_zero_size_struct_list_orphan(void) {
+  capnp_builder_t b, direct;
+  capnp_bptr_t root, body, slot, first, droot, dbody, dfirst;
+  capnp_orphan_t orphan;
+  uint8_t *flat = NULL, *dflat = NULL;
+  size_t flen = 0, dlen = 0;
+  capnp_message_t m = {0};
+  capnp_ptr_t r, list;
+
+  capnp_builder_init(&b);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "z root");
+  check(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "z body");
+  check(capnp_builder_new_orphan_struct_list(&b, 3, 0, 0, &orphan, &first) ==
+            CAPNP_OK,
+        "z orphan");
+  check(orphan.live == 1, "z live");
+  check(orphan.esize == CAPNP_SZ_COMPOSITE, "z esize");
+  check(orphan.count == 0, "z content words");
+  check(capnp_builder_slot(&body, 0, 0, &slot) == CAPNP_OK, "z slot");
+  check(capnp_builder_adopt(&slot, &orphan) == CAPNP_OK, "z adopt");
+  check(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "z ser");
+  capnp_builder_free(&b);
+
+  capnp_builder_init(&direct);
+  check(capnp_builder_root(&direct, &droot) == CAPNP_OK, "z droot");
+  check(capnp_builder_struct(&droot, 0, 1, &dbody) == CAPNP_OK, "z dbody");
+  check(capnp_builder_set_list_struct(&dbody, 0, 0, 3, 0, 0, &dfirst) ==
+            CAPNP_OK,
+        "z direct");
+  check(capnp_builder_serialize(&direct, &dflat, &dlen) == CAPNP_OK, "z dser");
+  capnp_builder_free(&direct);
+  check(flen == dlen && flat && dflat && memcmp(flat, dflat, flen) == 0,
+        "z matches set_list_struct");
+
+  check(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "z parse");
+  free(flat);
+  free(dflat);
+  check(capnp_root(&m, &r) == CAPNP_OK, "z read");
+  check(capnp_getp(&r, 0, &list) == CAPNP_OK, "z list");
+  check(list.kind == CAPNP_PK_LIST, "z kind");
+  check(capnp_list_len(&list) == 3, "z len");
+  capnp_message_free(&m);
+}
+
 int main(void) {
   test_adopt_matches_direct();
   test_list_orphan_roundtrip();
   test_struct_list_orphan();
+  test_zero_size_struct_list_orphan();
   test_empty_builder_orphan();
   test_disown_double_far();
   test_dfar_clear_at_zero();
