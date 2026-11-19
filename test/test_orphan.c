@@ -24,7 +24,7 @@ static void test_adopt_matches_direct(void) {
   capnp_orphan_t orphan;
   uint8_t *fa = NULL, *fb = NULL, *ca = NULL, *cb = NULL;
   size_t la = 0, lb = 0, lca = 0, lcb = 0;
-  capnp_message_t ma, mb;
+  capnp_message_t ma = {0}, mb = {0};
 
   capnp_builder_init(&direct);
   check(capnp_builder_root(&direct, &root) == CAPNP_OK, "root");

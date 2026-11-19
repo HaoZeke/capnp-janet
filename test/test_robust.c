@@ -8,9 +8,14 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#if defined(__SANITIZE_ADDRESS__)
+size_t __sanitizer_get_current_allocated_bytes(void);
+#else
+#include <malloc.h>
+#endif
 
 static void test_truncated_framing(void) {
-  capnp_message_t m;
+  capnp_message_t m = {0};
   uint8_t tiny[4] = {0, 0, 0, 0};
   uint8_t short_table[8] = {1, 0, 0, 0, 1, 0, 0, 0};
 
@@ -27,7 +32,7 @@ static void test_truncated_framing(void) {
 static void test_inline_struct_out_of_bounds(void) {
   uint8_t seg[8];
   capnp_segment_t s;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root;
 
   /* Offset 0 puts a 4-word body past this one-word segment. */
@@ -42,7 +47,7 @@ static void test_inline_struct_out_of_bounds(void) {
 static void test_double_far_struct_out_of_bounds(void) {
   uint8_t seg0[8], seg1[16], seg2[8];
   capnp_segment_t segs[3];
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root;
 
   capnp_store_le64(seg0, capnp_wp_make_far(1, 0, 1));
@@ -64,7 +69,7 @@ static void test_double_far_struct_out_of_bounds(void) {
 static void test_double_far_list_out_of_bounds(void) {
   uint8_t seg0[8], seg1[16], seg2[8];
   capnp_segment_t segs[3];
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root;
 
   capnp_store_le64(seg0, capnp_wp_make_far(1, 0, 1));
@@ -86,7 +91,7 @@ static void test_double_far_list_out_of_bounds(void) {
 static void test_negative_composite_count(void) {
   uint8_t seg[16];
   capnp_segment_t s;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root;
 
   /* List of 1 word whose composite tag claims a negative element count. */
@@ -104,7 +109,7 @@ static void test_depth_limit_and_cycle(void) {
   capnp_bptr_t root, body, slot, cur;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t p;
   int i, rc;
   uint8_t cycle[16];
@@ -155,7 +160,7 @@ static void test_builder_offset_overflow(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r;
 
   capnp_builder_init_sized(&b, 2);
@@ -187,7 +192,7 @@ static void test_many_segments_roundtrip(void) {
   capnp_bptr_t root, cur, slot, next;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t p;
   uint32_t nsegs;
   int i;
@@ -226,7 +231,7 @@ static void test_many_segments_roundtrip(void) {
 static void test_text_requires_nul(void) {
   uint8_t seg[32];
   capnp_segment_t s;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root;
   const char *text = NULL;
   size_t n = 99;
@@ -287,7 +292,7 @@ static void test_traversal_budget(void) {
   capnp_bptr_t root, body, slot, child;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, k;
 
   capnp_builder_init(&b);
@@ -317,7 +322,7 @@ static void test_traversal_budget(void) {
 static void test_zero_size_and_far_validation(void) {
   uint8_t seg0[8], seg1[16], seg2[32];
   capnp_segment_t segs[3];
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root;
 
   /* A zero-byte list still has to name an existing segment. */
@@ -367,7 +372,7 @@ static void test_zero_size_and_far_validation(void) {
 static void test_virtual_traversal_charge(void) {
   uint8_t seg[8];
   capnp_segment_t s = {seg, 1};
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root;
   capnp_store_le64(seg, capnp_wp_make_list(0, CAPNP_SZ_VOID, 0x1fffffffu));
   CHECK(capnp_message_from_segments(&m, &s, 1) == CAPNP_OK, "void list view");
@@ -376,8 +381,69 @@ static void test_virtual_traversal_charge(void) {
   capnp_message_free(&m);
 }
 
+static size_t heap_now(void) {
+#if defined(__SANITIZE_ADDRESS__)
+  return __sanitizer_get_current_allocated_bytes();
+#else
+  struct mallinfo2 info = mallinfo2();
+  return (size_t)info.uordblks;
+#endif
+}
+
+static void test_reparse_releases_storage(void) {
+  uint8_t flat[16];
+  uint8_t body[8];
+  capnp_segment_t seg;
+  capnp_message_t m = {0};
+  size_t before, after;
+  int i;
+  memset(&m, 0, sizeof(m));
+  memset(flat, 0, sizeof(flat));
+  capnp_store_le32(flat, 0);
+  capnp_store_le32(flat + 4, 1);
+  capnp_store_le64(flat + 8, capnp_wp_make_struct(-1, 0, 0));
+  memset(body, 0, sizeof(body));
+  capnp_store_le64(body, capnp_wp_make_struct(-1, 0, 0));
+  seg.data = body;
+  seg.words = 1;
+  before = heap_now();
+  for (i = 0; i < 200; i++) {
+    CHECK(capnp_message_from_flat(&m, flat, sizeof(flat)) == CAPNP_OK,
+          "reparse flat");
+    CHECK(capnp_message_from_flat(&m, flat, sizeof(flat)) == CAPNP_OK,
+          "reparse flat again");
+    CHECK(capnp_message_view_flat(&m, flat, sizeof(flat)) == CAPNP_OK,
+          "reparse view");
+    CHECK(capnp_message_from_segments(&m, &seg, 1) == CAPNP_OK, "reparse segs");
+    capnp_message_free(&m);
+    capnp_message_free(&m);
+  }
+  after = heap_now();
+  CHECK(after <= before + 4096, "reparse does not leak");
+}
+
+/* The documented contract: a zeroed message is not live, so free is a
+ * no-op and the first view does not release garbage. */
+static void test_zero_init_message(void) {
+  uint8_t flat[16];
+  capnp_message_t m = {0};
+  capnp_ptr_t root;
+  memset(flat, 0, sizeof(flat));
+  capnp_store_le32(flat, 0);
+  capnp_store_le32(flat + 4, 1);
+  capnp_store_le64(flat + 8, capnp_wp_make_struct(-1, 0, 0));
+  capnp_message_free(&m);
+  CHECK(capnp_message_view_flat(&m, flat, sizeof(flat)) == CAPNP_OK,
+        "zeroed view");
+  CHECK(capnp_root(&m, &root) == CAPNP_OK, "zeroed root");
+  capnp_message_free(&m);
+  capnp_message_free(&m);
+}
+
 int main(void) {
   test_truncated_framing();
+  test_reparse_releases_storage();
+  test_zero_init_message();
   test_inline_struct_out_of_bounds();
   test_double_far_struct_out_of_bounds();
   test_double_far_list_out_of_bounds();

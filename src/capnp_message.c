@@ -5,15 +5,13 @@
 #include <string.h>
 
 #define CAPNP_WIRE_MAX_SEGMENT_WORDS ((size_t)((1u << 29) - 1u))
+#define CAPNP_MSG_READY 0xC4A7019E11D0ULL
 
-void capnp_message_init(capnp_message_t *m) {
-  memset(m, 0, sizeof(*m));
-  m->traversal_left = CAPNP_DEFAULT_TRAVERSAL_WORDS;
-  m->depth_limit = CAPNP_DEFAULT_DEPTH_LIMIT;
-}
-
-void capnp_message_free(capnp_message_t *m) {
-  if (!m)
+/* m must already be zeroed or initialized. ready is only meaningful
+ * then: the magic value owns segs and owned, and any other value does
+ * not. */
+static void release_if_live(capnp_message_t *m) {
+  if (!m || m->ready != CAPNP_MSG_READY)
     return;
   free(m->owned);
   free(m->segs);
@@ -21,6 +19,22 @@ void capnp_message_free(capnp_message_t *m) {
   m->owned_len = 0;
   m->segs = NULL;
   m->nsegs = 0;
+  m->ready = 0;
+}
+
+void capnp_message_init(capnp_message_t *m) {
+  memset(m, 0, sizeof(*m));
+  m->traversal_left = CAPNP_DEFAULT_TRAVERSAL_WORDS;
+  m->depth_limit = CAPNP_DEFAULT_DEPTH_LIMIT;
+  m->ready = CAPNP_MSG_READY;
+}
+
+void capnp_message_free(capnp_message_t *m) {
+  if (!m || m->ready != CAPNP_MSG_READY)
+    return;
+  free(m->owned);
+  free(m->segs);
+  memset(m, 0, sizeof(*m));
 }
 
 static int attach_segments(capnp_message_t *m, const capnp_segment_t *segs,
@@ -46,6 +60,7 @@ static int attach_segments(capnp_message_t *m, const capnp_segment_t *segs,
 
 int capnp_message_from_segments(capnp_message_t *m, const capnp_segment_t *segs,
                                uint32_t nsegs) {
+  release_if_live(m);
   capnp_message_init(m);
   return attach_segments(m, segs, nsegs);
 }
@@ -140,12 +155,14 @@ static int parse_flat(capnp_message_t *m, const uint8_t *data, size_t len,
 
 int capnp_message_from_flat(capnp_message_t *m, const uint8_t *data,
                             size_t len) {
+  release_if_live(m);
   capnp_message_init(m);
   return parse_flat(m, data, len, 1);
 }
 
 int capnp_message_view_flat(capnp_message_t *m, const uint8_t *data,
                             size_t len) {
+  release_if_live(m);
   capnp_message_init(m);
   return parse_flat(m, data, len, 0);
 }

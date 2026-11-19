@@ -94,7 +94,7 @@ union). Packed and canonical goldens sit next to the unpacked =.bin=.
 /* after janet_init(env): */
 capnp_janet_register(env);
 
-capnp_message_t msg;
+capnp_message_t msg = {0};
 capnp_message_view_flat(&msg, bytes, len);
 capnp_ptr_t root;
 capnp_root(&msg, &root);

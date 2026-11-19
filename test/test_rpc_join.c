@@ -119,7 +119,7 @@ typedef struct {
 
 static join_reply_t read_join_reply(const uint8_t *data, size_t len)
 {
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, ret, payload, jr;
   join_reply_t out;
   memset(&out, 0, sizeof out);
@@ -277,7 +277,7 @@ static void send_return_with_third_party_cap(capnp_rpc_conn_t *c, uint32_t qid,
 /* Whether a frame is a Release naming `id`. */
 static int is_release_of(const uint8_t *data, size_t len, uint32_t id)
 {
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, rel;
   int match = 0;
   if (capnp_message_from_flat(&m, data, len) != CAPNP_OK)
@@ -345,7 +345,7 @@ typedef struct {
 
 static return_info_t read_return(const uint8_t *data, size_t len)
 {
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, ret, payload, content;
   return_info_t out;
   memset(&out, 0, sizeof out);
@@ -523,7 +523,7 @@ static void send_accept(capnp_rpc_conn_t *c, uint32_t qid, uint64_t nonce)
 static void read_l3(const uint8_t *data, size_t len, uint32_t *ansid,
                     int *is_exception, int *has_cap)
 {
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, ret, payload, content;
   *ansid = 0;
   *is_exception = 1;
@@ -674,7 +674,7 @@ int main(void)
   send_disembargo(&c, 0, 12345);
   CHECK(out.n == 1, "disembargo echoed");
   {
-    capnp_message_t m;
+    capnp_message_t m = {0};
     capnp_ptr_t root, dis;
     CHECK(capnp_message_from_flat(&m, out.data[0], out.len[0]) == CAPNP_OK, "reply");
     CHECK(capnp_root(&m, &root) == CAPNP_OK, "reply root");

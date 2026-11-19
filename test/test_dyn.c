@@ -105,7 +105,7 @@ static int open_root(const char *req_path, const char *msg_path, capnp_dyn_t **d
 
 static int cmd_read(const char *req, const char *msg) {
   capnp_dyn_t *d = NULL;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, inner, matrix, row;
   int flag = 1;
   int64_t tiny = 0, wide = 0, n = 0;
@@ -115,7 +115,7 @@ static int cmd_read(const char *req, const char *msg) {
   size_t len = 0;
   uint8_t *empty_msg = NULL;
   size_t empty_len = 0;
-  capnp_message_t em;
+  capnp_message_t em = {0};
   capnp_ptr_t eroot;
 
   if (open_root(req, msg, &d, &m, &root))
@@ -183,7 +183,7 @@ static int cmd_edges(const char *conform_req, const char *parity_req) {
   capnp_dyn_t *dc = NULL, *dp = NULL;
   uint8_t *reqb = NULL, *msg = NULL;
   size_t rn = 0, mn = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, buckets, b0, scores, pts, pt, raw_ptr;
   uint64_t u64v = 0;
   double f64v = 0.0;
@@ -393,7 +393,7 @@ static int cmd_edges(const char *conform_req, const char *parity_req) {
 static int cmd_encode(const char *req, const char *msg, const char *out,
                       int json) {
   capnp_dyn_t *d = NULL;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root;
   char *text = NULL;
   size_t n = 0;
@@ -443,7 +443,7 @@ static int cmd_decode(const char *req, const char *text_path, const char *out,
 static int cmd_canon(const char *msg_path, const char *out) {
   uint8_t *msg = NULL, *can = NULL;
   size_t mn = 0, cn = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   if (load_file(msg_path, &msg, &mn))
     return 1;
   if (capnp_message_from_flat(&m, msg, mn) != CAPNP_OK) {
@@ -466,7 +466,7 @@ static int cmd_canon(const char *msg_path, const char *out) {
 
 static int cmd_grow(const char *req, const char *msg_path) {
   capnp_dyn_t *d = NULL;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root;
   char *text = NULL;
   char *json = NULL;

@@ -114,7 +114,7 @@ int main(void)
   CHECK(capnp_rpc_is_answered(&client, q), "bootstrap answered");
   CHECK(!capnp_rpc_is_failed(&client, q), "bootstrap succeeded");
   {
-    capnp_message_t m;
+    capnp_message_t m = {0};
     capnp_ptr_t content;
     CHECK(capnp_rpc_answer_content(&client, q, &m, &content) == CAPNP_OK,
           "bootstrap content");
@@ -132,7 +132,7 @@ int main(void)
   CHECK(capnp_rpc_is_answered(&client, q), "call answered");
   CHECK(!capnp_rpc_is_failed(&client, q), "call succeeded");
   {
-    capnp_message_t m;
+    capnp_message_t m = {0};
     capnp_ptr_t content;
     CHECK(capnp_rpc_answer_content(&client, q, &m, &content) == CAPNP_OK,
           "call content");

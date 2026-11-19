@@ -46,7 +46,7 @@ visible, or =-Djanet=enabled=.
 #+begin_src c
 #include <capnp-janet/capnp_message.h>
 
-capnp_message_t msg;
+capnp_message_t msg = {0};
 capnp_message_view_flat(&msg, bytes, len);
 capnp_ptr_t root;
 capnp_root(&msg, &root);

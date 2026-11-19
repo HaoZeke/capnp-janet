@@ -171,7 +171,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	{
-		capnp_message_t m;
+		capnp_message_t m = {0};
 		capnp_ptr_t content;
 		int64_t sum;
 		if (capnp_rpc_answer_content(&conn, qcall, &m, &content) != CAPNP_OK) {

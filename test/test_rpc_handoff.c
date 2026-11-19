@@ -135,7 +135,7 @@ static void tell_where_to_go(capnp_rpc_conn_t *writer, capnp_rpc_conn_t *reader,
 /* Whether the answer to `qid` arrived carrying a capability. */
 static int answered_with_cap(capnp_rpc_conn_t *c, uint32_t qid)
 {
-  capnp_message_t held;
+  capnp_message_t held = {0};
   capnp_ptr_t content;
   int ok;
   if (!capnp_rpc_is_answered(c, qid) || capnp_rpc_is_failed(c, qid))

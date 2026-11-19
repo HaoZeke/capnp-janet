@@ -19,7 +19,7 @@ static void test_list_bool_roundtrip(void) {
   uint8_t bits[10] = {1, 0, 1, 0, 1, 0, 0, 0, 0, 1};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list;
   uint32_t i;
 
@@ -50,7 +50,7 @@ static void test_list_void_length(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list;
   capnp_ptr_t el;
 
@@ -78,7 +78,7 @@ static void test_list_void_empty(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list;
 
   capnp_builder_init(&b);
@@ -102,7 +102,7 @@ static void test_list_upgrade_prim(void) {
   uint32_t items[] = {100, 200};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list, el;
 
   capnp_builder_init(&b);
@@ -132,7 +132,7 @@ static void test_list_upgrade_ptr(void) {
   const char *items[] = {"elem"};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list, el;
   const char *s;
   size_t n;
@@ -162,7 +162,7 @@ static void test_list_upgrade_bit_refused(void) {
   uint8_t bits[] = {1, 0, 1};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list, el;
 
   capnp_builder_init(&b);
@@ -186,7 +186,7 @@ static void test_list_downgrade_composite(void) {
   capnp_bptr_t first;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list, el, q;
   const char *s;
   size_t n;
@@ -235,7 +235,7 @@ static void test_list_upgrade_u8(void) {
   uint8_t items[] = {1, 2, 3, 4, 5};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list, el;
 
   capnp_builder_init(&b);

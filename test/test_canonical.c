@@ -38,7 +38,7 @@ static void test_truncate_defaults(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL, *canon = NULL, *framed = NULL;
   size_t flen = 0, clen = 0, frlen = 0;
-  capnp_message_t m, m2;
+  capnp_message_t m = {0}, m2 = {0};
   capnp_ptr_t r;
 
   /* Struct with 2 data words but only first used; second stays zero → truncate. */
@@ -71,7 +71,7 @@ static void test_addressbook_canonical_readable(void) {
   char path[1024];
   uint8_t *bin = NULL, *canon = NULL, *framed = NULL;
   size_t blen = 0, clen = 0, frlen = 0;
-  capnp_message_t m, m2;
+  capnp_message_t m = {0}, m2 = {0};
   capnp_ptr_t book, people, alice;
   const char *s;
   size_t n;

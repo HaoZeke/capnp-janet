@@ -197,7 +197,7 @@ static int resolve_promised_answer(capnp_rpc_conn_t *c,
                                    const capnp_ptr_t *promised)
 {
   capnp_rpc_answer_t *a;
-  capnp_message_t stored;
+  capnp_message_t stored = {0};
   capnp_ptr_t root, ret, payload, cursor, table, desc, ops;
   uint32_t qid;
   int i, n, eid = -1;
@@ -1069,7 +1069,7 @@ int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id)
 int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id)
 {
   capnp_rpc_question_t *q = question_find(c, question_id);
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, ret, payload, content, table, desc;
   int id = -1;
 
@@ -1379,7 +1379,7 @@ int capnp_rpc_pending_provisions(capnp_rpc_conn_t *c, uint64_t *out, int cap)
 
 int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
 {
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, body;
   int rc = CAPNP_OK;
   uint16_t which;

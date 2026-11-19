@@ -15,7 +15,7 @@ static void test_far_pointer_write_read(void) {
   capnp_bptr_t root, body, kid_slot, kid;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, k;
   uint64_t slot_w;
 
@@ -50,7 +50,7 @@ static void test_far_pointer_write_read(void) {
   {
     uint8_t *copy = NULL;
     size_t clen = 0;
-    capnp_message_t m2;
+    capnp_message_t m2 = {0};
     capnp_ptr_t r2, k2;
     CHECK(capnp_message_copy_flat(&m, &copy, &clen) == CAPNP_OK, "copy_flat");
     CHECK(capnp_message_from_flat(&m2, copy, clen) == CAPNP_OK, "reparse");
@@ -70,7 +70,7 @@ static void test_far_text(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r;
   const char *s;
   size_t n;
@@ -100,7 +100,7 @@ static void test_far_text(void) {
 static void test_double_far_fixture_read(void) {
   uint8_t seg0[8], seg1[16], seg2[8];
   capnp_segment_t segs[3];
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r;
   uint8_t *framed = NULL;
   size_t framed_len = 0;
@@ -138,7 +138,7 @@ static void test_double_far_builder_emit(void) {
   uint64_t w;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, k;
 
   capnp_builder_init_sized(&b, 3);

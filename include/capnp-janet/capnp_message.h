@@ -22,6 +22,12 @@ typedef struct capnp_message {
   size_t owned_len;
   uint64_t traversal_left;
   int depth_limit;
+  /* capnp_message_init stores a magic value here. from_flat, view_flat,
+   * and from_segments release the previous buffer when they see it, so
+   * a message can be parsed again without leaking. The struct must be
+   * zero-initialized, or passed through capnp_message_init, before any
+   * of those calls: a zero ready means the message is not live. */
+  uint64_t ready;
 } capnp_message_t;
 
 /* Resolved object handle (struct or list). Never a far landing pad. */

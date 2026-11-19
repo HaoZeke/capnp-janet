@@ -15,7 +15,7 @@ static void test_list_u32(void) {
   uint32_t items[] = {1, 2, 100};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list;
 
   capnp_builder_init(&b);
@@ -77,7 +77,7 @@ static void test_data_blob(void) {
   const uint8_t blob[] = {0xde, 0xad, 0xbe, 0xef, 0x00, 0x01};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r;
   const uint8_t *out;
   size_t n;
@@ -104,7 +104,7 @@ static void test_list_f64(void) {
   double items[] = {1.5, -2.0, 3.25};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list;
 
   capnp_builder_init(&b);
@@ -130,7 +130,7 @@ static void test_f32(void) {
   float items[] = {1.5f, -2.0f, 3.25f};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list;
 
   capnp_builder_init(&b);
@@ -157,7 +157,7 @@ static void test_copy_flat(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL, *copy = NULL;
   size_t flen = 0, clen = 0;
-  capnp_message_t m, m2;
+  capnp_message_t m = {0}, m2 = {0};
   capnp_ptr_t r;
 
   capnp_builder_init(&b);
@@ -182,7 +182,7 @@ static void test_ptr_list_edges(void) {
   capnp_bptr_t root, body, first;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t decoded, list;
 
   capnp_builder_init_sized(&b, 1);
@@ -223,7 +223,7 @@ static void test_struct_u64(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r;
   const uint64_t want = 0x1122334455667788ULL;
 
@@ -258,7 +258,7 @@ static void test_struct_offset_overflow(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r;
 
   capnp_builder_init(&b);
@@ -289,7 +289,7 @@ static void test_list_u64(void) {
   uint64_t items[] = {1ULL, 0x100000001ULL, 0xdeadbeefcafebabeULL};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list;
 
   capnp_builder_init(&b);

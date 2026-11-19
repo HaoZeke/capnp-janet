@@ -890,7 +890,7 @@ static int emit_pointer_default(FILE *out, const char *sname, const char *fname,
   capnp_ptr_t value, child;
   capnp_builder_t b;
   capnp_bptr_t root;
-  capnp_message_t msg;
+  capnp_message_t msg = {0};
   uint8_t *flat = NULL, *canon = NULL;
   size_t flen = 0, clen = 0;
   uint16_t which;
@@ -1564,7 +1564,7 @@ static int write_module(const char *filename, const capnp_ptr_t *nodes,
 int main(void) {
   size_t len = 0;
   char *buf = read_all_stdin(&len);
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, nodes, req_files;
 
   if (!buf || len == 0) {

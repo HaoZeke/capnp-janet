@@ -33,7 +33,7 @@ static void test_roundtrip_demo(void) {
   CHECK(capnp_builder_serialize(&b, &flat, &flat_len) == CAPNP_OK, "serialize");
   capnp_builder_free(&b);
 
-  capnp_message_t m;
+  capnp_message_t m = {0};
   CHECK(capnp_message_from_flat(&m, flat, flat_len) == CAPNP_OK, "from_flat");
   free(flat);
 
@@ -80,7 +80,7 @@ static void test_view_flat(void) {
   capnp_builder_serialize(&b, &flat, &flat_len);
   capnp_builder_free(&b);
 
-  capnp_message_t m;
+  capnp_message_t m = {0};
   CHECK(capnp_message_view_flat(&m, flat, flat_len) == CAPNP_OK, "view");
   capnp_ptr_t r;
   CHECK(capnp_root(&m, &r) == CAPNP_OK, "root");
@@ -115,7 +115,7 @@ static void test_composite_list(void) {
   CHECK(capnp_builder_serialize(&b, &flat, &flat_len) == CAPNP_OK, "ser");
   capnp_builder_free(&b);
 
-  capnp_message_t m;
+  capnp_message_t m = {0};
   CHECK(capnp_message_from_flat(&m, flat, flat_len) == CAPNP_OK, "flat");
   free(flat);
   capnp_ptr_t r, list, e0, e1p;
@@ -151,7 +151,7 @@ static void test_schema_evolution_default(void) {
             flat[14] == 0 && flat[15] == 0,
         "empty struct B=-1");
 
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_message_from_flat(&m, flat, flat_len);
   free(flat);
   capnp_ptr_t r;
@@ -163,7 +163,7 @@ static void test_schema_evolution_default(void) {
 static void test_narrow_scalar_builders(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r;
   uint8_t *flat = NULL;
   size_t flat_len = 0;

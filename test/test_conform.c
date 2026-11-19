@@ -124,7 +124,7 @@ static void check_empty(const capnp_ptr_t *root) {
 static int read_mode(const char *path, int empty) {
   uint8_t *buf = NULL;
   size_t len = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root;
   if (load_file(path, &buf, &len)) {
     fprintf(stderr, "cannot read %s\n", path);
@@ -239,7 +239,7 @@ static int write_canon(const char *path, int mode) {
   capnp_builder_t b;
   uint8_t *flat = NULL, *can = NULL;
   size_t flen = 0, clen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   FILE *f;
   int rc;
 

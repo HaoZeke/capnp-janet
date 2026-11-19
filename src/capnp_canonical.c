@@ -319,7 +319,7 @@ int capnp_canonicalize(const capnp_message_t *m, uint8_t **out,
                        size_t *out_len) {
   capnp_builder_t b;
   capnp_ptr_t root;
-  capnp_message_t mut;
+  capnp_message_t mut = {0};
   size_t root_word, nbytes;
   uint32_t root_seg;
   uint8_t *buf;
@@ -331,6 +331,9 @@ int capnp_canonicalize(const capnp_message_t *m, uint8_t **out,
 
   mut = *m;
   mut.owned = NULL;
+  /* A copy is a view. Leaving the magic set would make a later free
+   * of this stack slot release the source message. */
+  mut.ready = 0;
   {
     int rc = capnp_root(&mut, &root);
     if (rc)

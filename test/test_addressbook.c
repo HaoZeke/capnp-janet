@@ -120,7 +120,7 @@ static void test_builder_alice_bob(void) {
   capnp_bptr_t people0, phones0, phones1;
   uint8_t *flat = NULL;
   size_t flat_len = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t book;
 
   capnp_builder_init(&b);
@@ -213,7 +213,7 @@ static void test_golden_alice_bob(void) {
   char path[1024];
   uint8_t *flat = NULL;
   size_t flat_len = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t book;
 
   if (!src || !src[0])
@@ -238,7 +238,7 @@ static void test_self_employed_empty_phones(void) {
   capnp_bptr_t pe, ph;
   uint8_t *flat = NULL;
   size_t flat_len = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t book, people, p, phones;
   const char *s;
   size_t n;

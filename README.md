@@ -136,7 +136,7 @@ or `-Djanet=enabled`.
 ```c
 #include <capnp-janet/capnp_message.h>
 
-capnp_message_t msg;
+capnp_message_t msg = {0};
 capnp_message_view_flat(&msg, bytes, len);
 capnp_ptr_t root;
 capnp_root(&msg, &root);
@@ -145,6 +145,12 @@ capnp_get_text(&root, /*ptr*/0, &s, &n);
 ```
 
 Link `libcapnp_janet` (pkg-config: `capnp-janet`).
+
+A `capnp_message_t` has to be zero-initialized, as above, or passed to
+`capnp_message_init` before `from_flat`, `view_flat`, `from_segments`,
+or `capnp_message_free`. Those calls free the previous buffer when the
+message is already live, so parsing into the same struct again does not
+leak. A zero `ready` field means the struct owns nothing.
 
 ### Janet
 

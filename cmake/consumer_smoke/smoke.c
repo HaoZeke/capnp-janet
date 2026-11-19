@@ -12,7 +12,7 @@ int main(void) {
 	capnp_bptr_t root, body;
 	uint8_t *flat = NULL;
 	size_t flat_len = 0;
-	capnp_message_t msg;
+	capnp_message_t msg = {0};
 	capnp_ptr_t r;
 	const char *s = NULL;
 	size_t sl = 0;

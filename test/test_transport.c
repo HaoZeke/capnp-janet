@@ -83,7 +83,7 @@ static void client_add(capnp_link_t *link, const char *what) {
             !capnp_rpc_is_failed(&link->conn, qcall),
         "call ok");
   {
-    capnp_message_t m;
+    capnp_message_t m = {0};
     capnp_ptr_t content;
     check(capnp_rpc_answer_content(&link->conn, qcall, &m, &content) == CAPNP_OK,
           "content");

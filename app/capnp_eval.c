@@ -315,6 +315,7 @@ static int rebuild_message(const capnp_message_t *src, size_t seg_words,
   int rc;
 
   mut.owned = NULL;
+  mut.ready = 0;
   if (capnp_root(&mut, &root) != CAPNP_OK)
     return -1;
   if (single_flat) {
@@ -438,6 +439,7 @@ static int write_converted_message(const capnp_dyn_t *dyn,
     size_t tlen = 0;
     int rc;
     mut.owned = NULL;
+    mut.ready = 0;
     if (!dyn || !type_name || capnp_root(&mut, &root) != CAPNP_OK)
       return -1;
     rc = pretty ? capnp_dyn_encode_text(dyn, type_name, &root, &text, &tlen)
@@ -457,6 +459,7 @@ static int write_converted_message(const capnp_dyn_t *dyn,
     size_t tlen = 0;
     int rc;
     mut.owned = NULL;
+    mut.ready = 0;
     if (!dyn || !type_name || capnp_root(&mut, &root) != CAPNP_OK)
       return -1;
     rc = pretty ? capnp_dyn_encode_json(dyn, type_name, &root, &text, &tlen)
