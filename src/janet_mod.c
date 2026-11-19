@@ -3,6 +3,7 @@
  */
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_message.h>
+#include <capnp-janet/capnp_rpc.h>
 
 #include <janet.h>
 #include <limits.h>
@@ -1317,6 +1318,185 @@ static void ptr_tostring(void *p, JanetBuffer *buffer) {
   }
 }
 
+typedef struct {
+  uint8_t *data;
+  size_t len;
+} rpc_frame;
+
+typedef struct {
+  capnp_rpc_conn_t conn;
+  rpc_frame *frames;
+  uint32_t nframes;
+  uint32_t cap_frames;
+} rpc_conn_wrap;
+
+static void rpc_free_frames(rpc_conn_wrap *w) {
+  uint32_t i;
+  for (i = 0; i < w->nframes; i++)
+    free(w->frames[i].data);
+  free(w->frames);
+  w->frames = NULL;
+  w->nframes = 0;
+  w->cap_frames = 0;
+}
+
+static int rpc_gc(void *p, size_t len) {
+  (void)len;
+  rpc_free_frames((rpc_conn_wrap *)p);
+  return 0;
+}
+
+static const JanetAbstractType rpc_type = {
+    .name = "capnp/rpc-conn",
+    .gc = rpc_gc,
+};
+
+static rpc_conn_wrap *get_rpc(Janet *argv, int32_t n) {
+  return (rpc_conn_wrap *)janet_getabstract(argv, n, &rpc_type);
+}
+
+static int rpc_send_cb(void *ctx, const uint8_t *data, size_t len) {
+  rpc_conn_wrap *w = (rpc_conn_wrap *)ctx;
+  uint8_t *copy;
+  if (w->nframes == w->cap_frames) {
+    uint32_t ncap = w->cap_frames ? w->cap_frames * 2u : 4u;
+    rpc_frame *p = (rpc_frame *)realloc(w->frames, (size_t)ncap * sizeof(*p));
+    if (!p)
+      return -1;
+    w->frames = p;
+    w->cap_frames = ncap;
+  }
+  copy = (uint8_t *)malloc(len ? len : 1);
+  if (!copy)
+    return -1;
+  if (len)
+    memcpy(copy, data, len);
+  w->frames[w->nframes].data = copy;
+  w->frames[w->nframes].len = len;
+  w->nframes++;
+  return 0;
+}
+
+static Janet cfun_rpc_connect(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w;
+  janet_fixarity(argc, 0);
+  (void)argv;
+  w = janet_abstract(&rpc_type, sizeof(*w));
+  memset(w, 0, sizeof(*w));
+  capnp_rpc_init(&w->conn, rpc_send_cb, w);
+  return janet_wrap_abstract(w);
+}
+
+static Janet cfun_rpc_flush(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  JanetArray *arr;
+  uint32_t i;
+  janet_fixarity(argc, 1);
+  arr = janet_array((int32_t)w->nframes);
+  for (i = 0; i < w->nframes; i++) {
+    JanetBuffer *buf = janet_buffer((int32_t)w->frames[i].len);
+    janet_buffer_push_bytes(buf, w->frames[i].data, (int32_t)w->frames[i].len);
+    janet_array_push(arr, janet_wrap_buffer(buf));
+    free(w->frames[i].data);
+  }
+  w->nframes = 0;
+  return janet_wrap_array(arr);
+}
+
+static Janet cfun_rpc_handle(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  JanetByteView bytes;
+  janet_fixarity(argc, 2);
+  bytes = janet_getbytes(argv, 1);
+  if (capnp_rpc_handle(&w->conn, bytes.bytes, (size_t)bytes.len) != 0)
+    janet_panic("capnp/rpc-handle: rejected frame");
+  return janet_wrap_nil();
+}
+
+static Janet cfun_rpc_bootstrap(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  uint32_t q;
+  janet_fixarity(argc, 1);
+  q = capnp_rpc_send_bootstrap(&w->conn);
+  if (q == (uint32_t)-1)
+    janet_panic("capnp/rpc-bootstrap: question table full");
+  return janet_wrap_number((double)q);
+}
+
+typedef struct {
+  Janet fill;
+  uint16_t dwords;
+  uint16_t pwords;
+} rpc_fill;
+
+static void rpc_fill_cb(void *ctx, const capnp_bptr_t *params) {
+  rpc_fill *f = (rpc_fill *)ctx;
+  Janet ptr = make_builder_ptr(janet_wrap_nil(), params, f->dwords, f->pwords);
+  janet_call(janet_unwrap_function(f->fill), 1, &ptr);
+}
+
+static Janet cfun_rpc_call(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  uint32_t cap, q;
+  uint64_t iface;
+  uint16_t method, dwords, pwords;
+  rpc_fill fill;
+  janet_arity(argc, 6, 7);
+  cap = (uint32_t)janet_getinteger(argv, 1);
+  iface = janet_getuinteger64(argv, 2);
+  method = (uint16_t)janet_getinteger(argv, 3);
+  dwords = (uint16_t)janet_getinteger(argv, 4);
+  pwords = (uint16_t)janet_getinteger(argv, 5);
+  fill.fill = argc == 7 ? argv[6] : janet_wrap_nil();
+  fill.dwords = dwords;
+  fill.pwords = pwords;
+  if (argc == 7)
+    janet_checktypes(argv[6], JANET_TFLAG_CALLABLE);
+  q = capnp_rpc_send_call(&w->conn, cap, iface, method, dwords, pwords,
+                          argc == 7 ? rpc_fill_cb : NULL,
+                          argc == 7 ? &fill : NULL);
+  if (q == (uint32_t)-1)
+    janet_panic("capnp/rpc-call: question table full");
+  return janet_wrap_number((double)q);
+}
+
+static Janet cfun_rpc_answered(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  janet_fixarity(argc, 2);
+  return janet_wrap_boolean(
+      capnp_rpc_is_answered(&w->conn, (uint32_t)janet_getinteger(argv, 1)));
+}
+
+static Janet cfun_rpc_failed(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  janet_fixarity(argc, 2);
+  return janet_wrap_boolean(
+      capnp_rpc_is_failed(&w->conn, (uint32_t)janet_getinteger(argv, 1)));
+}
+
+static Janet cfun_rpc_answer(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  capnp_msg_wrap *msg;
+  capnp_ptr_t content;
+  Janet msg_abs;
+  janet_fixarity(argc, 2);
+  msg = janet_abstract(&msg_type, sizeof(*msg));
+  memset(msg, 0, sizeof(*msg));
+  if (capnp_rpc_answer_content(&w->conn, (uint32_t)janet_getinteger(argv, 1),
+                               &msg->msg, &content) != CAPNP_OK)
+    janet_panic("capnp/rpc-answer: no results");
+  msg_abs = janet_wrap_abstract(msg);
+  return make_ptr(msg_abs, &content);
+}
+
+static Janet cfun_rpc_finish(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  janet_fixarity(argc, 2);
+  if (capnp_rpc_send_finish(&w->conn, (uint32_t)janet_getinteger(argv, 1)) != 0)
+    janet_panic("capnp/rpc-finish: send failed");
+  return janet_wrap_nil();
+}
+
 static const JanetReg capnp_cfuns[] = {
     {"message-from-buffer", cfun_message_from_buffer,
      "(capnp/message-from-buffer buf)\n\n"
@@ -1453,6 +1633,27 @@ static const JanetReg capnp_cfuns[] = {
      "(capnp/set-list-text body pointer-index values)"},
     {"set-list-void", cfun_set_list_void,
      "(capnp/set-list-void body pointer-index count)"},
+    {"rpc-connect", cfun_rpc_connect,
+     "(capnp/rpc-connect)\n\n"
+     "Client vat. Outgoing frames queue until rpc-flush."},
+    {"rpc-flush", cfun_rpc_flush,
+     "(capnp/rpc-flush conn)\n\n"
+     "Array of framed messages queued since the last flush."},
+    {"rpc-handle", cfun_rpc_handle,
+     "(capnp/rpc-handle conn frame)\n\nFeed one framed reply from the peer."},
+    {"rpc-bootstrap", cfun_rpc_bootstrap,
+     "(capnp/rpc-bootstrap conn)\n\nSend Bootstrap. Returns the question id."},
+    {"rpc-call", cfun_rpc_call,
+     "(capnp/rpc-call conn cap-id interface-id method-id data-words "
+     "pointer-words &opt fill)\n\n"
+     "fill receives the parameter struct and must not keep it."},
+    {"rpc-answered?", cfun_rpc_answered,
+     "(capnp/rpc-answered? conn question-id)"},
+    {"rpc-failed?", cfun_rpc_failed, "(capnp/rpc-failed? conn question-id)"},
+    {"rpc-answer", cfun_rpc_answer,
+     "(capnp/rpc-answer conn question-id)\n\nResults struct of an answer."},
+    {"rpc-finish", cfun_rpc_finish,
+     "(capnp/rpc-finish conn question-id)\n\nSend Finish for a question."},
     {"build-message", cfun_build_message,
      "(capnp/build-message dwords pwords fields)\n\n"
      "Build a framed root struct. fields: array of "

@@ -238,8 +238,9 @@ docs/orgmode/  architecture notes
 The supported surface includes readers, arena builders, packed and canonical
 codecs, generated typed helpers (including struct and list pointer
 defaults), the C dynamic API in `capnp_dyn.h` (text and JSON over a compiled
-`CodeGeneratorRequest`), and the C RPC vat through level 4. It does not
-expose C++ orphan ownership or Janet wrappers for the C RPC vat. Calls
+`CodeGeneratorRequest`), and the C RPC vat through level 4. Janet code can drive that vat with `capnp/rpc-connect` and the
+`rpc-*` calls. It does not
+expose C++ orphan ownership. Calls
 outside the documented list-evolution matrix return a kind error or the
 supplied default.
 
