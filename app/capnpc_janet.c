@@ -13,6 +13,8 @@
  * Node / Field layouts match /usr/include/capnp/schema.capnp
  * (capnp compile -ocapnp).
  */
+#include <capnp-janet/capnp_builder.h>
+#include <capnp-janet/capnp_canonical.h>
 #include <capnp-janet/capnp_message.h>
 
 #include <ctype.h>
@@ -551,6 +553,244 @@ static void emit_interface(FILE *out, const capnp_ptr_t *node,
   fprintf(out, "})\n");
 }
 
+static int type_is_parameter(const capnp_ptr_t *typ, uint64_t *scope,
+                             uint16_t *index) {
+  if (capnp_get_u16(typ, 0, 0xffff) != TYPE_ANY_POINTER)
+    return 0;
+  /* AnyPointer.which: 0 unconstrained, 1 parameter, 2 implicit method. */
+  if (capnp_get_u16(typ, 8, 0xffff) != 1)
+    return 0;
+  if (scope)
+    *scope = capnp_get_u64(typ, 16, 0);
+  if (index)
+    *index = capnp_get_u16(typ, 10, 0);
+  return 1;
+}
+
+static int parameter_name(const capnp_ptr_t *nodes, uint64_t scope,
+                          uint16_t index, char *out, size_t outn) {
+  capnp_ptr_t node, params, param;
+  if (!node_by_id(nodes, scope, &node))
+    return 0;
+  if (capnp_getp(&node, 5, &params) != CAPNP_OK || params.kind != CAPNP_PK_LIST)
+    return 0;
+  if (capnp_list_getp(&params, index, &param) != CAPNP_OK)
+    return 0;
+  janet_ident(get_text(&param, 0), out, outn);
+  return 1;
+}
+
+static void emit_parameters(FILE *out, const capnp_ptr_t *node,
+                            const char *sname) {
+  capnp_ptr_t params;
+  uint32_t i, n;
+  if (!capnp_get_bool(node, 288, 0))
+    return;
+  if (capnp_getp(node, 5, &params) != CAPNP_OK || params.kind != CAPNP_PK_LIST)
+    return;
+  n = capnp_list_len(&params);
+  fprintf(out, "(def %s-generic true)\n", sname);
+  fprintf(out, "(def %s-parameters @[", sname);
+  for (i = 0; i < n; i++) {
+    capnp_ptr_t param;
+    char name[128];
+    if (capnp_list_getp(&params, i, &param) != CAPNP_OK)
+      continue;
+    janet_ident(get_text(&param, 0), name, sizeof(name));
+    fprintf(out, " \"%s\"", name);
+  }
+  fprintf(out, "])\n");
+}
+
+static void emit_type_token(FILE *out, const capnp_ptr_t *typ,
+                            const capnp_ptr_t *nodes) {
+  uint64_t scope = 0;
+  uint16_t index = 0;
+  char pname[128];
+  if (type_is_parameter(typ, &scope, &index) &&
+      parameter_name(nodes, scope, index, pname, sizeof(pname))) {
+    fprintf(out, "\"%s\"", pname);
+    return;
+  }
+  fprintf(out, ":%s", type_kw(capnp_get_u16(typ, 0, 0xffff)));
+}
+
+/* Brand.scopes is pointer 0. A scope's which is at byte 8: 0 bind, 1 inherit.
+ * Bindings are pointer 0; a binding's which is at byte 0: 0 unbound, 1 type. */
+static void emit_brand(FILE *out, const capnp_ptr_t *typ,
+                       const capnp_ptr_t *nodes) {
+  capnp_ptr_t brand, scopes;
+  uint16_t tw;
+  uint32_t i, n;
+  tw = capnp_get_u16(typ, 0, 0xffff);
+  if (tw != TYPE_STRUCT && tw != TYPE_ENUM && tw != TYPE_INTERFACE)
+    return;
+  if (capnp_getp(typ, 0, &brand) != CAPNP_OK || brand.kind != CAPNP_PK_STRUCT)
+    return;
+  if (capnp_getp(&brand, 0, &scopes) != CAPNP_OK || scopes.kind != CAPNP_PK_LIST)
+    return;
+  n = capnp_list_len(&scopes);
+  if (n == 0)
+    return;
+  fprintf(out, " :brand @[");
+  for (i = 0; i < n; i++) {
+    capnp_ptr_t scope, binds;
+    uint16_t which;
+    uint32_t j, nb;
+    if (capnp_list_getp(&scopes, i, &scope) != CAPNP_OK)
+      continue;
+    which = capnp_get_u16(&scope, 8, 0xffff);
+    fprintf(out, "{:scope (int/u64 \"0x%016llx\")",
+            (unsigned long long)capnp_get_u64(&scope, 0, 0));
+    if (which == 1) {
+      fprintf(out, " :inherit true}");
+      continue;
+    }
+    fprintf(out, " :bind @[");
+    if (capnp_getp(&scope, 0, &binds) == CAPNP_OK &&
+        binds.kind == CAPNP_PK_LIST) {
+      nb = capnp_list_len(&binds);
+      for (j = 0; j < nb; j++) {
+        capnp_ptr_t binding, btype;
+        fprintf(out, " ");
+        if (capnp_list_getp(&binds, j, &binding) != CAPNP_OK) {
+          fprintf(out, ":unbound");
+          continue;
+        }
+        if (capnp_get_u16(&binding, 0, 0xffff) == 0 ||
+            capnp_getp(&binding, 0, &btype) != CAPNP_OK ||
+            btype.kind != CAPNP_PK_STRUCT) {
+          fprintf(out, ":unbound");
+          continue;
+        }
+        emit_type_token(out, &btype, nodes);
+      }
+    }
+    fprintf(out, "]}");
+  }
+  fprintf(out, "]");
+}
+
+static const char *bound_getter(uint16_t which) {
+  switch (which) {
+  case TYPE_BOOL:
+    return "get-bool";
+  case TYPE_INT8:
+    return "get-i8";
+  case TYPE_UINT8:
+    return "get-u8";
+  case TYPE_INT16:
+    return "get-i16";
+  case TYPE_UINT16:
+  case TYPE_ENUM:
+    return "get-u16";
+  case TYPE_INT32:
+    return "get-i32";
+  case TYPE_UINT32:
+    return "get-u32";
+  case TYPE_INT64:
+    return "get-i64";
+  case TYPE_UINT64:
+    return "get-u64";
+  case TYPE_FLOAT32:
+    return "get-f32";
+  case TYPE_FLOAT64:
+    return "get-f64";
+  case TYPE_TEXT:
+    return "get-text";
+  case TYPE_DATA:
+    return "get-data";
+  default:
+    return NULL;
+  }
+}
+
+/* A use site Box(Text) binds Box.T. Emit a getter for each parameter field
+ * using the bound type, so the caller does not re-decode the brand. */
+static void emit_brand_accessors(FILE *out, const char *parent,
+                                 const char *field, const capnp_ptr_t *typ,
+                                 const capnp_ptr_t *nodes) {
+  capnp_ptr_t target, params, fields, brand, scopes;
+  uint64_t type_id;
+  uint32_t i, nf, nbind = 0;
+  capnp_ptr_t binds;
+  int have_binds = 0;
+  if (capnp_get_u16(typ, 0, 0xffff) != TYPE_STRUCT)
+    return;
+  type_id = capnp_get_u64(typ, 8, 0);
+  if (!node_by_id(nodes, type_id, &target))
+    return;
+  if (!capnp_get_bool(&target, 288, 0))
+    return;
+  if (capnp_getp(typ, 0, &brand) != CAPNP_OK || brand.kind != CAPNP_PK_STRUCT)
+    return;
+  if (capnp_getp(&brand, 0, &scopes) != CAPNP_OK || scopes.kind != CAPNP_PK_LIST)
+    return;
+  for (i = 0; i < capnp_list_len(&scopes); i++) {
+    capnp_ptr_t scope;
+    if (capnp_list_getp(&scopes, i, &scope) != CAPNP_OK)
+      continue;
+    if (capnp_get_u64(&scope, 0, 0) != type_id)
+      continue;
+    if (capnp_get_u16(&scope, 8, 0xffff) != 0)
+      continue;
+    if (capnp_getp(&scope, 0, &binds) == CAPNP_OK && binds.kind == CAPNP_PK_LIST) {
+      have_binds = 1;
+      nbind = capnp_list_len(&binds);
+    }
+  }
+  if (!have_binds)
+    return;
+  if (capnp_getp(&target, 5, &params) != CAPNP_OK || params.kind != CAPNP_PK_LIST)
+    return;
+  if (capnp_getp(&target, 3, &fields) != CAPNP_OK || fields.kind != CAPNP_PK_LIST)
+    return;
+  nf = capnp_list_len(&fields);
+  for (i = 0; i < nf; i++) {
+    capnp_ptr_t f, ftype;
+    uint64_t scope = 0;
+    uint16_t pindex = 0;
+    uint32_t offset;
+    capnp_ptr_t binding, btype;
+    uint16_t bwhich;
+    const char *getter;
+    char fname[128];
+    if (capnp_list_getp(&fields, i, &f) != CAPNP_OK)
+      continue;
+    if (capnp_get_u16(&f, 8, 0xffff) != FIELD_SLOT)
+      continue;
+    if (capnp_getp(&f, 2, &ftype) != CAPNP_OK || ftype.kind != CAPNP_PK_STRUCT)
+      continue;
+    if (!type_is_parameter(&ftype, &scope, &pindex) || scope != type_id)
+      continue;
+    if (pindex >= nbind || capnp_list_getp(&binds, pindex, &binding) != CAPNP_OK)
+      continue;
+    if (capnp_get_u16(&binding, 0, 0xffff) != 1)
+      continue;
+    if (capnp_getp(&binding, 0, &btype) != CAPNP_OK ||
+        btype.kind != CAPNP_PK_STRUCT)
+      continue;
+    bwhich = capnp_get_u16(&btype, 0, 0xffff);
+    getter = bound_getter(bwhich);
+    if (!getter)
+      continue;
+    janet_field_ident(get_text(&f, 0), fname, sizeof(fname));
+    offset = capnp_get_u32(&f, 4, 0);
+    if (bwhich == TYPE_TEXT || bwhich == TYPE_DATA) {
+      fprintf(out, "(defn %s-%s-get-%s [ptr]\n  (capnp/%s ptr %u))\n", parent,
+              field, fname, getter, (unsigned)offset);
+    } else if (bwhich == TYPE_BOOL) {
+      fprintf(out, "(defn %s-%s-get-%s [ptr]\n  (capnp/%s ptr %u false))\n",
+              parent, field, fname, getter, (unsigned)offset);
+    } else {
+      uint32_t byte = scalar_byte_offset(bwhich, offset);
+      fprintf(out, "(defn %s-%s-get-%s [ptr]\n  (capnp/%s ptr %u 0))\n", parent,
+              field, fname, getter, (unsigned)byte);
+    }
+  }
+  (void)params;
+}
+
 static void emit_struct(FILE *out, const capnp_ptr_t *node,
                         const capnp_ptr_t *nodes) {
   /* Node struct group: dataWordCount @bits 112-128 = byte 14 as u16?
@@ -574,6 +814,7 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
   fprintf(out, "\n# struct %s\n", sname);
   fprintf(out, "(def %s-data-words %u)\n", sname, (unsigned)dwords);
   fprintf(out, "(def %s-pointer-words %u)\n", sname, (unsigned)pwords);
+  emit_parameters(out, node, sname);
 
   capnp_ptr_t fields;
   if (capnp_getp(node, 3, &fields) != CAPNP_OK || fields.kind != CAPNP_PK_LIST)
@@ -624,8 +865,24 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
     /* Slot offset meaning depends on type: data bit offset or pointer index.
      * Cap'n: for data fields offset is in units of the type size; for
      * pointers it is the pointer index. Emit raw offset + type keyword. */
-    fprintf(out, "\n    :%s @{:offset %u :type :%s}", fname, (unsigned)offset,
-            type_kw(tw));
+    if (type_is_parameter(&typ, NULL, NULL))
+      fprintf(out, "\n    :%s @{:offset %u :type :parameter", fname,
+              (unsigned)offset);
+    else
+      fprintf(out, "\n    :%s @{:offset %u :type :%s", fname, (unsigned)offset,
+              type_kw(tw));
+    {
+      uint64_t pscope = 0;
+      uint16_t pindex = 0;
+      char pname[128];
+      if (type_is_parameter(&typ, &pscope, &pindex)) {
+        fprintf(out, " :parameter-index %u", (unsigned)pindex);
+        if (parameter_name(nodes, pscope, pindex, pname, sizeof(pname)))
+          fprintf(out, " :parameter \"%s\"", pname);
+      }
+    }
+    emit_brand(out, &typ, nodes);
+    fprintf(out, "}");
   }
   fprintf(out, "})\n");
 
@@ -747,6 +1004,7 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       emit_union_select(out, sname, fname, is_union_member);
       fprintf(out, "  (capnp/init-struct ptr %u %d %d))\n",
               (unsigned)offset, child_dwords, child_pwords);
+      emit_brand_accessors(out, sname, fname, &typ, nodes);
       break;
     }
     case TYPE_LIST: {

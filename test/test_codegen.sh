@@ -127,6 +127,22 @@ grep -q 'capnp/init-ptr-list ptr' codegen-features.janet
 grep -q '(defn CodegenFeatures-get-anything \[ptr\]' codegen-features.janet
 grep -q 'capnp/getp ptr' codegen-features.janet
 
+cp "$ROOT/schema/generic.capnp" "$TMP/"
+capnp compile "-o$PLUGIN" generic.capnp
+test -f generic.janet
+grep -q '(def Box-generic true)' generic.janet
+grep -Eq 'Box-parameters @\[ "T"\]' generic.janet
+grep -Eq 'Pair-parameters @\[ "T" "U"\]' generic.janet
+grep -q ':type :parameter' generic.janet
+grep -q ':parameter "T"' generic.janet
+grep -F -q ':brand @[' generic.janet
+grep -q '(defn Holder-text-box-get-value \[ptr\]' generic.janet
+grep -q 'capnp/get-text ptr 0' generic.janet
+grep -q '(defn Holder-data-box-get-value \[ptr\]' generic.janet
+grep -q 'capnp/get-data ptr 0' generic.janet
+grep -q '(defn Holder-pair-get-left \[ptr\]' generic.janet
+grep -q '(defn Holder-pair-get-right \[ptr\]' generic.janet
+
 MODULE=${CAPNP_JANET_MODULE:-$BUILD/capnp.so}
 if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then
   cp "$MODULE" "$TMP/capnp.so"
