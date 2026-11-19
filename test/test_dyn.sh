@@ -3,10 +3,9 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${CAPNP_JANET_BUILD:-$ROOT/build}"
-DUMP="$BUILD/dump-request"
 BIN="$BUILD/test_dyn"
 SCHEMA="$ROOT/schema/conform.capnp"
-if [[ ! -x "$DUMP" || ! -x "$BIN" ]]; then
+if [[ ! -x "$BIN" ]]; then
   echo "SKIP: dyn tools not built" >&2
   exit 0
 fi
@@ -16,11 +15,8 @@ if ! command -v capnp >/dev/null 2>&1; then
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
-cp "$SCHEMA" "$TMP/conform.capnp"
-(
-  cd "$TMP"
-  capnp compile -o"$DUMP" conform.capnp
-)
+# -o- is the compiler's schema parse: a CodeGeneratorRequest on stdout.
+capnp compile -o- "$SCHEMA" >"$TMP/request.bin"
 test -s "$TMP/request.bin"
 capnp encode "$SCHEMA" Conform >"$TMP/in.bin" <<'EOF'
 ( flag = false,

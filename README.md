@@ -236,12 +236,19 @@ docs/orgmode/  architecture notes
 ## Compatibility boundaries
 
 The supported surface includes readers, arena builders, packed and canonical
-codecs, generated typed helpers, the C dynamic API in `capnp_dyn.h` (text and
-JSON over a compiled `CodeGeneratorRequest`), and the C RPC vat through level
-4. It does not expose C++ orphan ownership, generated pointer-default
-constants, a `.capnp` source parser, or Janet wrappers for the C RPC vat.
-Calls outside the documented list-evolution matrix return a kind error or the
+codecs, generated typed helpers (including struct and list pointer
+defaults), the C dynamic API in `capnp_dyn.h` (text and JSON over a compiled
+`CodeGeneratorRequest`), and the C RPC vat through level 4. It does not
+expose C++ orphan ownership or Janet wrappers for the C RPC vat. Calls
+outside the documented list-evolution matrix return a kind error or the
 supplied default.
+
+Schema source is parsed by the official compiler, not a second implementation
+of the language. `capnp compile -o- schema.capnp` writes a
+`CodeGeneratorRequest` to stdout (`-o-` is the compiler's dump of the request
+it would hand a plugin). `capnp_dyn_init` reads those bytes. Imports,
+generics, and annotations stay in lockstep with the compiler that produced
+them.
 
 ## Related
 

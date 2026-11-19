@@ -6,8 +6,12 @@
 #include <stdint.h>
 
 /*
- * Schema reflection over a CodeGeneratorRequest (the bytes a capnp
- * compiler plugin reads) plus text and JSON codecs for one struct.
+ * Schema reflection over a CodeGeneratorRequest plus text and JSON codecs.
+ *
+ * Obtain the request with `capnp compile -o- schema.capnp`, which writes
+ * the same bytes a plugin would read. This library does not parse `.capnp`
+ * source itself: the official compiler already resolves imports, generics,
+ * and annotations, and a second parser would drift from it.
  *
  * Text matches the struct-literal language `capnp encode` / `capnp decode`
  * use. JSON matches `capnp convert binary:json`: objects for structs and

@@ -224,7 +224,7 @@ if bash.found()
     'dyn',
     bash,
     args: [meson.project_source_root() / 'test/test_dyn.sh'],
-    depends: [dump_request, test_dyn],
+    depends: [test_dyn],
     workdir: meson.project_source_root(),
     env: {
       'CAPNP_JANET_BUILD': meson.project_build_root(),
