@@ -39,11 +39,19 @@ done
 "$CLIENT" "$PORT"
 wait $HPID
 
-PORT=$((RANDOM % 20000 + 30000))
-"$SERVER" "$PORT" &
+SPORTFILE=$(mktemp)
+"$SERVER" 0 >"$SPORTFILE" &
 SPID=$!
-trap 'kill $SPID $HPID 2>/dev/null || true; rm -f "$PORTFILE"' EXIT
-sleep 0.2
-janet "$ROOT/test/rpc_stream.janet" "$PORT"
+trap 'kill $SPID $HPID 2>/dev/null || true; rm -f "$PORTFILE" "$SPORTFILE"' EXIT
+SPORT=""
+for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+  if [[ -s "$SPORTFILE" ]]; then
+    SPORT=$(head -1 "$SPORTFILE")
+    break
+  fi
+  sleep 0.05
+done
+[[ -n "$SPORT" ]]
+janet "$ROOT/test/rpc_stream.janet" "$SPORT"
 kill $SPID 2>/dev/null || true
 echo "ok janet host suite"
