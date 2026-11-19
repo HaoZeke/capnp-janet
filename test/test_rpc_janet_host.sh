@@ -14,6 +14,7 @@ MODDIR=$(cd "$(dirname "$MODULE")" && pwd)
 export JANET_PATH="$MODDIR"
 export LD_LIBRARY_PATH="$MODDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
+janet "$ROOT/test/rpc_borrow.janet"
 janet "$ROOT/test/rpc_level3.janet"
 
 PORTFILE=$(mktemp)

@@ -1541,16 +1541,27 @@ static int janet_dispatch(void *server, uint64_t interface_id, uint16_t method_i
   capnp_msg_wrap *msg;
   Janet args[4];
   Janet res;
-  if (!w->has_handler)
+  capnp_ptr_t owned;
+  if (!w->has_handler || !params)
     return -1;
   msg = janet_abstract(&msg_type, sizeof(*msg));
   memset(msg, 0, sizeof(*msg));
-  msg->borrow = 1;
-  if (params && params->msg)
-    msg->msg = *params->msg;
+  capnp_message_init(&msg->msg);
+  owned = *params;
+  if (params->msg && params->msg->nsegs > 0) {
+    uint8_t *flat = NULL;
+    size_t flen = 0;
+    if (capnp_message_copy_flat(params->msg, &flat, &flen) != CAPNP_OK ||
+        capnp_message_from_flat(&msg->msg, flat, flen) != CAPNP_OK) {
+      free(flat);
+      return -1;
+    }
+    free(flat);
+    owned.msg = &msg->msg;
+  }
   args[0] = janet_wrap_u64(interface_id);
   args[1] = janet_wrap_number((double)method_id);
-  args[2] = make_ptr(janet_wrap_abstract(msg), params);
+  args[2] = make_ptr(janet_wrap_abstract(msg), &owned);
   /* `results` is the empty content slot. The handler allocates the
    * struct at the method's real size with capnp/alloc-struct. */
   args[3] = make_builder_ptr(janet_wrap_nil(), results, 0, 0);
