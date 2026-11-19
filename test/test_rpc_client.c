@@ -208,6 +208,31 @@ int main(void)
           "failed stream refuses further sends");
   }
 
+  /* A peer controls Release.referenceCount. A value that does not fit the
+   * local signed counter must release the export rather than overflowing. */
+  {
+    capnp_builder_t b;
+    capnp_bptr_t root, msg, slot, rel;
+    uint8_t *flat = NULL;
+    size_t len = 0;
+    capnp_builder_init(&b);
+    CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "release root");
+    CHECK(capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK, "release msg");
+    CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RELEASE) == CAPNP_OK,
+          "release tag");
+    CHECK(capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK, "release slot");
+    CHECK(capnp_builder_struct(&slot, 1, 0, &rel) == CAPNP_OK, "release body");
+    CHECK(capnp_builder_set_u32(&rel, 0, 0) == CAPNP_OK, "release id");
+    CHECK(capnp_builder_set_u32(&rel, 4, UINT32_MAX) == CAPNP_OK,
+          "release count");
+    CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK,
+          "release serialize");
+    CHECK(capnp_rpc_handle(&vat, flat, len) == CAPNP_OK, "release handle");
+    CHECK(!vat.exports[0].used, "large release drops export");
+    free(flat);
+    capnp_builder_free(&b);
+  }
+
   if (g_failures != 0) {
     fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;

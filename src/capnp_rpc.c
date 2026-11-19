@@ -593,9 +593,12 @@ static void handle_release(capnp_rpc_conn_t *c, const capnp_ptr_t *rel)
   uint32_t count = capnp_get_u32(rel, RELEASE_REFCOUNT_OFF, 0);
   if (id >= CAPNP_RPC_MAX_EXPORTS || !c->exports[id].used)
     return;
-  c->exports[id].refcount -= (int)count;
-  if (c->exports[id].refcount <= 0)
+  /* Release.referenceCount is an untrusted UInt32 while the local count
+   * is signed. Do not narrow a large count before comparing it. */
+  if (count >= (uint32_t)c->exports[id].refcount)
     memset(&c->exports[id], 0, sizeof c->exports[id]);
+  else
+    c->exports[id].refcount -= (int)count;
 }
 
 /* Answer one Join question with a JoinResult payload. */
