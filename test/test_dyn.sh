@@ -305,4 +305,46 @@ EOF
 EOF
 cmp "$TMP/dupsht-ref.bin" "$TMP/dupsht-our.bin"
 
+# JSON decodes a non-flattened group and a named union into a
+# temporary and keeps only the active arm. Text stays in place.
+cat >"$TMP/grp.capnp" <<'EOF'
+@0x9a8b7c6d5e4f3099;
+using Json = import "/capnp/compat/json.capnp";
+struct Wrap {
+  grp :group {
+    union {
+      guText @0 :Text;
+      guNum @1 :UInt32;
+    }
+    plain @2 :UInt16;
+  }
+  discTag :union $Json.discriminator(name = "tag") {
+    dText @3 :Text;
+    dNum @4 :UInt32;
+  }
+}
+EOF
+printf '%s\n' '{"grp":{"guText":"first","guNum":9}}' | capnp convert -I"$INC" json:binary "$TMP/grp.capnp" Wrap >"$TMP/grp-ref.bin"
+printf '%s\n' '{"grp":{"guText":"first","guNum":9}}' | "$CLI" convert -I"$INC" json:binary "$TMP/grp.capnp" Wrap >"$TMP/grp-our.bin"
+cmp "$TMP/grp-ref.bin" "$TMP/grp-our.bin"
+"$BIN" canon "$TMP/grp-ref.bin" "$TMP/grp-ref.can"
+"$BIN" canon "$TMP/grp-our.bin" "$TMP/grp-our.can"
+cmp "$TMP/grp-ref.can" "$TMP/grp-our.can"
+printf '%s\n' '{"discTag":{"dText":"first","tag":"dNum"}}' | capnp convert -I"$INC" json:binary "$TMP/grp.capnp" Wrap >"$TMP/ntag-ref.bin"
+printf '%s\n' '{"discTag":{"dText":"first","tag":"dNum"}}' | "$CLI" convert -I"$INC" json:binary "$TMP/grp.capnp" Wrap >"$TMP/ntag-our.bin"
+cmp "$TMP/ntag-ref.bin" "$TMP/ntag-our.bin"
+"$BIN" canon "$TMP/ntag-ref.bin" "$TMP/ntag-ref.can"
+"$BIN" canon "$TMP/ntag-our.bin" "$TMP/ntag-our.can"
+cmp "$TMP/ntag-ref.can" "$TMP/ntag-our.can"
+printf '%s\n' '{"grp":{"plain":4,"guText":"keep","guNum":3}}' | capnp convert -I"$INC" json:binary "$TMP/grp.capnp" Wrap >"$TMP/gplain-ref.bin"
+printf '%s\n' '{"grp":{"plain":4,"guText":"keep","guNum":3}}' | "$CLI" convert -I"$INC" json:binary "$TMP/grp.capnp" Wrap >"$TMP/gplain-our.bin"
+cmp "$TMP/gplain-ref.bin" "$TMP/gplain-our.bin"
+capnp encode -I"$INC" "$TMP/grp.capnp" Wrap >"$TMP/gtxt-ref.bin" <<'EOF'
+(grp = (guText = "first", guNum = 9))
+EOF
+"$CLI" encode -I"$INC" "$TMP/grp.capnp" Wrap >"$TMP/gtxt-our.bin" <<'EOF'
+(grp = (guText = "first", guNum = 9))
+EOF
+cmp "$TMP/gtxt-ref.bin" "$TMP/gtxt-our.bin"
+
 echo "ok dyn"

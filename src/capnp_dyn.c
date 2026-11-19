@@ -4873,6 +4873,163 @@ static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
   }
 }
 
+static int adopt_group_fields(const capnp_dyn_t *d, const dyn_struct_t *g,
+                              const brand_env_t *env, const capnp_ptr_t *src,
+                              const capnp_bptr_t *dst, int depth);
+
+/* Copy one field from a decoded group onto the parent body.
+ * Data fields are always present in NON_NULL mode. A null pointer is
+ * absent. A nested group is transferred the same way. */
+static int copy_group_field(const capnp_dyn_t *d, const dyn_struct_t *g,
+                            const dyn_field_t *f, const brand_env_t *env,
+                            const capnp_ptr_t *src, const capnp_bptr_t *dst,
+                            int depth) {
+  rtype_t ft;
+  int rc = 0;
+  if (f->disc != 0xffff && g->disc_count) {
+    if (capnp_builder_set_u16(dst, g->disc_byte, f->disc))
+      return -1;
+  }
+  if (f->is_group) {
+    dyn_struct_t *ng = find_struct_id(d, f->group_id);
+    if (!ng)
+      return -1;
+    return adopt_group_fields(d, ng, env, src, dst, depth + 1);
+  }
+  if (resolve_field_type(d, f, env, &ft))
+    return -1;
+  if (ft.list_depth > 0 || is_ptr_type(ft.which)) {
+    capnp_ptr_t child;
+    capnp_bptr_t slot;
+    if (capnp_getp(src, (uint16_t)f->offset, &child) != CAPNP_OK)
+      rc = -1;
+    else if (child.kind != CAPNP_PK_NULL) {
+      if (capnp_builder_slot(dst, g->dwords, (uint16_t)f->offset, &slot) ||
+          capnp_builder_copy_ptr(&slot, &child))
+        rc = -1;
+    }
+    free_rtype(&ft);
+    return rc;
+  }
+  switch (ft.which) {
+  case TY_VOID:
+    break;
+  case TY_BOOL:
+    rc = capnp_builder_set_bool(dst, f->offset, capnp_get_bool(src, f->offset, 0));
+    break;
+  case TY_I8:
+  case TY_U8: {
+    uint32_t b = data_byte(ft.which, f->offset);
+    rc = capnp_builder_set_u8(dst, b, capnp_get_u8(src, b, 0));
+    break;
+  }
+  case TY_I16:
+  case TY_U16:
+  case TY_ENUM: {
+    uint32_t b = data_byte(ft.which, f->offset);
+    rc = capnp_builder_set_u16(dst, b, capnp_get_u16(src, b, 0));
+    break;
+  }
+  case TY_I32:
+  case TY_U32:
+  case TY_F32: {
+    uint32_t b = data_byte(ft.which, f->offset);
+    rc = capnp_builder_set_u32(dst, b, capnp_get_u32(src, b, 0));
+    break;
+  }
+  case TY_I64:
+  case TY_U64:
+  case TY_F64: {
+    uint32_t b = data_byte(ft.which, f->offset);
+    rc = capnp_builder_set_u64(dst, b, capnp_get_u64(src, b, 0));
+    break;
+  }
+  default:
+    rc = -1;
+    break;
+  }
+  free_rtype(&ft);
+  return rc ? -1 : 0;
+}
+
+static int adopt_group_fields(const capnp_dyn_t *d, const dyn_struct_t *g,
+                              const brand_env_t *env, const capnp_ptr_t *src,
+                              const capnp_bptr_t *dst, int depth) {
+  uint32_t i;
+  uint16_t which = 0xffff;
+  if (!g || depth > MAX_DEPTH)
+    return -1;
+  if (g->disc_count) {
+    const dyn_field_t *af = NULL;
+    struct_which(src, g, &which);
+    for (i = 0; i < g->nfields; i++) {
+      if (g->fields[i].disc == which) {
+        af = &g->fields[i];
+        break;
+      }
+    }
+    if (af && copy_group_field(d, g, af, env, src, dst, depth + 1))
+      return -1;
+  }
+  for (i = 0; i < g->nfields; i++) {
+    const dyn_field_t *f = &g->fields[i];
+    if (g->disc_count && f->disc != 0xffff)
+      continue;
+    if (copy_group_field(d, g, f, env, src, dst, depth + 1))
+      return -1;
+  }
+  return 0;
+}
+
+/* Decode a non-flattened group or named union into a temporary struct,
+ * then copy across only what DynamicStruct::Builder::adopt keeps. */
+static int adopt_json_group(const capnp_dyn_t *d, const dyn_struct_t *g,
+                            const brand_env_t *env, const vnode_t *v,
+                            const capnp_bptr_t *dst, int depth) {
+  capnp_builder_t tmp;
+  capnp_bptr_t root, body;
+  capnp_message_t msg;
+  capnp_ptr_t src;
+  capnp_segment_t *segs = NULL;
+  uint32_t i, n;
+  int rc;
+  capnp_builder_init(&tmp);
+  if (capnp_builder_root(&tmp, &root) ||
+      capnp_builder_struct(&root, g->dwords, g->pwords, &body)) {
+    capnp_builder_free(&tmp);
+    return -1;
+  }
+  rc = build_struct_from_vnode(d, g, env, v, &body, 1, depth + 1);
+  if (rc) {
+    capnp_builder_free(&tmp);
+    return rc;
+  }
+  n = capnp_builder_nsegs(&tmp);
+  segs = n ? (capnp_segment_t *)calloc(n, sizeof(*segs)) : NULL;
+  if (!segs) {
+    capnp_builder_free(&tmp);
+    return -1;
+  }
+  for (i = 0; i < n; i++) {
+    segs[i].data = capnp_builder_seg_data(&tmp, i);
+    segs[i].words = capnp_builder_seg_words(&tmp, i);
+  }
+  capnp_message_init(&msg);
+  if (capnp_message_from_segments(&msg, segs, n) != CAPNP_OK ||
+      capnp_root(&msg, &src) != CAPNP_OK) {
+    free(segs);
+    capnp_message_free(&msg);
+    capnp_builder_free(&tmp);
+    return -1;
+  }
+  free(segs);
+  clear_group_wire(d, g, env, dst, depth + 1);
+  rc = adopt_group_fields(d, g, env, &src, dst, depth + 1);
+  capnp_message_free(&msg);
+  capnp_builder_free(&tmp);
+  return rc;
+}
+
 static int build_field_from_vnode(const capnp_dyn_t *d, const dyn_struct_t *st,
                                   const dyn_field_t *f, const brand_env_t *env,
                                   const vnode_t *v, const capnp_bptr_t *body,
@@ -4895,8 +5052,15 @@ static int build_field_from_vnode(const capnp_dyn_t *d, const dyn_struct_t *st,
     dyn_struct_t *g = find_struct_id(d, f->group_id);
     if (!g)
       return -1;
-    clear_group_wire(d, g, env, body, depth + 1);
-    rc = build_struct_from_vnode(d, g, env, v, body, json, depth + 1);
+    if (json) {
+      /* JsonCodec::decodeField builds the group in an orphan.
+       * adopt then keeps the active union arm and present
+       * non-union fields (dynamic.c++). Text stays in place. */
+      rc = adopt_json_group(d, g, env, v, body, depth);
+    } else {
+      clear_group_wire(d, g, env, body, depth + 1);
+      rc = build_struct_from_vnode(d, g, env, v, body, 0, depth + 1);
+    }
     if (json && v->kind != VK_OBJ)
       value_bad = 1;
     if (json)
