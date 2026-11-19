@@ -197,6 +197,54 @@ printf '%s\n' '{"vText":"a","vText":"bb"}' | "$CLI" convert -I"$INC" json:binary
 "$BIN" canon "$TMP/dupt-ref.bin" "$TMP/dupt-ref.can"
 "$BIN" canon "$TMP/dupt-our.bin" "$TMP/dupt-our.can"
 cmp "$TMP/dupt-ref.can" "$TMP/dupt-our.can"
+# An empty list between two text values must survive a tail reclaim.
+# Binary, canonical, text, and JSON match capnp 1.4.0, which accepts a
+# zero-word list aimed at the segment end.
+empty_list() {
+  local json="$1" name="$2"
+  printf '%s\n' "$json" | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/$name-ref.bin"
+  printf '%s\n' "$json" | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/$name-our.bin"
+  cmp "$TMP/$name-ref.bin" "$TMP/$name-our.bin"
+  "$BIN" canon "$TMP/$name-ref.bin" "$TMP/$name-ref.can"
+  "$BIN" canon "$TMP/$name-our.bin" "$TMP/$name-our.can"
+  cmp "$TMP/$name-ref.can" "$TMP/$name-our.can"
+  printf '%s\n' "$json" | capnp convert -I"$INC" json:json "$PARITY_SCHEMA" Parity >"$TMP/$name-ref.json"
+  printf '%s\n' "$json" | "$CLI" convert -I"$INC" json:json "$PARITY_SCHEMA" Parity >"$TMP/$name-our.json"
+  cmp "$TMP/$name-ref.json" "$TMP/$name-our.json"
+  printf '%s\n' "$json" | capnp convert -I"$INC" json:text "$PARITY_SCHEMA" Parity >"$TMP/$name-ref.txt"
+  printf '%s\n' "$json" | "$CLI" convert -I"$INC" json:text "$PARITY_SCHEMA" Parity >"$TMP/$name-our.txt"
+  cmp "$TMP/$name-ref.txt" "$TMP/$name-our.txt"
+  capnp decode -I"$INC" "$PARITY_SCHEMA" Parity <"$TMP/$name-our.bin" >/dev/null
+}
+empty_list '{"vText":"hello world!!!!!","lI32":[],"vText":"a"}' elist
+grep -q '"lI32": \[\]' "$TMP/elist-our.json"
+empty_list '{"vText":"hello world!!!!!","lText":[],"vText":"a"}' elist-text
+empty_list '{"lI64":[1,2,3,4],"lI64":[]}' elist-i64
+# A valid surrogate pair is one UTF-8 scalar. A lone surrogate is an
+# error. C++ 1.4.0 stores each \u unit as CESU-8 and accepts a lone one.
+printf '%s\n' '{"vText":"\uD83D\uDE00"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/surr.bin"
+"$BIN" canon "$TMP/surr.bin" "$TMP/surr.can"
+# U+1F600 is f0 9f 98 80. The canonical body is not framed.
+python3 - "$TMP/surr.can" <<'PY'
+import pathlib, sys
+b = pathlib.Path(sys.argv[1]).read_bytes()
+if bytes([0xF0, 0x9F, 0x98, 0x80]) not in b:
+    raise SystemExit("missing utf-8 smile")
+if bytes([0xED, 0xA0, 0xBD]) in b:
+    raise SystemExit("stored cesu-8")
+PY
+if printf '%s\n' '{"vText":"\uD83D"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/lone.bin" 2>"$TMP/lone.err"
+then
+  echo "lone surrogate was accepted" >&2
+  exit 1
+fi
+grep -q "lone surrogate" "$TMP/lone.err"
+if printf '%s\n' '{"vText":"\uDE00"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/lone2.bin" 2>"$TMP/lone2.err"
+then
+  echo "lone low surrogate was accepted" >&2
+  exit 1
+fi
+grep -q "lone surrogate" "$TMP/lone2.err"
 printf '%s\n' '{"uNote":"first","uNote":"second"}' | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupu-ref.bin"
 printf '%s\n' '{"uNote":"first","uNote":"second"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupu-our.bin"
 "$BIN" canon "$TMP/dupu-ref.bin" "$TMP/dupu-ref.can"

@@ -56,4 +56,6 @@ capnp_get_text(&root, 0, &s, &n);
 ```
 
 Zero the message, or call `capnp_message_init`, before parsing or freeing
-it.
+it. JSON text is UTF-8: a `\u` surrogate pair is one scalar, and a lone
+surrogate is rejected (`lone surrogate`). C++ 1.4.0 stores each `\u` unit
+as CESU-8 and accepts a lone surrogate.

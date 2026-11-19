@@ -305,7 +305,7 @@ static dyn_struct_t *find_struct_id(const capnp_dyn_t *d, uint64_t id) {
   return NULL;
 }
 
-static dyn_enum_t *find_enum_id(const capnp_dyn_t *d, uint64_t id) {
+static dyn_enum_t *find_enum_id(capnp_dyn_t *d, uint64_t id) {
   uint32_t i;
   for (i = 0; i < d->nenums; i++) {
     if (d->enums[i].id == id)
@@ -690,19 +690,17 @@ int capnp_dyn_init(capnp_dyn_t **out, const uint8_t *request, size_t len) {
   return CAPNP_OK;
 }
 
-static void dyn_set_err(const capnp_dyn_t *d, const char *msg) {
-  capnp_dyn_t *w = (capnp_dyn_t *)d;
-  if (!w)
+static void dyn_set_err(capnp_dyn_t *d, const char *msg) {
+  if (!d)
     return;
-  snprintf(w->err, sizeof(w->err), "%s", msg ? msg : "");
+  snprintf(d->err, sizeof(d->err), "%s", msg ? msg : "");
 }
 
-static void dyn_err_text(const capnp_dyn_t *d, const char *what, const char *text,
+static void dyn_err_text(capnp_dyn_t *d, const char *what, const char *text,
                          size_t n) {
   char tok[49];
   size_t i;
-  capnp_dyn_t *w = (capnp_dyn_t *)d;
-  if (!w)
+  if (!d)
     return;
   if (n > sizeof(tok) - 1)
     n = sizeof(tok) - 1;
@@ -712,9 +710,9 @@ static void dyn_err_text(const capnp_dyn_t *d, const char *what, const char *tex
   }
   tok[n] = 0;
   if (n == 0)
-    snprintf(w->err, sizeof(w->err), "%s", what);
+    snprintf(d->err, sizeof(d->err), "%s", what);
   else
-    snprintf(w->err, sizeof(w->err), "%s: %s", what, tok);
+    snprintf(d->err, sizeof(d->err), "%s: %s", what, tok);
 }
 
 const char *capnp_dyn_error(const capnp_dyn_t *d) {
@@ -1624,8 +1622,9 @@ static void free_pieces(piece_list_t *pl) {
 }
 
 /* Set when a list growth malloc fails, so the public encoder can
- * report allocation failure instead of a type error. */
-static int encode_oom;
+ * report allocation failure instead of a type error. One slot per
+ * thread: two encoders must not share it. */
+static _Thread_local int encode_oom;
 
 static int add_piece(piece_list_t *pl, char *s, size_t len) {
   if (pl->count == pl->cap) {
@@ -1724,7 +1723,7 @@ static int delimit_text(buf_t *b, const piece_list_t *pl, int indent, int mode,
   return buf_ch(b, ' ');
 }
 
-static int field_has_wire(const capnp_dyn_t *d, const capnp_ptr_t *s,
+static int field_has_wire(capnp_dyn_t *d, const capnp_ptr_t *s,
                           const dyn_field_t *f, const brand_env_t *env,
                           int non_null) {
   rtype_t ft;
@@ -1782,12 +1781,12 @@ static int field_has_wire(const capnp_dyn_t *d, const capnp_ptr_t *s,
   }
 }
 
-static int encode_text_struct(buf_t *b, const capnp_dyn_t *d,
+static int encode_text_struct(buf_t *b, capnp_dyn_t *d,
                               const dyn_struct_t *st, const brand_env_t *env,
                               const capnp_ptr_t *s, int indent, int mode,
                               int depth);
 
-static int encode_text_enum(buf_t *b, const capnp_dyn_t *d, uint64_t enum_id,
+static int encode_text_enum(buf_t *b, capnp_dyn_t *d, uint64_t enum_id,
                             uint16_t ord) {
   dyn_enum_t *en = find_enum_id(d, enum_id);
   if (en && ord < en->nvals)
@@ -1797,7 +1796,7 @@ static int encode_text_enum(buf_t *b, const capnp_dyn_t *d, uint64_t enum_id,
   return 0;
 }
 
-static int encode_text_list(buf_t *b, const capnp_dyn_t *d,
+static int encode_text_list(buf_t *b, capnp_dyn_t *d,
                             const rtype_t *elem_rt, const capnp_ptr_t *list,
                             int indent, int mode, int depth) {
   piece_list_t pl;
@@ -1997,7 +1996,7 @@ static int encode_text_list(buf_t *b, const capnp_dyn_t *d,
   return buf_ch(b, ']');
 }
 
-static int encode_text_field_value(buf_t *b, const capnp_dyn_t *d,
+static int encode_text_field_value(buf_t *b, capnp_dyn_t *d,
                                    const dyn_field_t *f,
                                    const brand_env_t *env,
                                    const capnp_ptr_t *s, int indent,
@@ -2151,7 +2150,7 @@ static int encode_text_field_value(buf_t *b, const capnp_dyn_t *d,
   return rc;
 }
 
-static int encode_text_struct(buf_t *b, const capnp_dyn_t *d,
+static int encode_text_struct(buf_t *b, capnp_dyn_t *d,
                               const dyn_struct_t *st, const brand_env_t *env,
                               const capnp_ptr_t *s, int indent, int mode,
                               int depth) {
@@ -2362,7 +2361,7 @@ static int push_flat_json(flat_json_list_t *fl, const flat_json_field_t *item) {
   return 0;
 }
 
-static int gather_json_fields(const capnp_dyn_t *d, const dyn_struct_t *st,
+static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
                               const brand_env_t *env, const capnp_ptr_t *s,
                               const disc_opts_t *disc_override,
                               const char *union_decl_name, const char *prefix,
@@ -2515,7 +2514,7 @@ static int gather_json_fields(const capnp_dyn_t *d, const dyn_struct_t *st,
   }
   return 0;
 }
-static int encode_json_struct(buf_t *b, const capnp_dyn_t *d,
+static int encode_json_struct(buf_t *b, capnp_dyn_t *d,
                               const dyn_struct_t *st, const brand_env_t *env,
                               const capnp_ptr_t *s,
                               const disc_opts_t *disc_override,
@@ -2523,7 +2522,7 @@ static int encode_json_struct(buf_t *b, const capnp_dyn_t *d,
                               int *multiline, int has_prefix, int pretty,
                               int depth);
 
-static int encode_json_enum(buf_t *b, const capnp_dyn_t *d, uint64_t enum_id,
+static int encode_json_enum(buf_t *b, capnp_dyn_t *d, uint64_t enum_id,
                             uint16_t ord) {
   dyn_enum_t *en = find_enum_id(d, enum_id);
   if (en && ord < en->nvals)
@@ -2731,7 +2730,7 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
   }
 }
 
-static int encode_json_list(buf_t *b, const capnp_dyn_t *d,
+static int encode_json_list(buf_t *b, capnp_dyn_t *d,
                             const rtype_t *elem_rt, const capnp_ptr_t *list,
                             int indent, int *multiline, int has_prefix,
                             int pretty, int depth) {
@@ -2868,7 +2867,7 @@ static int encode_json_list(buf_t *b, const capnp_dyn_t *d,
   return buf_ch(b, ']');
 }
 
-static int encode_json_field_item(buf_t *b, const capnp_dyn_t *d,
+static int encode_json_field_item(buf_t *b, capnp_dyn_t *d,
                                   const flat_json_field_t *item, int indent,
                                   int *multiline, int pretty, int depth) {
   rtype_t ft;
@@ -3031,7 +3030,7 @@ static int encode_json_field_item(buf_t *b, const capnp_dyn_t *d,
   return rc;
 }
 
-static int encode_json_struct(buf_t *b, const capnp_dyn_t *d,
+static int encode_json_struct(buf_t *b, capnp_dyn_t *d,
                               const dyn_struct_t *st, const brand_env_t *env,
                               const capnp_ptr_t *s,
                               const disc_opts_t *disc_override,
@@ -3083,7 +3082,7 @@ static int encode_json_struct(buf_t *b, const capnp_dyn_t *d,
   free_json_list(&jl);
   return buf_ch(b, '}');
 }
-static int encode_root_impl(const capnp_dyn_t *d, const char *type_name,
+static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
                             const capnp_ptr_t *s, int json, int pretty,
                             char **out, size_t *len) {
   rtype_t rt;
@@ -3118,22 +3117,22 @@ static int encode_root_impl(const capnp_dyn_t *d, const char *type_name,
   return CAPNP_OK;
 }
 
-int capnp_dyn_encode_text(const capnp_dyn_t *d, const char *type_name,
+int capnp_dyn_encode_text(capnp_dyn_t *d, const char *type_name,
                           const capnp_ptr_t *s, char **out, size_t *len) {
   return encode_root_impl(d, type_name, s, 0, 1, out, len);
 }
 
-int capnp_dyn_encode_text_short(const capnp_dyn_t *d, const char *type_name,
+int capnp_dyn_encode_text_short(capnp_dyn_t *d, const char *type_name,
                                 const capnp_ptr_t *s, char **out, size_t *len) {
   return encode_root_impl(d, type_name, s, 0, 0, out, len);
 }
 
-int capnp_dyn_encode_json(const capnp_dyn_t *d, const char *type_name,
+int capnp_dyn_encode_json(capnp_dyn_t *d, const char *type_name,
                           const capnp_ptr_t *s, char **out, size_t *len) {
   return encode_root_impl(d, type_name, s, 1, 1, out, len);
 }
 
-int capnp_dyn_encode_json_short(const capnp_dyn_t *d, const char *type_name,
+int capnp_dyn_encode_json_short(capnp_dyn_t *d, const char *type_name,
                                 const capnp_ptr_t *s, char **out, size_t *len) {
   return encode_root_impl(d, type_name, s, 1, 0, out, len);
 }
@@ -3210,6 +3209,8 @@ typedef struct {
   size_t n;
   size_t i;
   int depth;
+  /* Set when a \u escape is a surrogate that does not form a pair. */
+  const char *err;
 } scan_t;
 
 static int hex_nibble(unsigned char c) {
@@ -3356,6 +3357,8 @@ static int parse_json_str_raw(scan_t *sc, char **out, size_t *len) {
           }
         }
         if (buf_add_utf8(&b, cp)) {
+          if (cp >= 0xd800 && cp <= 0xdfff)
+            sc->err = "lone surrogate";
           free(b.data);
           return -1;
         }
@@ -4280,7 +4283,7 @@ static int vnode_to_float(const vnode_t *v, uint16_t which, int json,
   return 0;
 }
 
-static int vnode_to_enum(const capnp_dyn_t *d, uint64_t enum_id,
+static int vnode_to_enum(capnp_dyn_t *d, uint64_t enum_id,
                          const vnode_t *v, int json, uint16_t *out_ord) {
   dyn_enum_t *en = find_enum_id(d, enum_id);
   uint32_t i;
@@ -4452,7 +4455,7 @@ static int store_bits_for_type(const capnp_bptr_t *body, const dyn_field_t *f,
   }
 }
 
-static void clear_field_wire(const capnp_dyn_t *d, const dyn_struct_t *st,
+static void clear_field_wire(capnp_dyn_t *d, const dyn_struct_t *st,
                              const dyn_field_t *f, const brand_env_t *env,
                              const capnp_bptr_t *body, int depth);
 
@@ -4469,7 +4472,7 @@ static int write_disc(const capnp_bptr_t *body, const dyn_struct_t *st,
   return 0;
 }
 
-static void clear_group_wire(const capnp_dyn_t *d, const dyn_struct_t *g,
+static void clear_group_wire(capnp_dyn_t *d, const dyn_struct_t *g,
                              const brand_env_t *env, const capnp_bptr_t *body,
                              int depth) {
   uint32_t i;
@@ -4491,7 +4494,7 @@ static void clear_group_wire(const capnp_dyn_t *d, const dyn_struct_t *g,
   }
 }
 
-static void clear_field_wire(const capnp_dyn_t *d, const dyn_struct_t *st,
+static void clear_field_wire(capnp_dyn_t *d, const dyn_struct_t *st,
                              const dyn_field_t *f, const brand_env_t *env,
                              const capnp_bptr_t *body, int depth) {
   rtype_t ft;
@@ -4537,20 +4540,18 @@ static void clear_field_wire(const capnp_dyn_t *d, const dyn_struct_t *st,
   }
   free_rtype(&ft);
 }
-static void dyn_note_bad(const capnp_dyn_t *d, const vnode_t *v) {
-  capnp_dyn_t *w = (capnp_dyn_t *)d;
-  if (!w || w->bad_src || !v || !v->src || v->src_n == 0)
+static void dyn_note_bad(capnp_dyn_t *d, const vnode_t *v) {
+  if (!d || d->bad_src || !v || !v->src || v->src_n == 0)
     return;
-  w->bad_src = v->src;
-  w->bad_n = v->src_n;
+  d->bad_src = v->src;
+  d->bad_n = v->src_n;
 }
 
-static void dyn_err_bad_json(const capnp_dyn_t *d, const char *field) {
+static void dyn_err_bad_json(capnp_dyn_t *d, const char *field) {
   char tok[49];
   char name[97];
   size_t i, n, fn;
-  capnp_dyn_t *w = (capnp_dyn_t *)d;
-  if (!w || w->err[0])
+  if (!d || d->err[0])
     return;
   fn = field ? strlen(field) : 0;
   if (fn > sizeof(name) - 1)
@@ -4560,22 +4561,22 @@ static void dyn_err_bad_json(const capnp_dyn_t *d, const char *field) {
     name[i] = (c < 32 || c == '"') ? '?' : (char)c;
   }
   name[fn] = 0;
-  n = w->bad_n;
+  n = d->bad_n;
   if (n > sizeof(tok) - 1)
     n = sizeof(tok) - 1;
-  if (!w->bad_src)
+  if (!d->bad_src)
     n = 0;
   for (i = 0; i < n; i++) {
-    unsigned char c = (unsigned char)w->bad_src[i];
+    unsigned char c = (unsigned char)d->bad_src[i];
     tok[i] = (c < 32 || c == 127) ? '?' : (char)c;
   }
   tok[n] = 0;
   if (n == 0)
-    snprintf(w->err, sizeof(w->err), "bad value for field %s", name);
+    snprintf(d->err, sizeof(d->err), "bad value for field %s", name);
   else
-    snprintf(w->err, sizeof(w->err), "bad value for field %s: %s", name, tok);
-  w->bad_src = NULL;
-  w->bad_n = 0;
+    snprintf(d->err, sizeof(d->err), "bad value for field %s: %s", name, tok);
+  d->bad_src = NULL;
+  d->bad_n = 0;
 }
 
 static const char *field_json_name(const dyn_field_t *f) {
@@ -4586,7 +4587,7 @@ static const char *field_json_name(const dyn_field_t *f) {
 
 /* Emit a field error once a type or range check has failed. An earlier
  * nested field may already have written err, in which case it stands. */
-static void dyn_finish_json_field(const capnp_dyn_t *d, const dyn_field_t *f,
+static void dyn_finish_json_field(capnp_dyn_t *d, const dyn_field_t *f,
                                   const vnode_t *v, int rc, int value_bad) {
   if (!d || rc == 0 || d->err[0])
     return;
@@ -4660,13 +4661,13 @@ static int build_json_value_struct(const vnode_t *v, const capnp_bptr_t *body,
   }
 }
 
-static int build_struct_from_vnode(const capnp_dyn_t *d,
+static int build_struct_from_vnode(capnp_dyn_t *d,
                                    const dyn_struct_t *st,
                                    const brand_env_t *env, const vnode_t *v,
                                    const capnp_bptr_t *body, int json,
                                    int depth);
 
-static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
+static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
                                  const vnode_t *v, const capnp_bptr_t *body,
                                  uint16_t dwords, uint16_t index, int json,
                                  int depth) {
@@ -5041,14 +5042,14 @@ static int copy_ptr_full(capnp_builder_t *b, uint32_t slot_seg, size_t slot_word
   return -1;
 }
 
-static int adopt_group_fields(const capnp_dyn_t *d, const dyn_struct_t *g,
+static int adopt_group_fields(capnp_dyn_t *d, const dyn_struct_t *g,
                               const brand_env_t *env, const capnp_ptr_t *src,
                               const capnp_bptr_t *dst, int depth);
 
 /* Copy one field from a decoded group onto the parent body.
  * Data fields are always present in NON_NULL mode. A null pointer is
  * absent. A nested group is transferred the same way. */
-static int copy_group_field(const capnp_dyn_t *d, const dyn_struct_t *g,
+static int copy_group_field(capnp_dyn_t *d, const dyn_struct_t *g,
                             const dyn_field_t *f, const brand_env_t *env,
                             const capnp_ptr_t *src, const capnp_bptr_t *dst,
                             int depth) {
@@ -5120,7 +5121,7 @@ static int copy_group_field(const capnp_dyn_t *d, const dyn_struct_t *g,
   return rc ? -1 : 0;
 }
 
-static int adopt_group_fields(const capnp_dyn_t *d, const dyn_struct_t *g,
+static int adopt_group_fields(capnp_dyn_t *d, const dyn_struct_t *g,
                               const brand_env_t *env, const capnp_ptr_t *src,
                               const capnp_bptr_t *dst, int depth) {
   uint32_t i;
@@ -5151,12 +5152,12 @@ static int adopt_group_fields(const capnp_dyn_t *d, const dyn_struct_t *g,
 
 /* Decode a non-flattened group or named union into a temporary struct,
  * then copy across only what DynamicStruct::Builder::adopt keeps. */
-static int adopt_json_group(const capnp_dyn_t *d, const dyn_struct_t *g,
+static int adopt_json_group(capnp_dyn_t *d, const dyn_struct_t *g,
                             const brand_env_t *env, const vnode_t *v,
                             const capnp_bptr_t *dst, int depth) {
   capnp_builder_t tmp;
   capnp_bptr_t root, body;
-  capnp_message_t msg;
+  capnp_message_t msg = {0};
   capnp_ptr_t src;
   capnp_segment_t *segs = NULL;
   uint32_t i, n;
@@ -5198,7 +5199,7 @@ static int adopt_json_group(const capnp_dyn_t *d, const dyn_struct_t *g,
   return rc;
 }
 
-static int build_field_from_vnode(const capnp_dyn_t *d, const dyn_struct_t *st,
+static int build_field_from_vnode(capnp_dyn_t *d, const dyn_struct_t *st,
                                   const dyn_field_t *f, const brand_env_t *env,
                                   const vnode_t *v, const capnp_bptr_t *body,
                                   int json, int depth) {
@@ -5452,7 +5453,7 @@ static int mark_union_seen(union_seen_set_t *us, const dyn_struct_t *st) {
 
 /* Check if a flattened struct or group can match `key` (used to know whether
  * a key belongs to a flattened union member before the union tag is seen) */
-static int schema_claims_flat_key(const capnp_dyn_t *d, const dyn_struct_t *st,
+static int schema_claims_flat_key(capnp_dyn_t *d, const dyn_struct_t *st,
                                   const disc_opts_t *disc_override,
                                   const char *union_decl_name, const char *key,
                                   int *needs_union_tag, int depth) {
@@ -5571,7 +5572,7 @@ static int read_disc(const capnp_bptr_t *body, uint32_t disc_byte, uint16_t dwor
 /* Return: 1 = handled (or unknown ignored), 0 = defer (waiting on union tag),
  * -1 = error */
 static int decode_json_field_entry(
-    const capnp_dyn_t *d, const dyn_struct_t *st, const brand_env_t *env,
+    capnp_dyn_t *d, const dyn_struct_t *st, const brand_env_t *env,
     const disc_opts_t *disc_override, const char *union_decl_name,
     const char *key, const vnode_t *val, const capnp_bptr_t *body,
     union_seen_set_t *unions_seen, int depth) {
@@ -5772,7 +5773,7 @@ static int decode_json_field_entry(
   return 1;
 }
 
-static int build_struct_from_vnode(const capnp_dyn_t *d,
+static int build_struct_from_vnode(capnp_dyn_t *d,
                                    const dyn_struct_t *st,
                                    const brand_env_t *env, const vnode_t *v,
                                    const capnp_bptr_t *body, int json,
@@ -5810,7 +5811,7 @@ static int build_struct_from_vnode(const capnp_dyn_t *d,
         return -1;
       }
       if (build_field_from_vnode(d, st, f, env, kv, body, 0, depth + 1)) {
-        if (!((const capnp_dyn_t *)d)->err[0])
+        if (!d->err[0])
           dyn_err_text(d, "bad value", key, strlen(key));
         return -1;
       }
@@ -5855,9 +5856,13 @@ static int build_struct_from_vnode(const capnp_dyn_t *d,
   }
 }
 
-static void dyn_err_scan(const capnp_dyn_t *d, const char *what, const scan_t *sc) {
+static void dyn_err_scan(capnp_dyn_t *d, const char *what, const scan_t *sc) {
   const char *s;
   size_t n = 0;
+  if (sc && sc->err) {
+    dyn_set_err(d, sc->err);
+    return;
+  }
   if (!sc || sc->i >= sc->n) {
     dyn_set_err(d, what);
     return;
@@ -5875,7 +5880,7 @@ static void dyn_err_scan(const capnp_dyn_t *d, const char *what, const scan_t *s
   dyn_err_text(d, what, s, n);
 }
 
-static int decode_root_impl(const capnp_dyn_t *d, const char *type_name,
+static int decode_root_impl(capnp_dyn_t *d, const char *type_name,
                             const char *text, size_t len, int json,
                             uint8_t **out, size_t *out_len) {
   rtype_t rt;
@@ -5891,8 +5896,8 @@ static int decode_root_impl(const capnp_dyn_t *d, const char *type_name,
   *out = NULL;
   *out_len = 0;
   dyn_set_err(d, "");
-  ((capnp_dyn_t *)d)->bad_src = NULL;
-  ((capnp_dyn_t *)d)->bad_n = 0;
+  d->bad_src = NULL;
+  d->bad_n = 0;
   if (resolve_root_type_name(d, type_name, &rt, &st) != CAPNP_OK) {
     dyn_set_err(d, "unknown type");
     return CAPNP_ERR_KIND;
@@ -5947,13 +5952,13 @@ static int decode_root_impl(const capnp_dyn_t *d, const char *type_name,
   return rc;
 }
 
-int capnp_dyn_decode_text(const capnp_dyn_t *d, const char *type_name,
+int capnp_dyn_decode_text(capnp_dyn_t *d, const char *type_name,
                           const char *text, size_t len, uint8_t **out,
                           size_t *out_len) {
   return decode_root_impl(d, type_name, text, len, 0, out, out_len);
 }
 
-int capnp_dyn_decode_json(const capnp_dyn_t *d, const char *type_name,
+int capnp_dyn_decode_json(capnp_dyn_t *d, const char *type_name,
                           const char *text, size_t len, uint8_t **out,
                           size_t *out_len) {
   return decode_root_impl(d, type_name, text, len, 1, out, out_len);
@@ -5976,7 +5981,7 @@ static void free_ev(ev_t *ev) {
     free_rtype(&ev->rt);
 }
 
-static int find_schema_node_by_name(const capnp_dyn_t *d, const char *name,
+static int find_schema_node_by_name(capnp_dyn_t *d, const char *name,
                                     uint16_t which, capnp_ptr_t *node) {
   uint32_t i, n = capnp_list_len(&d->nodes_list);
   for (i = 0; i < n; i++) {
@@ -5992,7 +5997,7 @@ static int find_schema_node_by_name(const capnp_dyn_t *d, const char *name,
   return CAPNP_ERR_KIND;
 }
 
-static int ev_from_value(const capnp_dyn_t *d, const capnp_ptr_t *value,
+static int ev_from_value(capnp_dyn_t *d, const capnp_ptr_t *value,
                          const capnp_ptr_t *type, const brand_env_t *env,
                          ev_t *ev) {
   uint16_t which;
@@ -6082,7 +6087,7 @@ static int ev_from_value(const capnp_dyn_t *d, const capnp_ptr_t *value,
   return CAPNP_OK;
 }
 
-static int ev_step_field(const capnp_dyn_t *d, ev_t *ev, const char *name) {
+static int ev_step_field(capnp_dyn_t *d, ev_t *ev, const char *name) {
   dyn_struct_t *st;
   dyn_field_t *f;
   rtype_t ft;
@@ -6279,7 +6284,7 @@ static int read_ident_eval(const char **pp, char *out, size_t n) {
   return 0;
 }
 
-static int resolve_eval_expr(const capnp_dyn_t *d, const char *expr, ev_t *ev) {
+static int resolve_eval_expr(capnp_dyn_t *d, const char *expr, ev_t *ev) {
   const char *p = expr;
   char prefix[160];
   char ident[160];
@@ -6371,7 +6376,7 @@ static int resolve_eval_expr(const capnp_dyn_t *d, const char *expr, ev_t *ev) {
   return CAPNP_OK;
 }
 
-static int format_ev(const capnp_dyn_t *d, const ev_t *ev, int json, int pretty,
+static int format_ev(capnp_dyn_t *d, const ev_t *ev, int json, int pretty,
                      char **out, size_t *len) {
   buf_t b;
   int rc = 0;
@@ -6483,7 +6488,7 @@ static int format_ev(const capnp_dyn_t *d, const ev_t *ev, int json, int pretty,
   return CAPNP_OK;
 }
 
-int capnp_dyn_eval_ex(const capnp_dyn_t *d, const char *expr, int json,
+int capnp_dyn_eval_ex(capnp_dyn_t *d, const char *expr, int json,
                       int pretty, char **out, size_t *len) {
   ev_t ev;
   int rc;
@@ -6499,12 +6504,12 @@ int capnp_dyn_eval_ex(const capnp_dyn_t *d, const char *expr, int json,
   return rc;
 }
 
-int capnp_dyn_eval(const capnp_dyn_t *d, const char *expr, char **out,
+int capnp_dyn_eval(capnp_dyn_t *d, const char *expr, char **out,
                    size_t *len) {
   return capnp_dyn_eval_ex(d, expr, 0, 1, out, len);
 }
 
-int capnp_dyn_eval_struct(const capnp_dyn_t *d, const char *expr, uint8_t **out,
+int capnp_dyn_eval_struct(capnp_dyn_t *d, const char *expr, uint8_t **out,
                           size_t *out_len) {
   ev_t ev;
   dyn_struct_t *st;

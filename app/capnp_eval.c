@@ -401,7 +401,7 @@ static int rebuild_message(const capnp_message_t *src, size_t seg_words,
   return rc == CAPNP_OK ? 0 : -1;
 }
 
-static int write_converted_message(const capnp_dyn_t *dyn,
+static int write_converted_message(capnp_dyn_t *dyn,
                                    const char *type_name,
                                    const capnp_message_t *m, int to_fmt,
                                    int pretty, size_t seg_words) {
@@ -624,7 +624,7 @@ static int next_delimited_chunk(const char *s, size_t n, size_t *pos, int json,
   return 1;
 }
 
-static int run_convert(const capnp_dyn_t *dyn, const char *type_name,
+static int run_convert(capnp_dyn_t *dyn, const char *type_name,
                        int from_fmt, int to_fmt, int pretty, size_t seg_words) {
   size_t in_len = 0;
   char *in_buf = read_all(stdin, &in_len);
@@ -639,7 +639,7 @@ static int run_convert(const capnp_dyn_t *dyn, const char *type_name,
     size_t off = 0;
     while (off < in_len) {
       size_t fsz = 0;
-      capnp_message_t m;
+      capnp_message_t m = {0};
       if (framed_message_size((const uint8_t *)in_buf + off, in_len - off,
                               &fsz) ||
           capnp_message_from_flat(&m, (const uint8_t *)in_buf + off, fsz) !=
@@ -671,7 +671,7 @@ static int run_convert(const capnp_dyn_t *dyn, const char *type_name,
     free(in_buf);
     while (off < ulen) {
       size_t fsz = 0;
-      capnp_message_t m;
+      capnp_message_t m = {0};
       if (framed_message_size(unpacked + off, ulen - off, &fsz) ||
           capnp_message_from_flat(&m, unpacked + off, fsz) != CAPNP_OK) {
         free(unpacked);
@@ -695,7 +695,7 @@ static int run_convert(const capnp_dyn_t *dyn, const char *type_name,
     uint8_t *raw = (uint8_t *)in_buf;
     size_t rlen = in_len;
     capnp_segment_t seg;
-    capnp_message_t m;
+    capnp_message_t m = {0};
     if (from_fmt == FMT_FLAT_PACKED) {
       uint8_t *unpacked = NULL;
       size_t ulen = 0;
@@ -748,7 +748,7 @@ static int run_convert(const capnp_dyn_t *dyn, const char *type_name,
                                 &clen)) {
       uint8_t *msg_bytes = NULL;
       size_t mlen = 0;
-      capnp_message_t m;
+      capnp_message_t m = {0};
       int rc = is_json ? capnp_dyn_decode_json(dyn, type_name, in_buf + cstart,
                                                clen, &msg_bytes, &mlen)
                        : capnp_dyn_decode_text(dyn, type_name, in_buf + cstart,
@@ -945,7 +945,7 @@ int main(int argc, char **argv) {
     } else {
       uint8_t *msg_bytes = NULL;
       size_t mlen = 0;
-      capnp_message_t m;
+      capnp_message_t m = {0};
       int rc;
       if (capnp_dyn_eval_struct(dyn, expr, &msg_bytes, &mlen) != CAPNP_OK ||
           capnp_message_from_flat(&m, msg_bytes, mlen) != CAPNP_OK) {

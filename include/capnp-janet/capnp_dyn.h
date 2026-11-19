@@ -52,24 +52,24 @@ CAPNP_JANET_EXPORT int capnp_dyn_get_ptr(const capnp_dyn_t *d, const capnp_ptr_t
 CAPNP_JANET_EXPORT int capnp_dyn_which(const capnp_dyn_t *d, const capnp_ptr_t *s,
                                        const char *type_name, const char **out);
 
-CAPNP_JANET_EXPORT int capnp_dyn_encode_text(const capnp_dyn_t *d, const char *type_name,
+CAPNP_JANET_EXPORT int capnp_dyn_encode_text(capnp_dyn_t *d, const char *type_name,
                                              const capnp_ptr_t *s, char **out,
                                              size_t *len);
-CAPNP_JANET_EXPORT int capnp_dyn_encode_text_short(const capnp_dyn_t *d,
+CAPNP_JANET_EXPORT int capnp_dyn_encode_text_short(capnp_dyn_t *d,
                                                    const char *type_name,
                                                    const capnp_ptr_t *s,
                                                    char **out, size_t *len);
-CAPNP_JANET_EXPORT int capnp_dyn_decode_text(const capnp_dyn_t *d, const char *type_name,
+CAPNP_JANET_EXPORT int capnp_dyn_decode_text(capnp_dyn_t *d, const char *type_name,
                                              const char *text, size_t len, uint8_t **out,
                                              size_t *out_len);
-CAPNP_JANET_EXPORT int capnp_dyn_encode_json(const capnp_dyn_t *d, const char *type_name,
+CAPNP_JANET_EXPORT int capnp_dyn_encode_json(capnp_dyn_t *d, const char *type_name,
                                              const capnp_ptr_t *s, char **out,
                                              size_t *len);
-CAPNP_JANET_EXPORT int capnp_dyn_encode_json_short(const capnp_dyn_t *d,
+CAPNP_JANET_EXPORT int capnp_dyn_encode_json_short(capnp_dyn_t *d,
                                                    const char *type_name,
                                                    const capnp_ptr_t *s,
                                                    char **out, size_t *len);
-CAPNP_JANET_EXPORT int capnp_dyn_decode_json(const capnp_dyn_t *d, const char *type_name,
+CAPNP_JANET_EXPORT int capnp_dyn_decode_json(capnp_dyn_t *d, const char *type_name,
                                              const char *text, size_t len, uint8_t **out,
                                              size_t *out_len);
 
@@ -77,12 +77,12 @@ CAPNP_JANET_EXPORT int capnp_dyn_decode_json(const capnp_dyn_t *d, const char *t
  * `capnp eval schema.capnp name` does. `expr` is `name`, `Type.field`,
  * `Type.field.nested`, or `Type.field[index]`. The result has no trailing
  * newline. */
-CAPNP_JANET_EXPORT int capnp_dyn_eval(const capnp_dyn_t *d, const char *expr,
+CAPNP_JANET_EXPORT int capnp_dyn_eval(capnp_dyn_t *d, const char *expr,
                                       char **out, size_t *len);
-CAPNP_JANET_EXPORT int capnp_dyn_eval_ex(const capnp_dyn_t *d, const char *expr,
+CAPNP_JANET_EXPORT int capnp_dyn_eval_ex(capnp_dyn_t *d, const char *expr,
                                          int json, int pretty, char **out,
                                          size_t *len);
-CAPNP_JANET_EXPORT int capnp_dyn_eval_struct(const capnp_dyn_t *d,
+CAPNP_JANET_EXPORT int capnp_dyn_eval_struct(capnp_dyn_t *d,
                                              const char *expr, uint8_t **out,
                                              size_t *out_len);
 
