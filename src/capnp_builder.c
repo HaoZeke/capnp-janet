@@ -62,6 +62,8 @@ static int append_segment(capnp_builder_t *b, size_t cap_words) {
     cap_words = 1;
   if (cap_words > lim)
     cap_words = lim;
+  if (b->nsegs >= CAPNP_MAX_SEGMENTS)
+    return CAPNP_ERR_ALLOC;
   if (ensure_segs_cap(b, b->nsegs + 1))
     return CAPNP_ERR_ALLOC;
   s = &b->segs[b->nsegs];

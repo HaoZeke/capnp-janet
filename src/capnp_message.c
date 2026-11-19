@@ -14,20 +14,29 @@ void capnp_message_free(capnp_message_t *m) {
   if (!m)
     return;
   free(m->owned);
+  free(m->segs);
   m->owned = NULL;
   m->owned_len = 0;
+  m->segs = NULL;
   m->nsegs = 0;
 }
 
 static int attach_segments(capnp_message_t *m, const capnp_segment_t *segs,
                            uint32_t nsegs) {
+  capnp_segment_t *copy;
+  uint32_t i;
   if (nsegs == 0 || nsegs > CAPNP_MAX_SEGMENTS)
     return CAPNP_ERR_FRAMING;
-  for (uint32_t i = 0; i < nsegs; i++) {
+  for (i = 0; i < nsegs; i++) {
     if (!segs[i].data || (segs[i].words == 0 && i == 0))
       return CAPNP_ERR_FRAMING;
-    m->segs[i] = segs[i];
   }
+  copy = (capnp_segment_t *)malloc((size_t)nsegs * sizeof(*copy));
+  if (!copy)
+    return CAPNP_ERR_ALLOC;
+  memcpy(copy, segs, (size_t)nsegs * sizeof(*copy));
+  free(m->segs);
+  m->segs = copy;
   m->nsegs = nsegs;
   return CAPNP_OK;
 }
@@ -47,32 +56,53 @@ int capnp_message_from_segments(capnp_message_t *m, const capnp_segment_t *segs,
  */
 static int parse_flat(capnp_message_t *m, const uint8_t *data, size_t len,
                       int copy) {
+  uint32_t nsegs, i;
+  size_t table_bytes, total_words, body, off;
+  uint32_t *sizes;
+  const uint8_t *base;
+  capnp_segment_t *table;
+
   if (len < 8)
     return CAPNP_ERR_FRAMING;
-  uint32_t nsegs = capnp_load_le32(data) + 1u;
+  nsegs = capnp_load_le32(data) + 1u;
   if (nsegs == 0 || nsegs > CAPNP_MAX_SEGMENTS)
     return CAPNP_ERR_FRAMING;
-  size_t table_bytes = 4u + 4u * (size_t)nsegs;
+  if ((size_t)nsegs > (SIZE_MAX / 4u) - 1u)
+    return CAPNP_ERR_FRAMING;
+  table_bytes = 4u + 4u * (size_t)nsegs;
   if (table_bytes % 8u != 0)
     table_bytes += 4u; /* pad */
   if (len < table_bytes)
     return CAPNP_ERR_FRAMING;
 
-  size_t total_words = 0;
-  uint32_t sizes[CAPNP_MAX_SEGMENTS];
-  for (uint32_t i = 0; i < nsegs; i++) {
+  sizes = (uint32_t *)malloc((size_t)nsegs * sizeof(uint32_t));
+  if (!sizes)
+    return CAPNP_ERR_ALLOC;
+  total_words = 0;
+  for (i = 0; i < nsegs; i++) {
     sizes[i] = capnp_load_le32(data + 4 + 4 * i);
+    if ((size_t)sizes[i] > SIZE_MAX - total_words) {
+      free(sizes);
+      return CAPNP_ERR_FRAMING;
+    }
     total_words += sizes[i];
   }
-  size_t body = table_bytes + total_words * CAPNP_WORD_BYTES;
-  if (body > len)
+  if (total_words > (SIZE_MAX - table_bytes) / CAPNP_WORD_BYTES) {
+    free(sizes);
     return CAPNP_ERR_FRAMING;
+  }
+  body = table_bytes + total_words * CAPNP_WORD_BYTES;
+  if (body > len) {
+    free(sizes);
+    return CAPNP_ERR_FRAMING;
+  }
 
-  const uint8_t *base;
   if (copy) {
     m->owned = (uint8_t *)malloc(body);
-    if (!m->owned)
+    if (!m->owned) {
+      free(sizes);
       return CAPNP_ERR_ALLOC;
+    }
     memcpy(m->owned, data, body);
     m->owned_len = body;
     base = m->owned;
@@ -80,12 +110,23 @@ static int parse_flat(capnp_message_t *m, const uint8_t *data, size_t len,
     base = data;
   }
 
-  size_t off = table_bytes;
-  for (uint32_t i = 0; i < nsegs; i++) {
-    m->segs[i].data = base + off;
-    m->segs[i].words = sizes[i];
+  table = (capnp_segment_t *)malloc((size_t)nsegs * sizeof(*table));
+  if (!table) {
+    free(m->owned);
+    m->owned = NULL;
+    m->owned_len = 0;
+    free(sizes);
+    return CAPNP_ERR_ALLOC;
+  }
+  off = table_bytes;
+  for (i = 0; i < nsegs; i++) {
+    table[i].data = base + off;
+    table[i].words = sizes[i];
     off += (size_t)sizes[i] * CAPNP_WORD_BYTES;
   }
+  free(sizes);
+  free(m->segs);
+  m->segs = table;
   m->nsegs = nsegs;
   return CAPNP_OK;
 }

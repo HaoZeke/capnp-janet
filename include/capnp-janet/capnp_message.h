@@ -5,7 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CAPNP_MAX_SEGMENTS 16
+/* Hostile segment tables stop here. The builder refuses to emit more,
+ * so a message it writes stays readable. */
+#define CAPNP_MAX_SEGMENTS 65536u
 
 typedef struct capnp_segment {
   const uint8_t *data; /* words, little-endian */
@@ -13,7 +15,7 @@ typedef struct capnp_segment {
 } capnp_segment_t;
 
 typedef struct capnp_message {
-  capnp_segment_t segs[CAPNP_MAX_SEGMENTS];
+  capnp_segment_t *segs; /* heap table, nsegs long; NULL when nsegs == 0 */
   uint32_t nsegs;
   /* When non-NULL, owns a copy of the framed bytes (deserialize path). */
   uint8_t *owned;

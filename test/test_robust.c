@@ -182,6 +182,47 @@ static void test_builder_offset_overflow(void) {
   capnp_message_free(&m);
 }
 
+static void test_many_segments_roundtrip(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, cur, slot, next;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m;
+  capnp_ptr_t p;
+  uint32_t nsegs;
+  int i;
+  uint8_t huge[16];
+
+  capnp_builder_init_sized(&b, 1);
+  capnp_builder_set_max_seg_words(&b, 1);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  CHECK(capnp_builder_struct(&root, 0, 1, &cur) == CAPNP_OK, "first");
+  for (i = 0; i < 20; i++) {
+    CHECK(capnp_builder_slot(&cur, 0, 0, &slot) == CAPNP_OK, "slot");
+    CHECK(capnp_builder_struct(&slot, 0, 1, &next) == CAPNP_OK, "next");
+    cur = next;
+  }
+  nsegs = capnp_builder_nsegs(&b);
+  CHECK(nsegs > 16, "builder passed the old 16 segment cap");
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
+  capnp_builder_free(&b);
+  CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK,
+        "reader accepts the segments");
+  free(flat);
+  CHECK(m.nsegs == nsegs, "segment count preserved");
+  CHECK(capnp_root(&m, &p) == CAPNP_OK, "root");
+  CHECK(p.kind == CAPNP_PK_STRUCT, "root struct");
+  capnp_message_free(&m);
+
+  memset(huge, 0, sizeof(huge));
+  capnp_store_le32(huge, 1);
+  capnp_store_le32(huge + 4, 0xffffffffu);
+  capnp_store_le32(huge + 8, 0xffffffffu);
+  CHECK(capnp_message_from_flat(&m, huge, sizeof(huge)) == CAPNP_ERR_FRAMING,
+        "segment sizes do not wrap into a short body");
+  capnp_message_free(&m);
+}
+
 static void test_text_requires_nul(void) {
   uint8_t seg[24];
   capnp_segment_t s;
@@ -225,5 +266,6 @@ int main(void) {
   test_depth_limit_and_cycle();
   test_text_requires_nul();
   test_builder_offset_overflow();
+  test_many_segments_roundtrip();
   return harness_finish();
 }
