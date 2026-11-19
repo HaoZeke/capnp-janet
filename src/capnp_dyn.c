@@ -803,6 +803,35 @@ static int ident(ps_t *p, char *out, size_t n) {
   return 0;
 }
 
+static int hex_nibble(unsigned char c) {
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'a' && c <= 'f')
+    return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F')
+    return c - 'A' + 10;
+  return -1;
+}
+
+static int buf_add_utf8(buf_t *b, unsigned value) {
+  char bytes[3];
+  size_t n;
+  if (value < 0x80) {
+    bytes[0] = (char)value;
+    n = 1;
+  } else if (value < 0x800) {
+    bytes[0] = (char)(0xc0 | (value >> 6));
+    bytes[1] = (char)(0x80 | (value & 0x3f));
+    n = 2;
+  } else {
+    bytes[0] = (char)(0xe0 | (value >> 12));
+    bytes[1] = (char)(0x80 | ((value >> 6) & 0x3f));
+    bytes[2] = (char)(0x80 | (value & 0x3f));
+    n = 3;
+  }
+  return buf_add(b, bytes, n);
+}
+
 static int parse_string(ps_t *p, char **out, size_t *len) {
   buf_t b;
   memset(&b, 0, sizeof(b));
@@ -820,14 +849,41 @@ static int parse_string(ps_t *p, char **out, size_t *len) {
         c = '\n';
       else if (c == 't')
         c = '\t';
+      else if (c == 'r')
+        c = '\r';
+      else if (c == 'b')
+        c = '\b';
+      else if (c == 'f')
+        c = '\f';
+      else if (c == '"' || c == '\\' || c == '/')
+        ;
       else if (c == 'x') {
-        unsigned int v = 0;
+        int hi, lo;
         if (p->i + 2 > p->n)
           return -1;
-        if (sscanf(p->s + p->i, "%2x", &v) != 1)
+        if (p->json || (hi = hex_nibble((unsigned char)p->s[p->i])) < 0 ||
+            (lo = hex_nibble((unsigned char)p->s[p->i + 1])) < 0)
           return -1;
         p->i += 2;
-        c = (unsigned char)v;
+        c = (unsigned char)((hi << 4) | lo);
+      } else if (c == 'u') {
+        int a, b4, c4, d;
+        unsigned value;
+        if (p->i + 4 > p->n ||
+            (a = hex_nibble((unsigned char)p->s[p->i])) < 0 ||
+            (b4 = hex_nibble((unsigned char)p->s[p->i + 1])) < 0 ||
+            (c4 = hex_nibble((unsigned char)p->s[p->i + 2])) < 0 ||
+            (d = hex_nibble((unsigned char)p->s[p->i + 3])) < 0)
+          return -1;
+        value = (unsigned)((a << 12) | (b4 << 8) | (c4 << 4) | d);
+        p->i += 4;
+        if (value >= 0xd800 && value <= 0xdfff)
+          return -1;
+        if (buf_add_utf8(&b, value))
+          return -1;
+        continue;
+      } else {
+        return -1;
       }
     }
     if (buf_add(&b, (char *)&c, 1))
