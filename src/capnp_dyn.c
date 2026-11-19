@@ -5093,6 +5093,24 @@ static int ensure_flattened_struct_slot(const dyn_struct_t *st,
   return -1;
 }
 
+static int read_disc(const capnp_bptr_t *body, uint32_t disc_byte, uint16_t dwords,
+                     uint16_t *out) {
+  size_t nbytes, abs, seg_bytes;
+  nbytes = (size_t)dwords * 8u;
+  if ((size_t)disc_byte > nbytes || nbytes - (size_t)disc_byte < 2u)
+    return -1;
+  if (!body || !body->b || body->seg >= body->b->nsegs ||
+      body->word > SIZE_MAX / 8u ||
+      (size_t)disc_byte > SIZE_MAX - body->word * 8u)
+    return -1;
+  abs = body->word * 8u + (size_t)disc_byte;
+  seg_bytes = body->b->segs[body->seg].words * 8u;
+  if (abs > seg_bytes || seg_bytes - abs < 2u)
+    return -1;
+  *out = capnp_load_le16(body->b->segs[body->seg].data + abs);
+  return 0;
+}
+
 /* Return: 1 = handled (or unknown ignored), 0 = defer (waiting on union tag),
  * -1 = error */
 static int decode_json_field_entry(
@@ -5144,8 +5162,8 @@ static int decode_json_field_entry(
     uint16_t active = 0xffff;
     if (!has_union_seen(unions_seen, st))
       return 0; /* retry after union tag is seen */
-    active = capnp_load_le16(body->b->segs[body->seg].data +
-                             body->word * CAPNP_WORD_BYTES + st->disc_byte);
+    if (read_disc(body, st->disc_byte, st->dwords, &active))
+      return -1;
     for (i = 0; i < st->nfields; i++) {
       if (st->fields[i].disc == active) {
         if (build_field_from_vnode(d, st, &st->fields[i], env, val, body, 1,
@@ -5249,8 +5267,8 @@ static int decode_json_field_entry(
       uint32_t j;
       if (!has_union_seen(unions_seen, st))
         return 0; /* wait for union tag */
-      active = capnp_load_le16(body->b->segs[body->seg].data +
-                               body->word * CAPNP_WORD_BYTES + st->disc_byte);
+      if (read_disc(body, st->disc_byte, st->dwords, &active))
+        return -1;
       for (j = 0; j < st->nfields; j++) {
         if (st->fields[j].disc == active) {
           af = &st->fields[j];

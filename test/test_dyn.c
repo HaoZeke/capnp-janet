@@ -464,6 +464,54 @@ static int cmd_canon(const char *msg_path, const char *out) {
   return 0;
 }
 
+static int cmd_disc(const char *req, const char *mode) {
+  uint8_t *reqb = NULL, *flat = NULL, *msg = NULL;
+  size_t rn = 0, fl = 0, mn = 0;
+  capnp_message_t m;
+  capnp_ptr_t root, nodes, node;
+  capnp_dyn_t *d = NULL;
+  uint32_t i, n;
+  int oob = strcmp(mode, "oob") == 0;
+  int rc;
+  const char *json = "{\"kind\":\"b\",\"payload\":5}";
+  if (load_file(req, &reqb, &rn) || capnp_message_from_flat(&m, reqb, rn))
+    return 1;
+  free(reqb);
+  if (capnp_root(&m, &root) || capnp_getp(&root, 0, &nodes)) {
+    capnp_message_free(&m);
+    return 1;
+  }
+  n = capnp_list_len(&nodes);
+  for (i = 0; i < n; i++) {
+    uint8_t *p;
+    if (capnp_list_getp(&nodes, i, &node))
+      continue;
+    if (capnp_get_u16(&node, 12, 0xffff) != 1 || capnp_get_u16(&node, 30, 0) == 0)
+      continue;
+    if (!oob)
+      continue;
+    p = (uint8_t *)node.msg->segs[node.seg].data + node.word * 8 +
+        node.body_byte;
+    capnp_store_le32(p + 32, 4);
+  }
+  if (capnp_message_copy_flat(&m, &flat, &fl)) {
+    capnp_message_free(&m);
+    return 1;
+  }
+  capnp_message_free(&m);
+  if (capnp_dyn_init(&d, flat, fl) != CAPNP_OK) {
+    free(flat);
+    return 1;
+  }
+  free(flat);
+  rc = capnp_dyn_decode_json(d, "U", json, strlen(json), &msg, &mn);
+  free(msg);
+  capnp_dyn_free(d);
+  if (oob)
+    return rc == CAPNP_OK;
+  return rc != CAPNP_OK;
+}
+
 static int cmd_reject(const char *req, const char *type, const char *which,
                        const char *text, const char *needle) {
   capnp_dyn_t *d = NULL;
@@ -554,6 +602,8 @@ int main(int argc, char **argv) {
     return cmd_grow(argv[2], argv[3]);
   if (argc == 7 && strcmp(argv[1], "reject") == 0)
     return cmd_reject(argv[2], argv[3], argv[4], argv[5], argv[6]);
+  if (argc == 4 && strcmp(argv[1], "disc") == 0)
+    return cmd_disc(argv[2], argv[3]);
   fprintf(stderr, "usage: test_dyn <mode> ...\n");
   return 2;
 }

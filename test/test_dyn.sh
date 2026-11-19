@@ -173,4 +173,19 @@ EOF
 printf '%s\n' '{"tiny":1,"nope":9}' >"$TMP/unk.json"
 "$BIN" json-decode "$TMP/request.bin" "$TMP/unk.json" "$TMP/unk.bin"
 
+cat >"$TMP/u.capnp" <<'EOF'
+@0x9a8b7c6d5e4f3012;
+using Json = import "/capnp/compat/json.capnp";
+struct U $Json.discriminator(name = "kind", valueName = "payload") {
+  union {
+    a @0 :Void;
+    b @1 :UInt32;
+  }
+  extra @2 :Text;
+}
+EOF
+capnp compile -I"$INC" -o- "$TMP/u.capnp" >"$TMP/u_req.bin"
+"$BIN" disc "$TMP/u_req.bin" ok
+"$BIN" disc "$TMP/u_req.bin" oob
+
 echo "ok dyn"
