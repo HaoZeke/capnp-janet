@@ -3,6 +3,7 @@
 
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_message.h>
+#include <capnp-janet/capnp_pointer.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -201,6 +202,19 @@ static void test_ptr_list_edges(void) {
   CHECK(capnp_getp(&decoded, 0, &list) == CAPNP_OK, "ptr decoded list");
   CHECK(capnp_list_len(&list) == 0, "empty ptr list length");
   capnp_message_free(&m);
+
+  /* Zero-word list before a second pointer must target the segment head. */
+  capnp_builder_init(&b);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "head root");
+  CHECK(capnp_builder_struct(&root, 0, 2, &body) == CAPNP_OK, "head body");
+  CHECK(capnp_builder_set_list_u32(&body, 0, 0, NULL, 0) == CAPNP_OK,
+        "empty u32 list at slot 0");
+  CHECK(capnp_builder_set_text(&body, 0, 1, "hi", 2) == CAPNP_OK, "text at 1");
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "head ser");
+  capnp_builder_free(&b);
+  CHECK(capnp_wp_offset(capnp_load_le64(flat + 16)) == 1,
+        "slot 0 empty list offset points to segment head");
+  free(flat);
 }
 
 
