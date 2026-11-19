@@ -152,10 +152,18 @@ static void loopback(int unix_sock) {
   uint16_t port = 0;
   pid_t pid;
   capnp_link_t *client = (capnp_link_t *)calloc(1, sizeof(*client));
-  char path[] = "/tmp/capnp-janet-vat.sock";
+  char dir[] = "/tmp/capnp-janet-XXXXXX";
+  char path[sizeof(dir) + 16];
+  int have_dir = 0;
+  path[0] = 0;
   if (unix_sock) {
-    unlink(path);
-    check(capnp_listen_unix(path, &lfd) == CAPNP_OK, "listen unix");
+    have_dir = mkdtemp(dir) != NULL;
+    check(have_dir, "private socket dir");
+    if (have_dir) {
+      snprintf(path, sizeof(path), "%s/vat.sock", dir);
+      check(strstr(path, dir) == path, "socket stays in the private dir");
+      check(capnp_listen_unix(path, &lfd) == CAPNP_OK, "listen unix");
+    }
   } else {
     check(capnp_listen_tcp("127.0.0.1", 0, &lfd, &port) == CAPNP_OK, "listen tcp");
   }
@@ -163,15 +171,18 @@ static void loopback(int unix_sock) {
   if (pid == 0)
     child_serve(lfd);
   if (unix_sock)
-    check(capnp_link_dial_unix(client, path) == CAPNP_OK, "dial unix");
+    check(have_dir && capnp_link_dial_unix(client, path) == CAPNP_OK, "dial unix");
   else
     check(capnp_link_dial_tcp(client, "127.0.0.1", port) == CAPNP_OK, "dial tcp");
   client_add(client, unix_sock ? "unix sum" : "tcp sum");
   capnp_link_close(client);
   waitpid(pid, NULL, 0);
-  close(lfd);
-  if (unix_sock)
+  if (lfd >= 0)
+    close(lfd);
+  if (unix_sock && have_dir) {
     unlink(path);
+    rmdir(dir);
+  }
   free(client);
 }
 
