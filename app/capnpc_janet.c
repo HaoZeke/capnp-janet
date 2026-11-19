@@ -19,6 +19,7 @@
 
 #include <ctype.h>
 #include <errno.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -216,12 +217,6 @@ static const char *type_kw(uint16_t which) {
     return "interface";
   case TYPE_ANY_POINTER:
     return "any-pointer";
-  case 25:
-    return "any-struct";
-  case 26:
-    return "any-list";
-  case 27:
-    return "capability";
   default:
     return "unknown";
   }
@@ -285,7 +280,11 @@ static void scalar_default_literal(const capnp_ptr_t *field, uint16_t type,
   case TYPE_FLOAT32:
     bits32 = capnp_get_u32(&value, 4, 0);
     memcpy(&f32, &bits32, sizeof(f32));
-    if (bits32 == UINT32_C(0x80000000))
+    if (isnan(f32))
+      snprintf(out, outn, "math/nan");
+    else if (isinf(f32))
+      snprintf(out, outn, f32 < 0 ? "(- math/inf)" : "math/inf");
+    else if (bits32 == UINT32_C(0x80000000))
       snprintf(out, outn, "-0.0");
     else
       snprintf(out, outn, "%.9g", (double)f32);
@@ -293,7 +292,11 @@ static void scalar_default_literal(const capnp_ptr_t *field, uint16_t type,
   case TYPE_FLOAT64:
     bits64 = capnp_get_u64(&value, 8, 0);
     memcpy(&f64, &bits64, sizeof(f64));
-    if (bits64 == UINT64_C(0x8000000000000000))
+    if (isnan(f64))
+      snprintf(out, outn, "math/nan");
+    else if (isinf(f64))
+      snprintf(out, outn, f64 < 0 ? "(- math/inf)" : "math/inf");
+    else if (bits64 == UINT64_C(0x8000000000000000))
       snprintf(out, outn, "-0.0");
     else
       snprintf(out, outn, "%.17g", f64);
@@ -1428,14 +1431,28 @@ static void emit_const(FILE *out, const capnp_ptr_t *node) {
     uint32_t bits = capnp_get_u32(&value, 4, 0);
     float f32;
     memcpy(&f32, &bits, sizeof(f32));
-    fprintf(out, "%.9g", (double)f32);
+    if (isnan(f32))
+      fputs("math/nan", out);
+    else if (isinf(f32))
+      fputs(f32 < 0 ? "(- math/inf)" : "math/inf", out);
+    else if (bits == UINT32_C(0x80000000))
+      fputs("-0.0", out);
+    else
+      fprintf(out, "%.9g", (double)f32);
     break;
   }
   case TYPE_FLOAT64: {
     uint64_t bits = capnp_get_u64(&value, 8, 0);
     double f64;
     memcpy(&f64, &bits, sizeof(f64));
-    fprintf(out, "%.17g", f64);
+    if (isnan(f64))
+      fputs("math/nan", out);
+    else if (isinf(f64))
+      fputs(f64 < 0 ? "(- math/inf)" : "math/inf", out);
+    else if (bits == UINT64_C(0x8000000000000000))
+      fputs("-0.0", out);
+    else
+      fprintf(out, "%.17g", f64);
     break;
   }
   case TYPE_TEXT:
@@ -1454,7 +1471,7 @@ static void emit_const(FILE *out, const capnp_ptr_t *node) {
     break;
   }
   default:
-    fputs("nil", out);
+    fputs("(error \"unsupported Cap'n Proto pointer constant\")", out);
     break;
   }
   fputs(")\n", out);
