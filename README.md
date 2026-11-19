@@ -117,7 +117,7 @@ $ pixi run build
 $ pixi run test
 ```
 
-Or bare Meson:
+Or bare Meson 1.2 or newer (Debian bookworm's apt package is 1.0.1 and cannot configure this tree):
 
 ```console
 $ meson setup build

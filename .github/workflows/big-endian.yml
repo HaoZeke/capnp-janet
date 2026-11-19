@@ -23,7 +23,9 @@ jobs:
         uses: uraimo/run-on-arch-action@v2
         with:
           arch: s390x
-          distro: bookworm
+          distro: ubuntu24.04
+          # bookworm's apt meson is 1.0.1 and meson.build requires >= 1.2,
+          # so setup failed before any test ran. ubuntu24.04 ships 1.3.x.
           # No githubToken: GHCR package create is denied for this account
           # and the suite does not need it.
           install: |
