@@ -148,4 +148,21 @@ capnp encode -I"$INC" "$PARITY_SCHEMA" Parity <<< '(lF32 = [-0.0], lF64 = [-0.0]
 "$CLI" encode -I"$INC" "$PARITY_SCHEMA" Parity <<< '(lF32 = [-0.0], lF64 = [-0.0])' >"$TMP/negz_our.bin"
 cmp "$TMP/negz_ref.bin" "$TMP/negz_our.bin"
 
+# More than eight list elements forces both piece tables to grow. A
+# failed growth must not free a block the list still owns.
+capnp encode "$SCHEMA" Conform >"$TMP/grow.bin" <<'EOF'
+( flag = false,
+  tiny = 1,
+  wide = 1,
+  ratio = 1,
+  title = "t",
+  blob = "b",
+  inner = (n = 1, label = "l"),
+  buckets = [(name = "a", scores = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12])],
+  matrix = [["x"]],
+  note = "n",
+  meta = (rev = 1, comment = "c") )
+EOF
+"$BIN" grow "$TMP/request.bin" "$TMP/grow.bin"
+
 echo "ok dyn"

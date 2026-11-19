@@ -1576,14 +1576,30 @@ static void free_pieces(piece_list_t *pl) {
 
 static int add_piece(piece_list_t *pl, char *s, size_t len) {
   if (pl->count == pl->cap) {
-    uint32_t ncap = pl->cap ? pl->cap * 2u : 8u;
-    char **ni = (char **)realloc(pl->items, (size_t)ncap * sizeof(char *));
-    size_t *nl = (size_t *)realloc(pl->lens, (size_t)ncap * sizeof(size_t));
+    uint32_t ncap;
+    char **ni;
+    size_t *nl;
+    if (pl->cap > UINT32_MAX / 2u)
+      return -1;
+    ncap = pl->cap ? pl->cap * 2u : 8u;
+#if SIZE_MAX <= UINT32_MAX
+    if ((size_t)ncap > SIZE_MAX / sizeof(char *) ||
+        (size_t)ncap > SIZE_MAX / sizeof(size_t))
+      return -1;
+#endif
+    ni = (char **)malloc((size_t)ncap * sizeof(char *));
+    nl = (size_t *)malloc((size_t)ncap * sizeof(size_t));
     if (!ni || !nl) {
       free(ni);
       free(nl);
       return -1;
     }
+    if (pl->count) {
+      memcpy(ni, pl->items, (size_t)pl->count * sizeof(char *));
+      memcpy(nl, pl->lens, (size_t)pl->count * sizeof(size_t));
+    }
+    free(pl->items);
+    free(pl->lens);
     pl->items = ni;
     pl->lens = nl;
     pl->cap = ncap;
@@ -2149,16 +2165,36 @@ static void free_json_list(json_list_t *jl) {
 
 static int add_json_item(json_list_t *jl, char *s, size_t len, int multi) {
   if (jl->count == jl->cap) {
-    uint32_t ncap = jl->cap ? jl->cap * 2u : 8u;
-    char **ni = (char **)realloc(jl->items, (size_t)ncap * sizeof(char *));
-    size_t *nl = (size_t *)realloc(jl->lens, (size_t)ncap * sizeof(size_t));
-    int *nm = (int *)realloc(jl->multiline, (size_t)ncap * sizeof(int));
+    uint32_t ncap;
+    char **ni;
+    size_t *nl;
+    int *nm;
+    if (jl->cap > UINT32_MAX / 2u)
+      return -1;
+    ncap = jl->cap ? jl->cap * 2u : 8u;
+#if SIZE_MAX <= UINT32_MAX
+    if ((size_t)ncap > SIZE_MAX / sizeof(char *) ||
+        (size_t)ncap > SIZE_MAX / sizeof(size_t) ||
+        (size_t)ncap > SIZE_MAX / sizeof(int))
+      return -1;
+#endif
+    ni = (char **)malloc((size_t)ncap * sizeof(char *));
+    nl = (size_t *)malloc((size_t)ncap * sizeof(size_t));
+    nm = (int *)malloc((size_t)ncap * sizeof(int));
     if (!ni || !nl || !nm) {
       free(ni);
       free(nl);
       free(nm);
       return -1;
     }
+    if (jl->count) {
+      memcpy(ni, jl->items, (size_t)jl->count * sizeof(char *));
+      memcpy(nl, jl->lens, (size_t)jl->count * sizeof(size_t));
+      memcpy(nm, jl->multiline, (size_t)jl->count * sizeof(int));
+    }
+    free(jl->items);
+    free(jl->lens);
+    free(jl->multiline);
     jl->items = ni;
     jl->lens = nl;
     jl->multiline = nm;

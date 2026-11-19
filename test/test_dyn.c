@@ -1,3 +1,4 @@
+#define _GNU_SOURCE
 #include "harness.h"
 
 #include <capnp-janet/capnp_canonical.h>
@@ -9,6 +10,43 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#if !defined(__SANITIZE_ADDRESS__)
+#include <dlfcn.h>
+#endif
+
+#if !defined(__SANITIZE_ADDRESS__)
+/* Fail the second of a back-to-back growth of an existing block. The
+ * text and JSON list builders used to realloc both arrays and then free
+ * the new pointers, leaving the struct holding the block realloc had
+ * already released. */
+static void *(*real_realloc)(void *, size_t);
+static int grow_arm;
+static int grow_prev_ok;
+static size_t grow_prev_n;
+
+__attribute__((constructor)) static void init_realloc_hook(void) {
+  real_realloc = (void *(*)(void *, size_t))dlsym(RTLD_NEXT, "realloc");
+}
+
+void *realloc(void *p, size_t n) {
+  void *r;
+  if (!real_realloc)
+    return NULL;
+  if (grow_arm && p && grow_prev_ok && n == grow_prev_n && n == 128) {
+    grow_prev_ok = 0;
+    grow_arm = 0;
+    return NULL;
+  }
+  r = real_realloc(p, n);
+  if (grow_arm && p && r) {
+    grow_prev_ok = 1;
+    grow_prev_n = n;
+  } else {
+    grow_prev_ok = 0;
+  }
+  return r;
+}
+#endif
 
 static int load_file(const char *path, uint8_t **out, size_t *out_len) {
   FILE *f = fopen(path, "rb");
@@ -426,6 +464,49 @@ static int cmd_canon(const char *msg_path, const char *out) {
   return 0;
 }
 
+static int cmd_grow(const char *req, const char *msg_path) {
+  capnp_dyn_t *d = NULL;
+  capnp_message_t m;
+  capnp_ptr_t root;
+  char *text = NULL;
+  char *json = NULL;
+  size_t n = 0, jn = 0;
+  int rc;
+  if (open_root(req, msg_path, &d, &m, &root))
+    return 1;
+#if !defined(__SANITIZE_ADDRESS__)
+  grow_arm = 1;
+  grow_prev_ok = 0;
+#endif
+  rc = capnp_dyn_encode_text(d, "Conform", &root, &text, &n);
+#if !defined(__SANITIZE_ADDRESS__)
+  grow_arm = 0;
+#endif
+  if (rc != CAPNP_OK || !text || !strstr(text, "scores")) {
+    free(text);
+    capnp_message_free(&m);
+    capnp_dyn_free(d);
+    return 1;
+  }
+  free(text);
+#if !defined(__SANITIZE_ADDRESS__)
+  grow_arm = 1;
+  grow_prev_ok = 0;
+#endif
+  rc = capnp_dyn_encode_json(d, "Conform", &root, &json, &jn);
+#if !defined(__SANITIZE_ADDRESS__)
+  grow_arm = 0;
+#endif
+  capnp_message_free(&m);
+  capnp_dyn_free(d);
+  if (rc != CAPNP_OK || !json || !strstr(json, "scores")) {
+    free(json);
+    return 1;
+  }
+  free(json);
+  return 0;
+}
+
 int main(int argc, char **argv) {
   if (argc == 4 && strcmp(argv[1], "read") == 0)
     return cmd_read(argv[2], argv[3]);
@@ -441,6 +522,8 @@ int main(int argc, char **argv) {
     return cmd_decode(argv[2], argv[3], argv[4], 1);
   if (argc == 4 && strcmp(argv[1], "canon") == 0)
     return cmd_canon(argv[2], argv[3]);
+  if (argc == 4 && strcmp(argv[1], "grow") == 0)
+    return cmd_grow(argv[2], argv[3]);
   fprintf(stderr, "usage: test_dyn <mode> ...\n");
   return 2;
 }
