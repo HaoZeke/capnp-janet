@@ -150,6 +150,40 @@ static void test_depth_limit_and_cycle(void) {
   capnp_message_free(&m);
 }
 
+static void test_text_requires_nul(void) {
+  uint8_t seg[24];
+  capnp_segment_t s;
+  capnp_message_t m;
+  capnp_ptr_t root;
+  const char *text = NULL;
+  size_t n = 99;
+
+  memset(seg, 0, sizeof(seg));
+  /* Root struct: 0 data, 1 pointer. Pointer targets a 4-byte list "abcd" with no NUL. */
+  capnp_store_le64(seg, capnp_wp_make_struct(0, 0, 1));
+  capnp_store_le64(seg + 8, capnp_wp_make_list(0, CAPNP_SZ_BYTE, 4));
+  memcpy(seg + 16, "abcd", 4);
+  s.data = seg;
+  s.words = 3;
+  CHECK(capnp_message_from_segments(&m, &s, 1) == CAPNP_OK, "view");
+  CHECK(capnp_root(&m, &root) == CAPNP_OK, "root");
+  CHECK(capnp_get_text(&root, 0, &text, &n) == CAPNP_ERR_KIND,
+        "text without NUL");
+  capnp_message_free(&m);
+
+  memset(seg, 0, sizeof(seg));
+  capnp_store_le64(seg, capnp_wp_make_struct(0, 0, 1));
+  capnp_store_le64(seg + 8, capnp_wp_make_list(0, CAPNP_SZ_BYTE, 5));
+  memcpy(seg + 16, "abcd", 5); /* fourth payload byte plus NUL in the word */
+  seg[20] = 0;
+  s.words = 3;
+  CHECK(capnp_message_from_segments(&m, &s, 1) == CAPNP_OK, "view nul");
+  CHECK(capnp_root(&m, &root) == CAPNP_OK, "root nul");
+  CHECK(capnp_get_text(&root, 0, &text, &n) == CAPNP_OK, "terminated text");
+  CHECK(n == 4 && text && memcmp(text, "abcd", 4) == 0, "abcd");
+  capnp_message_free(&m);
+}
+
 int main(void) {
   test_truncated_framing();
   test_inline_struct_out_of_bounds();
@@ -157,5 +191,6 @@ int main(void) {
   test_double_far_list_out_of_bounds();
   test_negative_composite_count();
   test_depth_limit_and_cycle();
+  test_text_requires_nul();
   return harness_finish();
 }

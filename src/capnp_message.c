@@ -442,6 +442,28 @@ int capnp_get_bool(const capnp_ptr_t *s, uint32_t bit_offset, int dflt) {
   return (data_bytes(s)[byte_offset] & bit) != 0;
 }
 
+/* Text is a byte list whose last element is NUL. A null pointer is the
+ * empty default; a list that does not end in NUL is not text. */
+static int text_from_bytes(const capnp_ptr_t *list, const char **out,
+                           size_t *len) {
+  const char *p;
+  size_t n;
+  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_BYTE)
+    return CAPNP_ERR_KIND;
+  if (list->count == 0)
+    return CAPNP_ERR_KIND;
+  p = (const char *)(list->msg->segs[list->seg].data +
+                     list->word * CAPNP_WORD_BYTES);
+  n = list->count;
+  if (p[n - 1] != '\0')
+    return CAPNP_ERR_KIND;
+  if (out)
+    *out = p;
+  if (len)
+    *len = n - 1;
+  return CAPNP_OK;
+}
+
 int capnp_get_text(const capnp_ptr_t *s, uint16_t ptr_index, const char **out,
                    size_t *len) {
   capnp_ptr_t list;
@@ -455,26 +477,7 @@ int capnp_get_text(const capnp_ptr_t *s, uint16_t ptr_index, const char **out,
       *len = 0;
     return CAPNP_OK;
   }
-  if (list.kind != CAPNP_PK_LIST || list.esize != CAPNP_SZ_BYTE)
-    return CAPNP_ERR_KIND;
-  if (list.count == 0) {
-    if (out)
-      *out = "";
-    if (len)
-      *len = 0;
-    return CAPNP_OK;
-  }
-  const char *p =
-      (const char *)(list.msg->segs[list.seg].data + list.word * CAPNP_WORD_BYTES);
-  /* count includes trailing NUL */
-  size_t n = list.count;
-  if (n > 0 && p[n - 1] == '\0')
-    n -= 1;
-  if (out)
-    *out = p;
-  if (len)
-    *len = n;
-  return CAPNP_OK;
+  return text_from_bytes(&list, out, len);
 }
 
 uint32_t capnp_list_len(const capnp_ptr_t *list) {
@@ -540,18 +543,8 @@ int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
         *len = 0;
       return CAPNP_OK;
     }
-    if (elem.kind == CAPNP_PK_LIST && elem.esize == CAPNP_SZ_BYTE) {
-      const char *p = (const char *)(elem.msg->segs[elem.seg].data +
-                                     elem.word * CAPNP_WORD_BYTES);
-      size_t n = elem.count;
-      if (n > 0 && p[n - 1] == '\0')
-        n -= 1;
-      if (out)
-        *out = p;
-      if (len)
-        *len = n;
-      return CAPNP_OK;
-    }
+    if (elem.kind == CAPNP_PK_LIST && elem.esize == CAPNP_SZ_BYTE)
+      return text_from_bytes(&elem, out, len);
     return CAPNP_ERR_KIND;
   }
 
