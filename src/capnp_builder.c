@@ -327,36 +327,46 @@ size_t capnp_builder_struct_body(const capnp_bptr_t *struct_ptr) {
   return (size_t)((int64_t)struct_ptr->word + 1 + off);
 }
 
-static int body_ok(const capnp_bptr_t *body, size_t abs_end) {
-  if (!body || !body->b || body->seg >= body->b->nsegs)
+/* Locate `width` bytes at byte_offset inside the segment. A wrapped
+ * offset must fail before any byte is stored. */
+static int body_span(const capnp_bptr_t *body, uint32_t byte_offset,
+                     size_t width, uint8_t **out) {
+  size_t base, abs, seg_bytes;
+  if (!body || !body->b || width == 0)
     return CAPNP_ERR_ARG;
-  if (abs_end > body->b->segs[body->seg].words * CAPNP_WORD_BYTES)
+  if (body->seg >= body->b->nsegs)
+    return CAPNP_ERR_SEGMENT;
+  if (body->word > SIZE_MAX / CAPNP_WORD_BYTES)
     return CAPNP_ERR_BOUNDS;
+  base = body->word * CAPNP_WORD_BYTES;
+  if ((size_t)byte_offset > SIZE_MAX - base)
+    return CAPNP_ERR_BOUNDS;
+  abs = base + (size_t)byte_offset;
+  if (width > SIZE_MAX - abs)
+    return CAPNP_ERR_BOUNDS;
+  seg_bytes = body->b->segs[body->seg].words * CAPNP_WORD_BYTES;
+  if (abs + width > seg_bytes)
+    return CAPNP_ERR_BOUNDS;
+  *out = body->b->segs[body->seg].data + abs;
   return CAPNP_OK;
 }
 
 int capnp_builder_set_u8(const capnp_bptr_t *body, uint32_t byte_offset,
                          uint8_t value) {
-  size_t abs;
-  if (!body || !body->b)
-    return CAPNP_ERR_ARG;
-  abs = body->word * CAPNP_WORD_BYTES + byte_offset;
-  if (body_ok(body, abs + 1))
-    return CAPNP_ERR_BOUNDS;
-  body->b->segs[body->seg].data[abs] = value;
+  uint8_t *p;
+  int rc = body_span(body, byte_offset, 1, &p);
+  if (rc)
+    return rc;
+  *p = value;
   return CAPNP_OK;
 }
 
 int capnp_builder_set_u16(const capnp_bptr_t *body, uint32_t byte_offset,
                           uint16_t value) {
-  size_t abs;
   uint8_t *p;
-  if (!body || !body->b)
-    return CAPNP_ERR_ARG;
-  abs = body->word * CAPNP_WORD_BYTES + byte_offset;
-  if (body_ok(body, abs + 2))
-    return CAPNP_ERR_BOUNDS;
-  p = body->b->segs[body->seg].data + abs;
+  int rc = body_span(body, byte_offset, 2, &p);
+  if (rc)
+    return rc;
   p[0] = (uint8_t)value;
   p[1] = (uint8_t)(value >> 8);
   return CAPNP_OK;
@@ -364,25 +374,21 @@ int capnp_builder_set_u16(const capnp_bptr_t *body, uint32_t byte_offset,
 
 int capnp_builder_set_u32(const capnp_bptr_t *body, uint32_t byte_offset,
                           uint32_t value) {
-  size_t abs;
-  if (!body || !body->b)
-    return CAPNP_ERR_ARG;
-  abs = body->word * CAPNP_WORD_BYTES + byte_offset;
-  if (body_ok(body, abs + 4))
-    return CAPNP_ERR_BOUNDS;
-  capnp_store_le32(body->b->segs[body->seg].data + abs, value);
+  uint8_t *p;
+  int rc = body_span(body, byte_offset, 4, &p);
+  if (rc)
+    return rc;
+  capnp_store_le32(p, value);
   return CAPNP_OK;
 }
 
 int capnp_builder_set_u64(const capnp_bptr_t *body, uint32_t byte_offset,
                           uint64_t value) {
-  size_t abs;
-  if (!body || !body->b)
-    return CAPNP_ERR_ARG;
-  abs = body->word * CAPNP_WORD_BYTES + byte_offset;
-  if (body_ok(body, abs + 8))
-    return CAPNP_ERR_BOUNDS;
-  capnp_store_le64(body->b->segs[body->seg].data + abs, value);
+  uint8_t *p;
+  int rc = body_span(body, byte_offset, 8, &p);
+  if (rc)
+    return rc;
+  capnp_store_le64(p, value);
   return CAPNP_OK;
 }
 
@@ -426,15 +432,11 @@ int capnp_builder_clear_ptr(const capnp_bptr_t *body, uint16_t dwords,
 
 int capnp_builder_set_bool(const capnp_bptr_t *body, uint32_t bit_offset,
                            int value) {
-  size_t abs;
   uint8_t bit, *p;
-  if (!body || !body->b)
-    return CAPNP_ERR_ARG;
-  abs = body->word * CAPNP_WORD_BYTES + bit_offset / 8;
-  if (body_ok(body, abs + 1))
-    return CAPNP_ERR_BOUNDS;
-  p = body->b->segs[body->seg].data + abs;
-  bit = (uint8_t)(1u << (bit_offset % 8));
+  int rc = body_span(body, bit_offset / 8u, 1, &p);
+  if (rc)
+    return rc;
+  bit = (uint8_t)(1u << (bit_offset % 8u));
   if (value)
     *p |= bit;
   else

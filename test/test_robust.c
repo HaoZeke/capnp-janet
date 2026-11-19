@@ -150,6 +150,38 @@ static void test_depth_limit_and_cycle(void) {
   capnp_message_free(&m);
 }
 
+static void test_builder_offset_overflow(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m;
+  capnp_ptr_t r;
+
+  capnp_builder_init_sized(&b, 2);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  CHECK(capnp_builder_struct(&root, 1, 0, &body) == CAPNP_OK, "struct");
+  CHECK(capnp_builder_set_u8(&body, UINT32_MAX, 0x11) == CAPNP_ERR_BOUNDS,
+        "u8 offset wraps");
+  CHECK(capnp_builder_set_u32(&body, UINT32_MAX - 2u, 1) == CAPNP_ERR_BOUNDS,
+        "u32 offset wraps");
+  CHECK(capnp_builder_set_u64(&body, UINT32_MAX, 1) == CAPNP_ERR_BOUNDS,
+        "u64 offset wraps");
+  CHECK(capnp_builder_set_bool(&body, UINT32_MAX, 1) == CAPNP_ERR_BOUNDS,
+        "bool offset wraps");
+  CHECK(capnp_builder_set_u32(&body, 0, 0x11223344u) == CAPNP_OK, "in range");
+  CHECK(capnp_builder_set_u8(&body, 7, 0xab) == CAPNP_OK, "last byte");
+  CHECK(capnp_builder_set_u8(&body, 8, 1) == CAPNP_ERR_BOUNDS, "past segment");
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
+  capnp_builder_free(&b);
+  CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "parse");
+  free(flat);
+  CHECK(capnp_root(&m, &r) == CAPNP_OK, "read");
+  CHECK(capnp_get_u32(&r, 0, 0) == 0x11223344u, "low word kept");
+  CHECK(capnp_get_u8(&r, 7, 0) == 0xab, "last byte kept");
+  capnp_message_free(&m);
+}
+
 static void test_text_requires_nul(void) {
   uint8_t seg[24];
   capnp_segment_t s;
@@ -192,5 +224,6 @@ int main(void) {
   test_negative_composite_count();
   test_depth_limit_and_cycle();
   test_text_requires_nul();
+  test_builder_offset_overflow();
   return harness_finish();
 }
