@@ -65,8 +65,8 @@ static inline capnp_bptr_t capnp_bptr_add(capnp_bptr_t base, size_t word_delta) 
 }
 
 CAPNP_JANET_EXPORT int capnp_builder_root(capnp_builder_t *b, capnp_bptr_t *root);
-CAPNP_JANET_EXPORT int capnp_builder_struct(capnp_bptr_t *ptr, uint16_t dwords, uint16_t pwords,
-                         capnp_bptr_t *body_out);
+CAPNP_JANET_EXPORT int capnp_builder_struct(const capnp_bptr_t *ptr, uint16_t dwords,
+                         uint16_t pwords, capnp_bptr_t *body_out);
 
 CAPNP_JANET_EXPORT int capnp_builder_set_u8(const capnp_bptr_t *body, uint32_t byte_offset,
                          uint8_t value);

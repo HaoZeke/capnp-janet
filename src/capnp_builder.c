@@ -322,7 +322,7 @@ int capnp_builder_root(capnp_builder_t *b, capnp_bptr_t *root) {
   return CAPNP_OK;
 }
 
-int capnp_builder_struct(capnp_bptr_t *ptr, uint16_t dwords, uint16_t pwords,
+int capnp_builder_struct(const capnp_bptr_t *ptr, uint16_t dwords, uint16_t pwords,
                          capnp_bptr_t *body_out) {
   size_t n = (size_t)dwords + pwords;
   uint32_t body_seg;
