@@ -7,11 +7,11 @@ SERVER="${CAPNP_JANET_RPC_SERVER:-$BUILD/rpc_peer_server}"
 MODULE="${CAPNP_JANET_MODULE:-$BUILD/capnp.so}"
 if ! command -v janet >/dev/null 2>&1; then
   echo "SKIP: no janet" >&2
-  exit 0
+  exit 77
 fi
 if [[ ! -x "$SERVER" || ! -f "$MODULE" ]]; then
   echo "SKIP: need rpc_peer_server and capnp.so" >&2
-  exit 0
+  exit 77
 fi
 PORT=$((RANDOM % 20000 + 30000))
 "$SERVER" "$PORT" &

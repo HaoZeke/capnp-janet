@@ -53,6 +53,32 @@ jobs:
           CAPNP_JANET_MODULE="$PWD/build-janet/capnp.so" \
           pixi run -e janet -- bash test/test_codegen.sh
 
+  janet-rpc:
+    name: janet vat against capnp-C++
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: prefix-dev/setup-pixi@v0.8.3
+        with:
+          environments: janet
+      # Janet 1.36 comes from the janet environment. The same environment
+      # still has the C toolchain and capnproto, so the C++ Adder peer and
+      # capnp.so are built together and the vat tests cannot skip.
+      - name: Build Janet 1.36 module and the C++ peer
+        run: |
+          pixi run -e janet -- janet -e '(if (< (scan-number janet/version) 1.36) (os/exit 1))'
+          pixi run -e janet -- meson setup build-janet -Djanet=enabled
+          pixi run -e janet -- meson compile -C build-janet
+          test -f build-janet/capnp.so
+          test -x build-janet/rpc_peer_server
+          test -x build-janet/rpc_peer_client
+      - name: rpc_janet and rpc_janet_host run
+        run: |
+          set -o pipefail
+          pixi run -e janet -- meson test -C build-janet rpc_janet rpc_janet_host --print-errorlogs | tee /tmp/janet-rpc.txt
+          grep -E 'rpc_janet[[:space:]]+OK' /tmp/janet-rpc.txt
+          grep -E 'rpc_janet_host[[:space:]]+OK' /tmp/janet-rpc.txt
+
   packaging:
     name: downstream consumption
     runs-on: ubuntu-latest

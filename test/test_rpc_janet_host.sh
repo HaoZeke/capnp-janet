@@ -8,7 +8,7 @@ CLIENT="$BUILD/rpc_peer_client"
 MODULE="${CAPNP_JANET_MODULE:-$BUILD/capnp.so}"
 if ! command -v janet >/dev/null 2>&1 || [[ ! -f "$MODULE" || ! -x "$CLIENT" || ! -x "$SERVER" ]]; then
   echo "SKIP: janet host tools not built" >&2
-  exit 0
+  exit 77
 fi
 MODDIR=$(cd "$(dirname "$MODULE")" && pwd)
 export JANET_PATH="$MODDIR"
