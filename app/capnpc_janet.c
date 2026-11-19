@@ -871,6 +871,70 @@ static void emit_brand_accessors(FILE *out, const char *parent,
   (void)params;
 }
 
+static void emit_hex_string(FILE *out, const uint8_t *p, size_t n) {
+  size_t i;
+  fputc('"', out);
+  for (i = 0; i < n; i++)
+    fprintf(out, "\\x%02x", p[i]);
+  fputc('"', out);
+}
+
+/* 1 when a struct or list default was emitted, 0 when there is none, -1
+ * on failure. The bytes are a framed canonical message whose root is the
+ * default value. */
+static int emit_pointer_default(FILE *out, const char *sname, const char *fname,
+                                uint32_t offset, const capnp_ptr_t *field) {
+  capnp_ptr_t value, child;
+  capnp_builder_t b;
+  capnp_bptr_t root;
+  capnp_message_t msg;
+  uint8_t *flat = NULL, *canon = NULL;
+  size_t flen = 0, clen = 0;
+  uint16_t which;
+  int rc;
+  if (capnp_getp(field, 3, &value) != CAPNP_OK || value.kind != CAPNP_PK_STRUCT)
+    return 0;
+  which = capnp_get_u16(&value, 0, 0xffff);
+  if (which != TYPE_STRUCT && which != TYPE_LIST)
+    return 0;
+  if (capnp_getp(&value, 0, &child) != CAPNP_OK || child.kind == CAPNP_PK_NULL)
+    return 0;
+  capnp_builder_init(&b);
+  if (capnp_builder_root(&b, &root) || capnp_builder_copy_ptr(&root, &child)) {
+    capnp_builder_free(&b);
+    return -1;
+  }
+  rc = capnp_builder_serialize(&b, &flat, &flen);
+  capnp_builder_free(&b);
+  if (rc) {
+    free(flat);
+    return -1;
+  }
+  if (capnp_message_from_flat(&msg, flat, flen) != CAPNP_OK) {
+    free(flat);
+    return -1;
+  }
+  free(flat);
+  rc = capnp_canonicalize_framed(&msg, &canon, &clen);
+  capnp_message_free(&msg);
+  if (rc != CAPNP_OK) {
+    free(canon);
+    return -1;
+  }
+  fprintf(out, "(def %s-%s-default ", sname, fname);
+  emit_hex_string(out, canon, clen);
+  fprintf(out, ")\n");
+  fprintf(out,
+          "(defn %s-get-%s [ptr]\n"
+          "  (def v (capnp/getp ptr %u))\n"
+          "  (if (= (v :kind) :null)\n"
+          "    (:root (capnp/message-from-buffer %s-%s-default))\n"
+          "    v))\n",
+          sname, fname, (unsigned)offset, sname, fname);
+  free(canon);
+  return 1;
+}
+
 static void emit_struct(FILE *out, const capnp_ptr_t *node,
                         const capnp_ptr_t *nodes) {
   /* Node struct group: dataWordCount @bits 112-128 = byte 14 as u16?
@@ -1249,9 +1313,10 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       capnp_ptr_t element_type;
       uint16_t element_which = 0xffff;
       const char *list_suffix;
-      fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/getp ptr %u))\n", sname, fname,
-              (unsigned)offset);
+      if (emit_pointer_default(out, sname, fname, offset, &f) <= 0)
+        fprintf(out,
+                "(defn %s-get-%s [ptr]\n  (capnp/getp ptr %u))\n", sname, fname,
+                (unsigned)offset);
       if (capnp_getp(&typ, 0, &element_type) == CAPNP_OK &&
           element_type.kind == CAPNP_PK_STRUCT)
         element_which = capnp_get_u16(&element_type, 0, 0xffff);
@@ -1264,6 +1329,9 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       break;
     }
     case TYPE_STRUCT:
+      if (emit_pointer_default(out, sname, fname, offset, &f) > 0)
+        break;
+      /* fall through */
     case TYPE_ANY_POINTER:
     case 25: /* AnyStruct */
     case 26: /* AnyList */

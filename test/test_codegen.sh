@@ -147,6 +147,30 @@ grep -F -q ':value 7' generic.janet
 grep -F -q '(def Holder-text-box-annotations @[' generic.janet
 grep -F -q ':value 3' generic.janet
 
+cp "$ROOT/schema/defaults.capnp" "$TMP/"
+capnp compile "-o$PLUGIN" defaults.capnp
+test -f defaults.janet
+grep -q '(def Wrap-origin-default "' defaults.janet
+grep -q '(def Wrap-labels-default "' defaults.janet
+grep -q '(defn Wrap-get-origin \[ptr\]' defaults.janet
+grep -q '(defn Wrap-get-labels \[ptr\]' defaults.janet
+grep -q '(v :kind) :null' defaults.janet
+python3 - "$TMP/defaults.janet" "$TMP/origin.bin" "$TMP/labels.bin" <<'PY'
+import re, pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+def grab(name, dest):
+    m = re.search(r'\(def %s "((?:\\x[0-9a-fA-F]{2})+)"' % name, text)
+    if not m:
+        raise SystemExit("missing " + name)
+    raw = bytes(int(h, 16) for h in re.findall(r'\\x([0-9a-fA-F]{2})', m.group(1)))
+    pathlib.Path(dest).write_bytes(raw)
+grab("Wrap-origin-default", sys.argv[2])
+grab("Wrap-labels-default", sys.argv[3])
+PY
+capnp decode "$ROOT/schema/defaults.capnp" Point <"$TMP/origin.bin" >"$TMP/origin.txt"
+grep -q 'x = 4' "$TMP/origin.txt"
+grep -q 'y = 5' "$TMP/origin.txt"
+
 MODULE=${CAPNP_JANET_MODULE:-$BUILD/capnp.so}
 if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then
   cp "$MODULE" "$TMP/capnp.so"
