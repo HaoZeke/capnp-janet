@@ -325,6 +325,10 @@ static void test_frame_little_endian(void) {
   check(capnp_read_frame(sv[1], buf, sizeof(buf), &n) == CAPNP_OK, "read frame");
   check(n == sizeof(frame), "frame length");
   check(capnp_load_le32(buf) == 1, "segment count minus one");
+  check(buf[4] == 1 && buf[5] == 0 && buf[6] == 0 && buf[7] == 0,
+        "first size is little-endian");
+  check(buf[8] == 2 && buf[9] == 0 && buf[10] == 0 && buf[11] == 0,
+        "second size is little-endian");
   check(capnp_load_le32(buf + 4) == 1, "first segment words");
   check(capnp_load_le32(buf + 8) == 2, "second segment words");
   check(capnp_load_le64(buf + 16) == 0x1122334455667788ULL, "seg0");
@@ -334,6 +338,38 @@ static void test_frame_little_endian(void) {
   close(sv[1]);
 }
 
+static uint8_t g_boot[256];
+static size_t g_boot_len;
+
+static int capture_send(void *ctx, const uint8_t *data, size_t len) {
+  (void)ctx;
+  if (len > sizeof(g_boot))
+    return -1;
+  memcpy(g_boot, data, len);
+  g_boot_len = len;
+  return 0;
+}
+
+/* A bootstrap is one small segment. The word count's low byte is first
+ * and the three high bytes are zero. A big-endian store of that count
+ * puts the nonzero byte at the other end. */
+static void test_bootstrap_frame_little_endian(void) {
+  capnp_rpc_conn_t conn;
+  uint32_t words;
+  memset(&conn, 0, sizeof(conn));
+  capnp_rpc_init(&conn, capture_send, NULL);
+  g_boot_len = 0;
+  check(capnp_rpc_send_bootstrap(&conn) != (uint32_t)-1, "send bootstrap");
+  check(g_boot_len >= 12, "bootstrap frame length");
+  check(g_boot[0] == 0 && g_boot[1] == 0 && g_boot[2] == 0 && g_boot[3] == 0,
+        "one segment");
+  words = capnp_load_le32(g_boot + 4);
+  check(words > 0 && words < 64, "bootstrap word count");
+  check(g_boot[4] == (uint8_t)words, "word count low byte first");
+  check(g_boot[5] == 0 && g_boot[6] == 0 && g_boot[7] == 0,
+        "word count high bytes clear");
+}
+
 int main(int argc, char **argv) {
   if (argc >= 3 && strcmp(argv[1], "dial") == 0)
     return dial_peer((uint16_t)atoi(argv[2]));
@@ -341,6 +377,7 @@ int main(int argc, char **argv) {
     return serve_peer((uint16_t)atoi(argv[2]));
   test_ipv4_literal();
   test_frame_little_endian();
+  test_bootstrap_frame_little_endian();
   test_unix_replaces_only_socket();
   test_link_setup_closes_fd();
   loopback(1);
