@@ -176,6 +176,33 @@ static void test_copy_flat(void) {
   capnp_message_free(&m2);
 }
 
+static void test_ptr_list_edges(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body, first;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m;
+  capnp_ptr_t decoded, list;
+
+  capnp_builder_init_sized(&b, 1);
+  capnp_builder_set_max_seg_words(&b, 1);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "ptr root");
+  CHECK(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "ptr body");
+  CHECK(capnp_builder_init_ptr_list(&body, 0, 0, 0, &first) == CAPNP_OK,
+        "empty ptr list");
+  CHECK(first.b == &b, "empty first belongs to builder");
+  CHECK(capnp_builder_init_ptr_list(&body, 0, 1, 1, NULL) == CAPNP_ERR_BOUNDS,
+        "ptr index bounds");
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ptr serialize");
+  capnp_builder_free(&b);
+  CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "ptr parse");
+  free(flat);
+  CHECK(capnp_root(&m, &decoded) == CAPNP_OK, "ptr decoded root");
+  CHECK(capnp_getp(&decoded, 0, &list) == CAPNP_OK, "ptr decoded list");
+  CHECK(capnp_list_len(&list) == 0, "empty ptr list length");
+  capnp_message_free(&m);
+}
+
 
 static void test_struct_u64(void) {
   capnp_builder_t b;
@@ -279,5 +306,6 @@ int main(void) {
   test_f32();
   test_list_f64();
   test_copy_flat();
+  test_ptr_list_edges();
   return harness_finish();
 }
