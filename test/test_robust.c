@@ -291,6 +291,68 @@ static void test_traversal_budget(void) {
   capnp_message_free(&m);
 }
 
+static void test_zero_size_and_far_validation(void) {
+  uint8_t seg0[8], seg1[16], seg2[24];
+  capnp_segment_t segs[3];
+  capnp_message_t m;
+  capnp_ptr_t root;
+
+  /* A zero-byte list still has to name an existing segment. */
+  capnp_store_le64(seg0, capnp_wp_make_far(1, 0, 1));
+  capnp_store_le64(seg1, capnp_wp_make_far(0, 0, 2));
+  capnp_store_le64(seg1 + 8, capnp_wp_make_list(0, CAPNP_SZ_BYTE, 0));
+  segs[0] = (capnp_segment_t){seg0, 1};
+  segs[1] = (capnp_segment_t){seg1, 2};
+  CHECK(capnp_message_from_segments(&m, segs, 2) == CAPNP_OK, "zero list view");
+  CHECK(capnp_root(&m, &root) != CAPNP_OK, "zero list validates far segment");
+  capnp_message_free(&m);
+
+  /* A single-far landing pad is an object pointer, never another far. */
+  capnp_store_le64(seg0, capnp_wp_make_far(0, 0, 1));
+  capnp_store_le64(seg1, capnp_wp_make_far(0, 0, 0));
+  segs[0] = (capnp_segment_t){seg0, 1};
+  segs[1] = (capnp_segment_t){seg1, 1};
+  CHECK(capnp_message_from_segments(&m, segs, 2) == CAPNP_OK, "far chain view");
+  CHECK(capnp_root(&m, &root) == CAPNP_ERR_KIND, "far chain rejected");
+  capnp_message_free(&m);
+
+  /* A zero pad is the canonical empty struct, not a null pointer. */
+  capnp_store_le64(seg1, 0);
+  CHECK(capnp_message_from_segments(&m, segs, 2) == CAPNP_OK, "zero pad view");
+  CHECK(capnp_root(&m, &root) == CAPNP_OK && root.kind == CAPNP_PK_STRUCT,
+        "zero far pad is empty struct");
+  capnp_message_free(&m);
+
+  /* Reserved OTHER encodings are not capability pointers. */
+  capnp_store_le64(seg0, 7);
+  segs[0] = (capnp_segment_t){seg0, 1};
+  CHECK(capnp_message_from_segments(&m, segs, 1) == CAPNP_OK, "other view");
+  CHECK(capnp_root(&m, &root) == CAPNP_ERR_KIND, "reserved other rejected");
+  capnp_message_free(&m);
+
+  /* Over-allocated composite payload words are valid non-canonical input. */
+  capnp_store_le64(seg2, capnp_wp_make_list(0, CAPNP_SZ_COMPOSITE, 2));
+  capnp_store_le64(seg2 + 8, capnp_wp_make_struct(1, 1, 0));
+  capnp_store_le64(seg2 + 16, 0);
+  segs[0] = (capnp_segment_t){seg2, 3};
+  CHECK(capnp_message_from_segments(&m, segs, 1) == CAPNP_OK, "composite view");
+  CHECK(capnp_root(&m, &root) == CAPNP_OK && capnp_list_len(&root) == 1,
+        "over-allocated composite accepted");
+  capnp_message_free(&m);
+}
+
+static void test_virtual_traversal_charge(void) {
+  uint8_t seg[8];
+  capnp_segment_t s = {seg, 1};
+  capnp_message_t m;
+  capnp_ptr_t root;
+  capnp_store_le64(seg, capnp_wp_make_list(0, CAPNP_SZ_VOID, 0x1fffffffu));
+  CHECK(capnp_message_from_segments(&m, &s, 1) == CAPNP_OK, "void list view");
+  CHECK(capnp_root(&m, &root) == CAPNP_ERR_TRAVERSAL,
+        "void list consumes traversal budget");
+  capnp_message_free(&m);
+}
+
 int main(void) {
   test_truncated_framing();
   test_inline_struct_out_of_bounds();
@@ -302,5 +364,7 @@ int main(void) {
   test_builder_offset_overflow();
   test_many_segments_roundtrip();
   test_traversal_budget();
+  test_zero_size_and_far_validation();
+  test_virtual_traversal_charge();
   return harness_finish();
 }

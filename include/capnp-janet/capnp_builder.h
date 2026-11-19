@@ -22,12 +22,12 @@
  *   - Far landing pads allocate inside the target object's segment
  *     (grow-in-place). If that segment is already at max_seg_words, a
  *     double-far landing pad is placed in another segment.
- *   - Hard ceiling per segment: CAPNP_BUILDER_MAX_SEGMENT_WORDS (1<<29).
+ *   - Hard ceiling per segment: CAPNP_BUILDER_MAX_SEGMENT_WORDS ((1<<29)-1).
  *   - Wire segment IDs are 0-based.
  */
 
 #define CAPNP_BUILDER_DEFAULT_FIRST_WORDS 1024u
-#define CAPNP_BUILDER_MAX_SEGMENT_WORDS (1u << 29)
+#define CAPNP_BUILDER_MAX_SEGMENT_WORDS ((1u << 29) - 1u)
 
 typedef struct capnp_bseg {
   uint8_t *data;

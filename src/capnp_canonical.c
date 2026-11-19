@@ -122,7 +122,7 @@ static int write_list_to_slot(capnp_builder_t *b, uint32_t slot_seg,
     tag = capnp_wp_make_struct((int32_t)n, (uint16_t)nd, (uint16_t)np);
     capnp_store_le64(wptr(b, tag_seg, tag_word), tag);
     off = (int32_t)((int64_t)tag_word - (int64_t)slot_word - 1);
-    lw = capnp_wp_make_list(off, CAPNP_SZ_COMPOSITE, (uint32_t)content);
+    lw = capnp_wp_make_list(off, CAPNP_SZ_COMPOSITE, (uint32_t)(1 + content));
     capnp_store_le64(wptr(b, slot_seg, slot_word), lw);
     first = tag_word + 1;
     for (i = 0; i < n; i++) {

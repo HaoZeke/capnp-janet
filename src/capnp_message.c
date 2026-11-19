@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#define CAPNP_WIRE_MAX_SEGMENT_WORDS ((size_t)((1u << 29) - 1u))
+
 void capnp_message_init(capnp_message_t *m) {
   memset(m, 0, sizeof(*m));
   m->traversal_left = CAPNP_DEFAULT_TRAVERSAL_WORDS;
@@ -28,7 +30,8 @@ static int attach_segments(capnp_message_t *m, const capnp_segment_t *segs,
   if (nsegs == 0 || nsegs > CAPNP_MAX_SEGMENTS)
     return CAPNP_ERR_FRAMING;
   for (i = 0; i < nsegs; i++) {
-    if (!segs[i].data || (segs[i].words == 0 && i == 0))
+    if (!segs || !segs[i].data || (segs[i].words == 0 && i == 0) ||
+        segs[i].words > CAPNP_WIRE_MAX_SEGMENT_WORDS)
       return CAPNP_ERR_FRAMING;
   }
   copy = (capnp_segment_t *)malloc((size_t)nsegs * sizeof(*copy));
@@ -81,6 +84,10 @@ static int parse_flat(capnp_message_t *m, const uint8_t *data, size_t len,
   total_words = 0;
   for (i = 0; i < nsegs; i++) {
     sizes[i] = capnp_load_le32(data + 4 + 4 * i);
+    if (sizes[i] > CAPNP_WIRE_MAX_SEGMENT_WORDS) {
+      free(sizes);
+      return CAPNP_ERR_FRAMING;
+    }
     if ((size_t)sizes[i] > SIZE_MAX - total_words) {
       free(sizes);
       return CAPNP_ERR_FRAMING;
@@ -200,6 +207,10 @@ static int land_struct(capnp_message_t *m, uint32_t seg, size_t body,
                        uint16_t dwords, uint16_t pwords, int depth,
                        capnp_ptr_t *out) {
   size_t nwords = (size_t)dwords + (size_t)pwords;
+  if (seg >= m->nsegs)
+    return CAPNP_ERR_SEGMENT;
+  if (body > m->segs[seg].words)
+    return CAPNP_ERR_BOUNDS;
   fill_obj(out, m, seg, body, CAPNP_PK_STRUCT, depth);
   out->dwords = dwords;
   out->pwords = pwords;
@@ -214,6 +225,10 @@ static int land_struct(capnp_message_t *m, uint32_t seg, size_t body,
 
 static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
                      uint32_t count, int depth, capnp_ptr_t *out) {
+  if (seg >= m->nsegs)
+    return CAPNP_ERR_SEGMENT;
+  if (start > m->segs[seg].words)
+    return CAPNP_ERR_BOUNDS;
   fill_obj(out, m, seg, start, CAPNP_PK_LIST, depth);
   out->esize = esize;
   out->count = count;
@@ -222,7 +237,7 @@ static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
     int32_t elems;
     uint16_t dw, pw;
     uint32_t step;
-    if (bounds_word(m, seg, start))
+    if (count == 0 || bounds_word(m, seg, start))
       return CAPNP_ERR_BOUNDS;
     if (charge(m, 1))
       return CAPNP_ERR_TRAVERSAL;
@@ -235,21 +250,23 @@ static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
     dw = capnp_wp_struct_dwords(tag);
     pw = capnp_wp_struct_pwords(tag);
     step = (uint32_t)dw + (uint32_t)pw;
-    if ((uint64_t)elems * (uint64_t)step != (uint64_t)count)
+    if ((uint64_t)elems * (uint64_t)step > (uint64_t)count - 1u)
       return CAPNP_ERR_BOUNDS;
     out->count = (uint32_t)elems;
     out->dwords = dw;
     out->pwords = pw;
     out->step_words = step;
     out->word = start + 1;
-    need = (uint64_t)elems * (uint64_t)step;
+    need = (uint64_t)count - 1u;
     if (need) {
       if (out->word > SIZE_MAX - (size_t)(need - 1))
         return CAPNP_ERR_BOUNDS;
       if (bounds_word(m, seg, out->word + (size_t)need - 1))
         return CAPNP_ERR_BOUNDS;
     }
-    return charge(m, need);
+    if (charge(m, need))
+      return CAPNP_ERR_TRAVERSAL;
+    return step == 0 ? charge(m, (uint64_t)elems) : CAPNP_OK;
   }
 
   {
@@ -284,6 +301,8 @@ static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
       if (bounds_word(m, seg, start + (size_t)words - 1))
         return CAPNP_ERR_BOUNDS;
     }
+    if (esize == CAPNP_SZ_VOID)
+      return charge(m, count);
     return charge(m, words);
   }
 }
@@ -323,13 +342,42 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
       coff = capnp_wp_far_off(pad);
       if (capnp_wp_kind(tag) == CAPNP_WK_STRUCT)
         return land_struct(m, cseg, coff, capnp_wp_struct_dwords(tag),
-                           capnp_wp_struct_pwords(tag), depth - 1, out);
+                           capnp_wp_struct_pwords(tag), depth, out);
       if (capnp_wp_kind(tag) == CAPNP_WK_LIST)
         return land_list(m, cseg, coff, capnp_wp_list_esize(tag),
-                         capnp_wp_list_count(tag), depth - 1, out);
+                         capnp_wp_list_count(tag), depth, out);
       return CAPNP_ERR_KIND;
     }
-    return resolve_ptr(m, tseg, toff, depth, out);
+    if (bounds_word(m, tseg, toff))
+      return CAPNP_ERR_BOUNDS;
+    if (charge(m, 1))
+      return CAPNP_ERR_TRAVERSAL;
+    w = read_word(m, tseg, toff);
+    kind = capnp_wp_kind(w);
+    if (kind == CAPNP_WK_FAR)
+      return CAPNP_ERR_KIND;
+    if (kind == CAPNP_WK_STRUCT) {
+      size_t body;
+      int rc = ptr_target(toff, capnp_wp_offset(w), &body);
+      if (rc)
+        return rc;
+      return land_struct(m, tseg, body, capnp_wp_struct_dwords(w),
+                         capnp_wp_struct_pwords(w), depth, out);
+    }
+    if (kind == CAPNP_WK_LIST) {
+      size_t start;
+      int rc = ptr_target(toff, capnp_wp_offset(w), &start);
+      if (rc)
+        return rc;
+      return land_list(m, tseg, start, capnp_wp_list_esize(w),
+                       capnp_wp_list_count(w), depth, out);
+    }
+    if ((uint32_t)w == CAPNP_WK_CAP) {
+      fill_obj(out, m, tseg, toff, CAPNP_PK_CAP, depth);
+      out->count = (uint32_t)(w >> 32);
+      return CAPNP_OK;
+    }
+    return CAPNP_ERR_KIND;
   }
 
   if (kind == CAPNP_WK_STRUCT) {
@@ -351,6 +399,8 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
   }
 
   if (kind == CAPNP_WK_CAP) {
+    if ((uint32_t)w != CAPNP_WK_CAP)
+      return CAPNP_ERR_KIND;
     fill_obj(out, m, seg, word, CAPNP_PK_CAP, depth);
     out->count = (uint32_t)((w >> 32) & 0xffffffffull);
     return CAPNP_OK;
@@ -596,6 +646,8 @@ int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
       return rc;
     if (elem.kind != CAPNP_PK_STRUCT)
       return CAPNP_ERR_KIND;
+    if (elem.pwords == 0)
+      return CAPNP_ERR_KIND;
     return capnp_get_text(&elem, 0, out, len);
   }
 
@@ -804,11 +856,17 @@ int capnp_message_copy_flat(const capnp_message_t *m, uint8_t **out,
   if (!m || !out || !out_len || m->nsegs == 0)
     return CAPNP_ERR_ARG;
   body_words = 0;
-  for (i = 0; i < m->nsegs; i++)
+  for (i = 0; i < m->nsegs; i++) {
+    if (m->segs[i].words > CAPNP_WIRE_MAX_SEGMENT_WORDS ||
+        m->segs[i].words > SIZE_MAX - body_words)
+      return CAPNP_ERR_BOUNDS;
     body_words += m->segs[i].words;
+  }
   table_bytes = 4u + 4u * (size_t)m->nsegs;
   if (table_bytes % 8u != 0)
     table_bytes += 4u;
+  if (body_words > (SIZE_MAX - table_bytes) / CAPNP_WORD_BYTES)
+    return CAPNP_ERR_BOUNDS;
   total = table_bytes + body_words * CAPNP_WORD_BYTES;
   buf = (uint8_t *)malloc(total);
   if (!buf)

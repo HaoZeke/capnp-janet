@@ -7,7 +7,7 @@
 
 /* Hostile segment tables stop here. The builder refuses to emit more,
  * so a message it writes stays readable. */
-#define CAPNP_MAX_SEGMENTS 65536u
+#define CAPNP_MAX_SEGMENTS 512u
 
 typedef struct capnp_segment {
   const uint8_t *data; /* words, little-endian */
