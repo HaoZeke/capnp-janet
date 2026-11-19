@@ -81,11 +81,12 @@ static ssize_t read_frame(int fd, uint8_t *buf, size_t cap)
 	return (ssize_t)(table_bytes + total_words * 8);
 }
 
-static void fill_add(void *ctx, const capnp_bptr_t *params)
+static int fill_add(void *ctx, const capnp_bptr_t *params)
 {
 	const int64_t *ab = (const int64_t *)ctx;
 	capnp_builder_set_u64(params, 0, (uint64_t)ab[0]);
 	capnp_builder_set_u64(params, 8, (uint64_t)ab[1]);
+	return 0;
 }
 
 int main(int argc, char **argv)

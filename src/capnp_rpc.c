@@ -1006,8 +1006,8 @@ uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
     rc = capnp_builder_slot(&payload, PAYLOAD_DW, 0, &slot);
   if (rc == CAPNP_OK)
     rc = capnp_builder_struct(&slot, params_dwords, params_pwords, &params);
-  if (rc == CAPNP_OK && fill)
-    fill(fill_ctx, &params);
+  if (rc == CAPNP_OK && fill && fill(fill_ctx, &params) != 0)
+    rc = CAPNP_ERR_KIND;
   if (rc == CAPNP_OK)
     rc = flush(c, &b);
   capnp_builder_free(&b);

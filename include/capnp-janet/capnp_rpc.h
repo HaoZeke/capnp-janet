@@ -225,7 +225,9 @@ CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data
 /* --- client side -------------------------------------------------- */
 
 /* Write a call's parameter struct. */
-typedef void (*capnp_rpc_fill_fn)(void *ctx, const capnp_bptr_t *params);
+/* Return nonzero when the callback failed. The call is not sent, so
+ * the builder can be freed before the error is raised again. */
+typedef int (*capnp_rpc_fill_fn)(void *ctx, const capnp_bptr_t *params);
 
 /* Ask for the peer's bootstrap capability. Returns the questionId, or
  * (uint32_t)-1 when the question table is full. */

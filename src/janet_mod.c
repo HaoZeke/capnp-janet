@@ -1419,7 +1419,39 @@ typedef struct {
   int fd;
   Janet handler;
   int has_handler;
+  int panic;
+  JanetSignal panic_sig;
+  Janet panic_err;
+  JanetFiber *panic_fib;
 } rpc_conn_wrap;
+
+/* janet_pcall runs the handler on its own fiber and then returns.
+ * Re-raising from this fiber drops that stack unless it stays linked
+ * as the child, which is what a stack trace walks. */
+static void attach_error_fiber(JanetFiber *fib) {
+  JanetFiber *cur = janet_current_fiber();
+  if (!fib || !cur || cur == fib)
+    return;
+  cur->child = fib;
+}
+
+static void raise_pending(rpc_conn_wrap *w) {
+  Janet err;
+  JanetSignal sig;
+  JanetFiber *fib;
+  if (!w->panic)
+    return;
+  err = w->panic_err;
+  sig = w->panic_sig;
+  fib = w->panic_fib;
+  w->panic = 0;
+  w->panic_fib = NULL;
+  attach_error_fiber(fib);
+  if (fib)
+    janet_gcunroot(janet_wrap_fiber(fib));
+  janet_gcunroot(err);
+  janet_signalv(sig, err);
+}
 
 static void rpc_free_frames(rpc_conn_wrap *w) {
   uint32_t i;
@@ -1519,8 +1551,11 @@ static Janet cfun_rpc_handle(int32_t argc, Janet *argv) {
   JanetByteView bytes;
   janet_fixarity(argc, 2);
   bytes = janet_getbytes(argv, 1);
-  if (capnp_rpc_handle(&w->conn, bytes.bytes, (size_t)bytes.len) != 0)
+  if (capnp_rpc_handle(&w->conn, bytes.bytes, (size_t)bytes.len) != 0) {
+    raise_pending(w);
     janet_panic("capnp/rpc-handle: rejected frame");
+  }
+  raise_pending(w);
   return janet_wrap_nil();
 }
 
@@ -1538,9 +1573,13 @@ typedef struct {
   Janet fill;
   uint16_t dwords;
   uint16_t pwords;
+  int failed;
+  JanetSignal sig;
+  Janet err;
+  JanetFiber *fib;
 } rpc_fill;
 
-static void rpc_fill_cb(void *ctx, const capnp_bptr_t *params) {
+static int rpc_fill_cb(void *ctx, const capnp_bptr_t *params) {
   rpc_fill *f = (rpc_fill *)ctx;
   builder_scope_t *scope = scope_open();
   Janet ptr =
@@ -1550,8 +1589,37 @@ static void rpc_fill_cb(void *ctx, const capnp_bptr_t *params) {
   JanetSignal sig =
       janet_pcall(janet_unwrap_function(f->fill), 1, &ptr, &out, &fib);
   scope_close(scope);
-  if (sig != JANET_SIGNAL_OK)
-    janet_signalv(sig, out);
+  if (sig != JANET_SIGNAL_OK) {
+    /* Leave the call unsent. The caller frees the builder, then
+     * raises this error. */
+    f->failed = 1;
+    f->sig = sig;
+    f->err = out;
+    f->fib = fib;
+    janet_gcroot(out);
+    if (fib)
+      janet_gcroot(janet_wrap_fiber(fib));
+    return -1;
+  }
+  return 0;
+}
+
+static void raise_fill(rpc_fill *f) {
+  Janet err;
+  JanetSignal sig;
+  JanetFiber *fib;
+  if (!f->failed)
+    return;
+  err = f->err;
+  sig = f->sig;
+  fib = f->fib;
+  f->failed = 0;
+  f->fib = NULL;
+  attach_error_fiber(fib);
+  if (fib)
+    janet_gcunroot(janet_wrap_fiber(fib));
+  janet_gcunroot(err);
+  janet_signalv(sig, err);
 }
 
 static Janet cfun_rpc_call(int32_t argc, Janet *argv) {
@@ -1561,6 +1629,7 @@ static Janet cfun_rpc_call(int32_t argc, Janet *argv) {
   uint16_t method, dwords, pwords;
   rpc_fill fill;
   janet_arity(argc, 6, 7);
+  memset(&fill, 0, sizeof(fill));
   cap = (uint32_t)janet_getinteger(argv, 1);
   iface = janet_getuinteger64(argv, 2);
   method = (uint16_t)janet_getinteger(argv, 3);
@@ -1574,6 +1643,7 @@ static Janet cfun_rpc_call(int32_t argc, Janet *argv) {
   q = capnp_rpc_send_call(&w->conn, cap, iface, method, dwords, pwords,
                           argc == 7 ? rpc_fill_cb : NULL,
                           argc == 7 ? &fill : NULL);
+  raise_fill(&fill);
   if (q == (uint32_t)-1)
     janet_panic("capnp/rpc-call: question table full");
   return janet_wrap_number((double)q);
@@ -1654,8 +1724,16 @@ static int janet_dispatch(void *server, uint64_t interface_id, uint16_t method_i
   args[3] = make_builder_ptr(janet_wrap_nil(), results, 0, 0, scope);
   sig = janet_pcall(janet_unwrap_function(w->handler), 4, args, &res, &fib);
   scope_close(scope);
-  if (sig != JANET_SIGNAL_OK)
-    janet_signalv(sig, res);
+  if (sig != JANET_SIGNAL_OK) {
+    w->panic = 1;
+    w->panic_sig = sig;
+    w->panic_err = res;
+    w->panic_fib = fib;
+    janet_gcroot(res);
+    if (fib)
+      janet_gcroot(janet_wrap_fiber(fib));
+    return -1;
+  }
   if (janet_checktype(res, JANET_NUMBER) && janet_unwrap_number(res) != 0)
     return -1;
   return 0;
@@ -1775,8 +1853,11 @@ static Janet cfun_rpc_recv(int32_t argc, Janet *argv) {
     janet_panic("capnp/rpc-recv: connection has no socket");
   if (capnp_read_frame(w->fd, buf, sizeof(buf), &n) != CAPNP_OK)
     janet_panic("capnp/rpc-recv: short frame");
-  if (capnp_rpc_handle(&w->conn, buf, n))
+  if (capnp_rpc_handle(&w->conn, buf, n)) {
+    raise_pending(w);
     janet_panic("capnp/rpc-recv: rejected frame");
+  }
+  raise_pending(w);
   return janet_wrap_nil();
 }
 
@@ -1866,6 +1947,7 @@ static Janet cfun_rpc_stream_send(int32_t argc, Janet *argv) {
   rpc_fill fill;
   int rc;
   janet_arity(argc, 7, 8);
+  memset(&fill, 0, sizeof(fill));
   fill.dwords = (uint16_t)janet_getinteger(argv, 5);
   fill.pwords = (uint16_t)janet_getinteger(argv, 6);
   fill.fill = argc == 8 ? argv[7] : janet_wrap_nil();
@@ -1877,6 +1959,7 @@ static Janet cfun_rpc_stream_send(int32_t argc, Janet *argv) {
                              (uint16_t)janet_getinteger(argv, 4), fill.dwords,
                              fill.pwords, argc == 8 ? rpc_fill_cb : NULL,
                              argc == 8 ? &fill : NULL);
+  raise_fill(&fill);
   if (rc)
     janet_panic("capnp/rpc-stream-send: rejected");
   return janet_wrap_number((double)s->stream.qids[s->stream.nout - 1]);

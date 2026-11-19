@@ -46,10 +46,11 @@ static int adder_dispatch(void *server, uint64_t interface_id, uint16_t method_i
   return capnp_builder_set_u64(&body, 0, (uint64_t)(a + b));
 }
 
-static void fill_add(void *ctx, const capnp_bptr_t *params) {
+static int fill_add(void *ctx, const capnp_bptr_t *params) {
   (void)ctx;
   capnp_builder_set_u64(params, 0, 20);
   capnp_builder_set_u64(params, 8, 22);
+  return 0;
 }
 
 static void child_serve(int lfd) {

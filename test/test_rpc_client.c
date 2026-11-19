@@ -86,9 +86,10 @@ static int doubler_dispatch(void *server, uint64_t iid, uint16_t mid,
   }
 }
 
-static void fill_u32(void *ctx, const capnp_bptr_t *params)
+static int fill_u32(void *ctx, const capnp_bptr_t *params)
 {
   CHECK(capnp_builder_set_u32(params, 0, *(uint32_t *)ctx) == CAPNP_OK, "fill");
+  return 0;
 }
 
 int main(void)

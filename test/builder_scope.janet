@@ -60,6 +60,18 @@
                       (error "boom")))
     ([e] (string e))))
 (assert (string/find "boom" boom) "panic still propagates")
+(def trace-fiber
+  (fiber/new
+    (fn []
+      (capnp/rpc-call client cap-id (int/u64 "1") 0 1 0
+                      (fn fill-boom [params] (error "boom")))) :e))
+(resume trace-fiber)
+(def trace @"")
+(with-dyns [:err trace :err-color nil]
+  (debug/stacktrace trace-fiber "boom"))
+(assert (string/find "fill-boom" trace) trace)
+(assert (empty? (capnp/rpc-flush client))
+        "fill error leaves the call unsent")
 (assert (died? (fn [] (capnp/set-u64 boom-params 0 1)))
         "params after a panic")
 
