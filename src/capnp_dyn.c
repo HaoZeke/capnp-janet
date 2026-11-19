@@ -511,7 +511,17 @@ static int load_struct_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
   st->dwords = capnp_get_u16(node, 14, 0);
   st->pwords = capnp_get_u16(node, 24, 0);
   st->disc_count = capnp_get_u16(node, 30, 0);
-  st->disc_byte = capnp_get_u32(node, 32, 0) * 2u;
+  {
+    /* schema-loader rejects (discriminantOffset + 1) * 16 bits past
+     * the data section. A uint32 multiply wraps that offset to 0. */
+    uint32_t disc_off = capnp_get_u32(node, 32, 0);
+    uint64_t disc_bytes = (uint64_t)disc_off * 2u;
+    if (st->disc_count > 0 &&
+        (disc_bytes > UINT32_MAX ||
+         disc_bytes + 2u > (uint64_t)st->dwords * 8u))
+      return CAPNP_ERR_SCHEMA;
+    st->disc_byte = disc_bytes > UINT32_MAX ? 0u : (uint32_t)disc_bytes;
+  }
   st->is_group = capnp_get_bool(node, 224, 0);
   load_struct_annotations(node, st);
 
@@ -647,9 +657,10 @@ int capnp_dyn_init(capnp_dyn_t **out, const uint8_t *request, size_t len) {
       continue;
     which = capnp_get_u16(&node, 12, 0xffff);
     if (which == ND_STRUCT) {
-      if (load_struct_node(d, &node)) {
+      int rc = load_struct_node(d, &node);
+      if (rc) {
         capnp_dyn_free(d);
-        return CAPNP_ERR_ALLOC;
+        return rc;
       }
     } else if (which == ND_ENUM) {
       if (load_enum_node(d, &node)) {
@@ -4445,6 +4456,19 @@ static void clear_field_wire(const capnp_dyn_t *d, const dyn_struct_t *st,
                              const dyn_field_t *f, const brand_env_t *env,
                              const capnp_bptr_t *body, int depth);
 
+/* The discriminant is two bytes inside the data section. body_span only
+ * checks the segment, so a tag past dwords would overwrite a pointer. */
+static int write_disc(const capnp_bptr_t *body, const dyn_struct_t *st,
+                      uint16_t tag) {
+  if (!st || !st->disc_count)
+    return 0;
+  if ((uint64_t)st->disc_byte + 2u > (uint64_t)st->dwords * 8u)
+    return -1;
+  if (capnp_builder_set_u16(body, st->disc_byte, tag))
+    return -1;
+  return 0;
+}
+
 static void clear_group_wire(const capnp_dyn_t *d, const dyn_struct_t *g,
                              const brand_env_t *env, const capnp_bptr_t *body,
                              int depth) {
@@ -4452,7 +4476,8 @@ static void clear_group_wire(const capnp_dyn_t *d, const dyn_struct_t *g,
   if (!g || depth > MAX_DEPTH)
     return;
   if (g->disc_count) {
-    capnp_builder_set_u16(body, g->disc_byte, 0);
+    if (write_disc(body, g, 0))
+      return;
     for (i = 0; i < g->nfields; i++) {
       if (g->fields[i].disc == 0) {
         clear_field_wire(d, g, &g->fields[i], env, body, depth + 1);
@@ -4887,7 +4912,7 @@ static int copy_group_field(const capnp_dyn_t *d, const dyn_struct_t *g,
   rtype_t ft;
   int rc = 0;
   if (f->disc != 0xffff && g->disc_count) {
-    if (capnp_builder_set_u16(dst, g->disc_byte, f->disc))
+    if (write_disc(dst, g, f->disc))
       return -1;
   }
   if (f->is_group) {
@@ -5045,7 +5070,7 @@ static int build_field_from_vnode(const capnp_dyn_t *d, const dyn_struct_t *st,
      * discriminant and leaves every other arm in place (dynamic.c++).
      * JsonCodec::decodeField reaches that set through adopt
      * (compat/json.c++). */
-    if (capnp_builder_set_u16(body, st->disc_byte, f->disc))
+    if (write_disc(body, st, f->disc))
       return -1;
   }
   if (f->is_group) {
@@ -5439,7 +5464,7 @@ static int decode_json_field_entry(
         /* A discriminator tag is Builder::clear on that arm only
          * (compat/json.c++). clear() stores the discriminant and
          * zeroes this arm. Other arms stay. */
-        if (capnp_builder_set_u16(body, st->disc_byte, uf->disc))
+        if (write_disc(body, st, uf->disc))
           return -1;
         clear_field_wire(d, st, uf, env, body, depth + 1);
         if (mark_union_seen(unions_seen, st))

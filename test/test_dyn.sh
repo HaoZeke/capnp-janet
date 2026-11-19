@@ -246,6 +246,7 @@ EOF
 capnp compile -I"$INC" -o- "$TMP/u.capnp" >"$TMP/u_req.bin"
 "$BIN" disc "$TMP/u_req.bin" ok
 "$BIN" disc "$TMP/u_req.bin" oob
+"$BIN" disc "$TMP/u_req.bin" huge
 
 # A discriminator tag clears only the chosen arm. The previous arm
 # stays reachable, matching Builder::clear.

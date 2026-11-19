@@ -467,11 +467,12 @@ static int cmd_canon(const char *msg_path, const char *out) {
 static int cmd_disc(const char *req, const char *mode) {
   uint8_t *reqb = NULL, *flat = NULL, *msg = NULL;
   size_t rn = 0, fl = 0, mn = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, nodes, node;
   capnp_dyn_t *d = NULL;
   uint32_t i, n;
   int oob = strcmp(mode, "oob") == 0;
+  int huge = strcmp(mode, "huge") == 0;
   int rc;
   const char *json = "{\"kind\":\"b\",\"payload\":5}";
   if (load_file(req, &reqb, &rn) || capnp_message_from_flat(&m, reqb, rn))
@@ -488,26 +489,31 @@ static int cmd_disc(const char *req, const char *mode) {
       continue;
     if (capnp_get_u16(&node, 12, 0xffff) != 1 || capnp_get_u16(&node, 30, 0) == 0)
       continue;
-    if (!oob)
+    if (!oob && !huge)
       continue;
     p = (uint8_t *)node.msg->segs[node.seg].data + node.word * 8 +
         node.body_byte;
-    capnp_store_le32(p + 32, 4);
+    capnp_store_le32(p + 32, huge ? 0x80000000u : 4u);
   }
   if (capnp_message_copy_flat(&m, &flat, &fl)) {
     capnp_message_free(&m);
     return 1;
   }
   capnp_message_free(&m);
-  if (capnp_dyn_init(&d, flat, fl) != CAPNP_OK) {
+  rc = capnp_dyn_init(&d, flat, fl);
+  if (rc != CAPNP_OK) {
     free(flat);
+    /* A discriminant past the data section, including one whose byte
+     * offset wraps a 32-bit multiply, is a malformed schema. */
+    if (oob || huge)
+      return rc == CAPNP_ERR_SCHEMA ? 0 : 1;
     return 1;
   }
   free(flat);
   rc = capnp_dyn_decode_json(d, "U", json, strlen(json), &msg, &mn);
   free(msg);
   capnp_dyn_free(d);
-  if (oob)
+  if (oob || huge)
     return rc == CAPNP_OK;
   return rc != CAPNP_OK;
 }

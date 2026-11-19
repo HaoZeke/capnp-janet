@@ -956,7 +956,11 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
   uint16_t dwords = capnp_get_u16(node, 14, 0);
   uint16_t pwords = capnp_get_u16(node, 24, 0); /* bits 192 = byte 24 */
   uint16_t discriminant_count = capnp_get_u16(node, 30, 0);
-  uint32_t discriminant_byte = capnp_get_u32(node, 32, 0) * 2u;
+  uint32_t disc_off = capnp_get_u32(node, 32, 0);
+  uint64_t disc_bytes = (uint64_t)disc_off * 2u;
+  int disc_ok = discriminant_count > 0 && disc_bytes <= UINT32_MAX &&
+                disc_bytes + 2u <= (uint64_t)dwords * 8u;
+  uint32_t discriminant_byte = disc_ok ? (uint32_t)disc_bytes : 0u;
 
   fprintf(out, "\n# struct %s\n", sname);
   fprintf(out, "(def %s-data-words %u)\n", sname, (unsigned)dwords);
@@ -976,7 +980,7 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
     return;
 
   uint32_t nf = capnp_list_len(&fields);
-  if (discriminant_count > 0) {
+  if (disc_ok) {
     fprintf(out, "(def %s-discriminant-byte %u)\n", sname,
             (unsigned)discriminant_byte);
     fprintf(out,

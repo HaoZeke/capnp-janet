@@ -34,7 +34,10 @@ enum {
   CAPNP_ERR_PACKED = 7,
   CAPNP_ERR_ARG = 8,
   CAPNP_ERR_SEGMENT = 9,
-  CAPNP_ERR_IO = 10
+  CAPNP_ERR_IO = 10,
+  /* A schema value cannot describe a wire object, for example a
+   * discriminant that lands past the struct's data section. */
+  CAPNP_ERR_SCHEMA = 11
 };
 
 /* Wire pointer kinds (bits 0-1). */
