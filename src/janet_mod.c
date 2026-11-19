@@ -1423,6 +1423,10 @@ typedef struct {
   JanetSignal panic_sig;
   Janet panic_err;
   JanetFiber *panic_fib;
+  /* Connection whose vat this one shares. Marked so collection cannot
+   * free that vat while this connection still reads it. */
+  Janet host;
+  int has_host;
 } rpc_conn_wrap;
 
 /* janet_pcall runs the handler on its own fiber and then returns.
@@ -1478,6 +1482,8 @@ static int rpc_gcmark(void *p, size_t len) {
   rpc_conn_wrap *w = (rpc_conn_wrap *)p;
   if (w->has_handler)
     janet_mark(w->handler);
+  if (w->has_host)
+    janet_mark(w->host);
   return 0;
 }
 
@@ -1936,6 +1942,8 @@ static Janet cfun_rpc_share_vat(int32_t argc, Janet *argv) {
   rpc_conn_wrap *a = get_rpc(argv, 0);
   rpc_conn_wrap *b = get_rpc(argv, 1);
   janet_fixarity(argc, 2);
+  b->host = janet_wrap_abstract(a);
+  b->has_host = 1;
   capnp_rpc_set_vat(&b->conn, a->conn.vat);
   return janet_wrap_nil();
 }

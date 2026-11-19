@@ -15,6 +15,7 @@ export JANET_PATH="$MODDIR"
 export LD_LIBRARY_PATH="$MODDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 janet "$ROOT/test/rpc_fill.janet"
+janet "$ROOT/test/rpc_share_vat.janet"
 janet "$ROOT/test/rpc_borrow.janet"
 janet "$ROOT/test/rpc_level3.janet"
 janet "$ROOT/test/builder_scope.janet"
