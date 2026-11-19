@@ -381,13 +381,6 @@ static void test_virtual_traversal_charge(void) {
   capnp_message_free(&m);
 }
 
-/* Valgrind replaces malloc and leaves mallinfo's counters stale.
- * mallinfo2 and the sanitizer stay accurate there. */
-static int mallinfo_is_stale(void) {
-  const char *preload = getenv("LD_PRELOAD");
-  return preload && strstr(preload, "valgrind") != NULL;
-}
-
 /* 1 when *out is the allocator's in-use byte count. AddressSanitizer,
  * mallinfo2, and mallinfo each cover a toolchain the others miss. */
 static int heap_now(size_t *out) {
@@ -400,8 +393,11 @@ static int heap_now(size_t *out) {
   return 1;
 #elif defined(CAPNP_HAS_MALLINFO)
   struct mallinfo info;
-  if (mallinfo_is_stale())
-    return 0;
+  {
+    const char *preload = getenv("LD_PRELOAD");
+    if (preload && strstr(preload, "valgrind") != NULL)
+      return 0;
+  }
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wdeprecated-declarations"
