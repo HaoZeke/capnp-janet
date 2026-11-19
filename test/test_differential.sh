@@ -8,11 +8,11 @@ BIN="$BUILD/test_conform"
 SCHEMA="$ROOT/schema/conform.capnp"
 if [[ ! -x "$BIN" ]]; then
   echo "SKIP: no $BIN" >&2
-  exit 0
+  exit 77
 fi
 if ! command -v capnp >/dev/null 2>&1; then
   echo "SKIP: no capnp CLI" >&2
-  exit 0
+  exit 77
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

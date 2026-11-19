@@ -10,11 +10,11 @@ SCHEMA="$ROOT/schema/conform.capnp"
 PARITY_SCHEMA="$ROOT/schema/parity.capnp"
 if [[ ! -x "$BIN" || ! -x "$CLI" ]]; then
   echo "SKIP: dyn tools not built" >&2
-  exit 0
+  exit 77
 fi
 if ! command -v capnp >/dev/null 2>&1; then
   echo "SKIP: no capnp CLI" >&2
-  exit 0
+  exit 77
 fi
 INC="$(dirname "$(dirname "$(command -v capnp)")")/include"
 TMP=$(mktemp -d)

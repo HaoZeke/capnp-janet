@@ -6,11 +6,11 @@ BUILD="${POLICYD_BUILD_DIR:-${CAPNP_JANET_BUILD:-$ROOT/build}}"
 PLUGIN="$BUILD/capnpc-janet"
 if [[ ! -x "$PLUGIN" ]]; then
   echo "SKIP: no $PLUGIN" >&2
-  exit 0
+  exit 77
 fi
 if ! command -v capnp >/dev/null 2>&1; then
   echo "SKIP: no capnp CLI" >&2
-  exit 0
+  exit 77
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT

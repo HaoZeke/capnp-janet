@@ -7,7 +7,7 @@ BUILD="${CAPNP_JANET_BUILD:-$ROOT/build}"
 BIN="$BUILD/capnp-eval"
 if [[ ! -x "$BIN" ]]; then
   echo "SKIP: capnp-eval not built" >&2
-  exit 0
+  exit 77
 fi
 INC="$(dirname "$(dirname "$(command -v capnp)")")/include"
 TMP=$(mktemp -d)
