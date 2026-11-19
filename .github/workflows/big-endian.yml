@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: full suite on emulated s390x (big-endian)
-        uses: uraimo/run-on-arch-action@v2
+        uses: uraimo/run-on-arch-action@v3
         with:
           arch: s390x
           distro: ubuntu24.04
@@ -30,7 +30,7 @@ jobs:
           # and the suite does not need it.
           install: |
             apt-get update -q -y
-            apt-get install -q -y build-essential meson ninja-build pkg-config
+            apt-get install -q -y build-essential meson ninja-build pkg-config capnproto libcapnp-dev
           run: |
             set -euo pipefail
             uname -m
