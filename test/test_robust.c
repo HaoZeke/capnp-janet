@@ -440,10 +440,28 @@ static void test_zero_init_message(void) {
   capnp_message_free(&m);
 }
 
+static void test_u32_grow(void) {
+  uint32_t ncap = 1;
+  size_t nbytes = 1;
+  CHECK(capnp_u32_grow(0x80000000u, sizeof(void *), &ncap, &nbytes) ==
+            CAPNP_ERR_BOUNDS,
+        "cap cannot double");
+  CHECK(ncap == 1 && nbytes == 1, "outputs unchanged on failure");
+  CHECK(capnp_u32_grow(4, sizeof(void *), &ncap, &nbytes) == CAPNP_OK,
+        "small cap doubles");
+  CHECK(ncap == 8 && nbytes == 8u * sizeof(void *), "8 slots");
+  CHECK(capnp_u32_grow(0, sizeof(void *), &ncap, &nbytes) == CAPNP_OK,
+        "empty starts at 4");
+  CHECK(ncap == 4, "first cap");
+  CHECK(capnp_u32_grow(4, SIZE_MAX, &ncap, &nbytes) == CAPNP_ERR_BOUNDS,
+        "byte size overflow");
+}
+
 int main(void) {
   test_truncated_framing();
   test_reparse_releases_storage();
   test_zero_init_message();
+  test_u32_grow();
   test_inline_struct_out_of_bounds();
   test_double_far_struct_out_of_bounds();
   test_double_far_list_out_of_bounds();

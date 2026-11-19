@@ -2,6 +2,7 @@
 #ifndef CAPNP_JANET_KINDS_H
 #define CAPNP_JANET_KINDS_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Shared-library export. MSVC only writes an import library
@@ -70,5 +71,20 @@ enum {
  * either limit returns CAPNP_ERR_TRAVERSAL or CAPNP_ERR_DEPTH. */
 #define CAPNP_DEFAULT_TRAVERSAL_WORDS 8388608ull
 #define CAPNP_DEFAULT_DEPTH_LIMIT 64
+
+/* Double a table capacity. Rejects a cap that cannot double in uint32_t
+ * and a byte size that cannot be represented in size_t. */
+static inline int capnp_u32_grow(uint32_t cap, size_t elem, uint32_t *out_cap,
+                                 size_t *out_bytes) {
+  uint32_t ncap;
+  if (!out_cap || !out_bytes || elem == 0 || cap > UINT32_MAX / 2u)
+    return CAPNP_ERR_BOUNDS;
+  ncap = cap ? cap * 2u : 4u;
+  if ((size_t)ncap > SIZE_MAX / elem)
+    return CAPNP_ERR_BOUNDS;
+  *out_cap = ncap;
+  *out_bytes = (size_t)ncap * elem;
+  return CAPNP_OK;
+}
 
 #endif /* CAPNP_JANET_KINDS_H */

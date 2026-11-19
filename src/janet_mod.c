@@ -1392,8 +1392,12 @@ static int rpc_send_cb(void *ctx, const uint8_t *data, size_t len) {
   if (w->fd >= 0)
     return capnp_write_all(w->fd, data, len) == CAPNP_OK ? 0 : -1;
   if (w->nframes == w->cap_frames) {
-    uint32_t ncap = w->cap_frames ? w->cap_frames * 2u : 4u;
-    rpc_frame *p = (rpc_frame *)realloc(w->frames, (size_t)ncap * sizeof(*p));
+    uint32_t ncap;
+    size_t nbytes;
+    rpc_frame *p;
+    if (capnp_u32_grow(w->cap_frames, sizeof(*p), &ncap, &nbytes))
+      return -1;
+    p = (rpc_frame *)realloc(w->frames, nbytes);
     if (!p)
       return -1;
     w->frames = p;
