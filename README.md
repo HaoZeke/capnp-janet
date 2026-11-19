@@ -10,8 +10,10 @@ zero-copy segment views, schema evolution defaults, and the `capnpc-janet`
 schema compiler plugin.
 
 **Status:** `0.2.5`. Reader, multi-segment builder, packed and canonical
-codecs, and typed `capnpc-janet` readers/builders. Wire encode of AddressBook
-matches official `capnp encode` when fields are set in schema order.
+codecs, and typed `capnpc-janet` readers/builders. Non-canonical bytes
+follow allocation order, so an AddressBook matches official `capnp encode`
+when nested objects are allocated in schema order. Canonical bytes match
+`capnp convert binary:canonical` regardless of that order.
 
 ## Why this exists
 

@@ -30,6 +30,8 @@ $ pixi run test
 
 * Bare Meson
 
+Meson 1.2 or newer. Debian bookworm's apt package is 1.0.1 and cannot configure this tree.
+
 #+begin_src console
 $ meson setup build
 $ meson compile -C build

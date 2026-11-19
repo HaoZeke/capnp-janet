@@ -6,7 +6,7 @@ Docs: https://capnp-janet.rgoswami.me/
 Repo: https://github.com/HaoZeke/capnp-janet
 Context7: /haozeke/capnp-janet
 
-`capnp_get_u32` returns `uint32_t`. It is not an out-parameter. AddressBook encode matches official `capnp encode` in schema order.
+`capnp_get_u32` returns `uint32_t`. It is not an out-parameter. Non-canonical AddressBook bytes match official `capnp encode` when nested objects are allocated in schema order. Canonical bytes do not depend on that order.
 
 ## Docs
 

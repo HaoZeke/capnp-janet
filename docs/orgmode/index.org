@@ -12,7 +12,7 @@ C library embedders can link without the Janet VM.
 Sibling runtimes: [[https://c-capnproto.rgoswami.me][c-capnproto]] and
 [[https://capnp-fortran.rgoswami.me][capnp-fortran]]. Status: =0.2.5=.
 AddressBook encode matches official =capnp encode= when fields are set
-in schema order.
+in schema order. Canonical bytes do not depend on that order.
 
 * Install (shortest path)
 

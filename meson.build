@@ -178,12 +178,29 @@ test(
 # consumer pulling this in as a subproject should not be told to install
 # one to build the library.
 bash = find_program('bash', required: false)
+test_conform = executable(
+  'test_conform',
+  'test/test_conform.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+
 if bash.found()
   test(
     'codegen',
     bash,
     args: [meson.project_source_root() / 'test/test_codegen.sh'],
     depends: [capnpc_janet],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
+  test(
+    'differential',
+    bash,
+    args: [meson.project_source_root() / 'test/test_differential.sh'],
+    depends: [test_conform],
     workdir: meson.project_source_root(),
     env: {
       'CAPNP_JANET_BUILD': meson.project_build_root(),
