@@ -287,6 +287,26 @@ static int serve_peer(uint16_t port) {
 /* Segment table is little-endian on the wire. The sizes below are
  * asymmetric (1 word, then 2) so a big-endian load of the same bytes
  * is a different count and misses the payload word. */
+static void test_ipv4_literal(void) {
+  int fd = -1;
+  uint16_t port = 0;
+  check(capnp_listen_tcp("127.1", 0, &fd, &port) != CAPNP_OK, "reject 127.1");
+  check(fd < 0, "no fd for abbreviated address");
+  check(capnp_listen_tcp("not-an-ip", 0, &fd, &port) != CAPNP_OK, "reject hostname");
+  check(capnp_dial_tcp("127.1", 9, &fd) != CAPNP_OK, "dial abbreviated address");
+  check(capnp_listen_tcp("127.0.0.1", 0, &fd, &port) == CAPNP_OK, "loopback literal");
+  if (fd >= 0)
+    close(fd);
+  fd = -1;
+  check(capnp_listen_tcp("", 0, &fd, &port) == CAPNP_OK, "empty host is loopback");
+  if (fd >= 0)
+    close(fd);
+  fd = -1;
+  check(capnp_listen_tcp(NULL, 0, &fd, &port) == CAPNP_OK, "null host is loopback");
+  if (fd >= 0)
+    close(fd);
+}
+
 static void test_frame_little_endian(void) {
   int sv[2];
   uint8_t frame[40];
@@ -318,6 +338,7 @@ int main(int argc, char **argv) {
     return dial_peer((uint16_t)atoi(argv[2]));
   if (argc >= 3 && strcmp(argv[1], "serve") == 0)
     return serve_peer((uint16_t)atoi(argv[2]));
+  test_ipv4_literal();
   test_frame_little_endian();
   test_unix_replaces_only_socket();
   test_link_setup_closes_fd();

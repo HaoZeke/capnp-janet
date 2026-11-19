@@ -89,6 +89,11 @@ int capnp_link_from_fd(capnp_link_t *link, int fd) {
   return CAPNP_OK;
 }
 
+static int parse_v4(const char *host, struct in_addr *out) {
+  const char *h = (host && host[0]) ? host : "127.0.0.1";
+  return inet_pton(AF_INET, h, out) == 1 ? 0 : -1;
+}
+
 int capnp_listen_tcp(const char *host, uint16_t port, int *fd, uint16_t *bound_port) {
   int s, one = 1;
   struct sockaddr_in addr;
@@ -102,7 +107,10 @@ int capnp_listen_tcp(const char *host, uint16_t port, int *fd, uint16_t *bound_p
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
-  addr.sin_addr.s_addr = inet_addr(host && host[0] ? host : "127.0.0.1");
+  if (parse_v4(host, &addr.sin_addr)) {
+    close(s);
+    return CAPNP_ERR_ARG;
+  }
   if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) || listen(s, 4)) {
     close(s);
     return CAPNP_ERR_ALLOC;
@@ -124,7 +132,10 @@ int capnp_dial_tcp(const char *host, uint16_t port, int *fd) {
   memset(&addr, 0, sizeof(addr));
   addr.sin_family = AF_INET;
   addr.sin_port = htons(port);
-  addr.sin_addr.s_addr = inet_addr(host && host[0] ? host : "127.0.0.1");
+  if (parse_v4(host, &addr.sin_addr)) {
+    close(s);
+    return CAPNP_ERR_ARG;
+  }
   if (connect(s, (struct sockaddr *)&addr, sizeof(addr))) {
     close(s);
     return CAPNP_ERR_ALLOC;
