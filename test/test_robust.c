@@ -381,12 +381,40 @@ static void test_virtual_traversal_charge(void) {
   capnp_message_free(&m);
 }
 
-static size_t heap_now(void) {
+/* Valgrind replaces malloc and leaves mallinfo's counters stale.
+ * mallinfo2 and the sanitizer stay accurate there. */
+static int mallinfo_is_stale(void) {
+  const char *preload = getenv("LD_PRELOAD");
+  return preload && strstr(preload, "valgrind") != NULL;
+}
+
+/* 1 when *out is the allocator's in-use byte count. AddressSanitizer,
+ * mallinfo2, and mallinfo each cover a toolchain the others miss. */
+static int heap_now(size_t *out) {
 #if defined(__SANITIZE_ADDRESS__)
-  return __sanitizer_get_current_allocated_bytes();
-#else
+  *out = (size_t)__sanitizer_get_current_allocated_bytes();
+  return 1;
+#elif defined(CAPNP_HAS_MALLINFO2)
   struct mallinfo2 info = mallinfo2();
-  return (size_t)info.uordblks;
+  *out = (size_t)info.uordblks;
+  return 1;
+#elif defined(CAPNP_HAS_MALLINFO)
+  struct mallinfo info;
+  if (mallinfo_is_stale())
+    return 0;
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+  info = mallinfo();
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+  *out = (size_t)info.uordblks;
+  return 1;
+#else
+  (void)out;
+  return 0;
 #endif
 }
 
@@ -395,8 +423,8 @@ static void test_reparse_releases_storage(void) {
   uint8_t body[8];
   capnp_segment_t seg;
   capnp_message_t m = {0};
-  size_t before, after;
-  int i;
+  size_t before = 0, after = 0;
+  int i, measured;
   memset(&m, 0, sizeof(m));
   memset(flat, 0, sizeof(flat));
   capnp_store_le32(flat, 0);
@@ -406,7 +434,7 @@ static void test_reparse_releases_storage(void) {
   capnp_store_le64(body, capnp_wp_make_struct(-1, 0, 0));
   seg.data = body;
   seg.words = 1;
-  before = heap_now();
+  measured = heap_now(&before);
   for (i = 0; i < 200; i++) {
     CHECK(capnp_message_from_flat(&m, flat, sizeof(flat)) == CAPNP_OK,
           "reparse flat");
@@ -418,7 +446,11 @@ static void test_reparse_releases_storage(void) {
     capnp_message_free(&m);
     capnp_message_free(&m);
   }
-  after = heap_now();
+  if (!measured) {
+    fprintf(stderr, "SKIP: reparse heap check\n");
+    return;
+  }
+  CHECK(heap_now(&after), "heap measure");
   CHECK(after <= before + 4096, "reparse does not leak");
 }
 

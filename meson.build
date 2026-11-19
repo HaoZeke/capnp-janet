@@ -13,6 +13,28 @@ project(
 
 inc = include_directories('include')
 
+cc = meson.get_compiler('c')
+
+# glibc 2.33 added mallinfo2. The pixi sysroot is older, and mallinfo
+# still reports the bytes the reparse check compares.
+robust_c_args = []
+if cc.compiles(
+  '#include <malloc.h>\nint main(void){struct mallinfo2 i=mallinfo2();return (int)i.uordblks;}',
+  name: 'mallinfo2',
+)
+  robust_c_args += ['-DCAPNP_HAS_MALLINFO2']
+elif cc.compiles(
+  '#include <malloc.h>\nint main(void){struct mallinfo i=mallinfo();return (int)i.uordblks;}',
+  name: 'mallinfo',
+)
+  robust_c_args += ['-DCAPNP_HAS_MALLINFO']
+else
+  message('robust heap check: no mallinfo2 or mallinfo; that check is skipped')
+endif
+
+# dlsym lives in libdl on glibc before 2.34 and in libc after that.
+libdl = cc.find_library('dl', required: false)
+
 lib_sources = files(
   'src/capnp_message.c',
   'src/capnp_builder.c',
@@ -101,6 +123,7 @@ test_robust = executable(
   'test/test_robust.c',
   include_directories: test_inc,
   dependencies: capnp_janet_dep,
+  c_args: robust_c_args,
 )
 test('robust', test_robust)
 
@@ -208,11 +231,16 @@ test_conform = executable(
   dependencies: capnp_janet_dep,
 )
 
+dyn_deps = [capnp_janet_dep]
+if libdl.found()
+  dyn_deps += [libdl]
+endif
+
 test_dyn = executable(
   'test_dyn',
   'test/test_dyn.c',
   include_directories: test_inc,
-  dependencies: capnp_janet_dep,
+  dependencies: dyn_deps,
 )
 
 if bash.found()
