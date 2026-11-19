@@ -51,4 +51,11 @@ CAPNP_JANET_EXPORT int capnp_dyn_decode_json(const capnp_dyn_t *d, const char *t
                                              const char *text, size_t len, uint8_t **out,
                                              size_t *out_len);
 
+/* Print the text form of a const, or of a field default, the way
+ * `capnp eval schema.capnp name` does. `expr` is `name`, `Type.field`,
+ * `Type.field.nested`, or `Type.field[index]`. The result has no trailing
+ * newline. */
+CAPNP_JANET_EXPORT int capnp_dyn_eval(const capnp_dyn_t *d, const char *expr,
+                                      char **out, size_t *len);
+
 #endif

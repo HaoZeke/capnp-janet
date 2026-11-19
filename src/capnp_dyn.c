@@ -1348,3 +1348,360 @@ int capnp_dyn_decode_json(const capnp_dyn_t *d, const char *type_name,
     return CAPNP_ERR_ARG;
   return decode_root(d, type_name, text, len, 1, out, out_len);
 }
+
+enum { EV_BITS = 1, EV_PTR = 2 };
+
+typedef struct {
+  int kind;
+  uint16_t which;
+  uint16_t elem_which;
+  uint64_t bits;
+  capnp_ptr_t ptr;
+  char tname[160];
+} ev_t;
+
+static int set_out(char **out, size_t *len, const char *s) {
+  size_t n = strlen(s);
+  char *p = (char *)malloc(n + 1);
+  if (!p)
+    return CAPNP_ERR_ALLOC;
+  memcpy(p, s, n + 1);
+  *out = p;
+  *len = n;
+  return CAPNP_OK;
+}
+
+static int eval_quote(const char *s, size_t n, char **out, size_t *len) {
+  char *p = (char *)malloc(n * 4 + 3);
+  size_t i, w = 0;
+  if (!p)
+    return CAPNP_ERR_ALLOC;
+  p[w++] = '"';
+  for (i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (c == '"' || c == '\\') {
+      p[w++] = '\\';
+      p[w++] = (char)c;
+    } else if (c == '\n') {
+      p[w++] = '\\';
+      p[w++] = 'n';
+    } else if (c < 0x20 || c == 0x7f) {
+      w += (size_t)sprintf(p + w, "\\x%02x", c);
+    } else {
+      p[w++] = (char)c;
+    }
+  }
+  p[w++] = '"';
+  p[w] = 0;
+  *out = p;
+  *len = w;
+  return CAPNP_OK;
+}
+
+static int find_schema_node(const capnp_dyn_t *d, const char *name, int which,
+                            capnp_ptr_t *node) {
+  capnp_ptr_t root, nodes;
+  uint32_t i, n;
+  if (capnp_root((capnp_message_t *)&d->msg, &root) != CAPNP_OK ||
+      capnp_getp(&root, 0, &nodes) != CAPNP_OK || nodes.kind != CAPNP_PK_LIST)
+    return CAPNP_ERR_KIND;
+  n = capnp_list_len(&nodes);
+  for (i = 0; i < n; i++) {
+    char shortn[160];
+    if (capnp_list_getp(&nodes, i, node) != CAPNP_OK)
+      continue;
+    if (capnp_get_u16(node, 12, 0xffff) != (uint16_t)which)
+      continue;
+    short_name(node_text(node, 0), shortn, sizeof(shortn));
+    if (strcmp(shortn, name) == 0)
+      return CAPNP_OK;
+  }
+  return CAPNP_ERR_KIND;
+}
+
+static int field_node(const capnp_ptr_t *struct_node, const char *name,
+                      capnp_ptr_t *field) {
+  capnp_ptr_t fields;
+  uint32_t i, n;
+  if (capnp_getp(struct_node, 3, &fields) != CAPNP_OK ||
+      fields.kind != CAPNP_PK_LIST)
+    return CAPNP_ERR_KIND;
+  n = capnp_list_len(&fields);
+  for (i = 0; i < n; i++) {
+    if (capnp_list_getp(&fields, i, field) != CAPNP_OK)
+      continue;
+    if (strcmp(node_text(field, 0), name) == 0)
+      return CAPNP_OK;
+  }
+  return CAPNP_ERR_KIND;
+}
+
+static int ev_from_value(const capnp_dyn_t *d, const capnp_ptr_t *value,
+                         const capnp_ptr_t *type, ev_t *ev) {
+  uint16_t which;
+  memset(ev, 0, sizeof(*ev));
+  if (!value || value->kind != CAPNP_PK_STRUCT)
+    return CAPNP_ERR_KIND;
+  which = capnp_get_u16(value, 0, 0xffff);
+  ev->which = which;
+  if (which == TY_TEXT || which == TY_DATA) {
+    ev->kind = EV_PTR;
+    ev->ptr = *value;
+    return CAPNP_OK;
+  }
+  if (which == TY_STRUCT || which == TY_LIST) {
+    if (capnp_getp(value, 0, &ev->ptr) != CAPNP_OK)
+      return CAPNP_ERR_KIND;
+    ev->kind = EV_PTR;
+    if (which == TY_STRUCT && type && type->kind == CAPNP_PK_STRUCT) {
+      dyn_struct *st = find_id(d, capnp_get_u64(type, 8, 0));
+      if (st)
+        snprintf(ev->tname, sizeof(ev->tname), "%s", st->name);
+    }
+    if (which == TY_LIST && type && type->kind == CAPNP_PK_STRUCT) {
+      capnp_ptr_t el;
+      if (capnp_getp(type, 0, &el) == CAPNP_OK && el.kind == CAPNP_PK_STRUCT)
+        ev->elem_which = capnp_get_u16(&el, 0, 0xffff);
+    }
+    return CAPNP_OK;
+  }
+  ev->kind = EV_BITS;
+  switch (which) {
+  case TY_BOOL:
+    ev->bits = (uint64_t)capnp_get_bool(value, 16, 0);
+    break;
+  case TY_I8:
+  case TY_U8:
+    ev->bits = capnp_get_u8(value, 2, 0);
+    break;
+  case TY_I16:
+  case TY_U16:
+  case TY_ENUM:
+    ev->bits = capnp_get_u16(value, 2, 0);
+    break;
+  case TY_I32:
+  case TY_U32:
+  case TY_F32:
+    ev->bits = capnp_get_u32(value, 4, 0);
+    break;
+  case TY_I64:
+  case TY_U64:
+  case TY_F64:
+    ev->bits = capnp_get_u64(value, 8, 0);
+    break;
+  default:
+    return CAPNP_ERR_KIND;
+  }
+  return CAPNP_OK;
+}
+
+static int ev_field(const capnp_dyn_t *d, ev_t *ev, const char *name) {
+  dyn_struct *st;
+  dyn_field *f;
+  if (ev->kind != EV_PTR || ev->which != TY_STRUCT)
+    return CAPNP_ERR_KIND;
+  st = find_name(d, ev->tname);
+  f = find_field(st, name);
+  if (!f)
+    return CAPNP_ERR_KIND;
+  if (!is_ptr_type(f->type_which)) {
+    if (logical_bits(&ev->ptr, f, &ev->bits))
+      return CAPNP_ERR_KIND;
+    ev->kind = EV_BITS;
+    ev->which = f->type_which;
+    return CAPNP_OK;
+  }
+  if (capnp_getp(&ev->ptr, (uint16_t)f->offset, &ev->ptr) != CAPNP_OK &&
+      f->type_which != TY_TEXT)
+    return CAPNP_ERR_KIND;
+  ev->which = f->type_which;
+  ev->elem_which = f->elem_which;
+  ev->tname[0] = 0;
+  if (f->type_which == TY_STRUCT) {
+    dyn_struct *child = find_id(d, f->type_id);
+    if (child)
+      snprintf(ev->tname, sizeof(ev->tname), "%s", child->name);
+  }
+  return CAPNP_OK;
+}
+
+static int ev_index(ev_t *ev, uint32_t index) {
+  capnp_ptr_t el;
+  if (ev->kind != EV_PTR || ev->which != TY_LIST)
+    return CAPNP_ERR_KIND;
+  if (ev->elem_which == TY_TEXT || ev->elem_which == TY_DATA) {
+    ev->which = ev->elem_which;
+    ev->ptr = ev->ptr;
+    ev->bits = index;
+    ev->kind = EV_PTR;
+    ev->which = ev->elem_which == TY_DATA ? TY_DATA : TY_TEXT;
+    /* Reuse bits as the list index for a text element. which stays TEXT
+     * and tname is empty so the printer indexes the list. */
+    ev->elem_which = 1;
+    ev->bits = index;
+    (void)el;
+    return CAPNP_OK;
+  }
+  if (capnp_list_getp(&ev->ptr, index, &el) != CAPNP_OK)
+    return CAPNP_ERR_KIND;
+  ev->ptr = el;
+  ev->which = ev->elem_which ? ev->elem_which : TY_STRUCT;
+  return CAPNP_OK;
+}
+
+static int format_ev(const capnp_dyn_t *d, const ev_t *ev, char **out,
+                     size_t *len) {
+  char tmp[64];
+  if (ev->kind == EV_BITS) {
+    if (ev->which == TY_BOOL)
+      return set_out(out, len, ev->bits ? "true" : "false");
+    if (ev->which == TY_I8 || ev->which == TY_I16 || ev->which == TY_I32 ||
+        ev->which == TY_I64)
+      snprintf(tmp, sizeof(tmp), "%lld", (long long)sext(ev->bits, ev->which));
+    else if (ev->which == TY_F32) {
+      float fv;
+      uint32_t u = (uint32_t)ev->bits;
+      memcpy(&fv, &u, sizeof(fv));
+      snprintf(tmp, sizeof(tmp), "%.9g", (double)fv);
+    } else if (ev->which == TY_F64) {
+      double dv;
+      memcpy(&dv, &ev->bits, sizeof(dv));
+      snprintf(tmp, sizeof(tmp), "%.17g", dv);
+    } else
+      snprintf(tmp, sizeof(tmp), "%llu", (unsigned long long)ev->bits);
+    return set_out(out, len, tmp);
+  }
+  if (ev->which == TY_TEXT && ev->elem_which == 1) {
+    const char *t = NULL;
+    size_t n = 0;
+    if (capnp_list_get_text(&ev->ptr, (uint32_t)ev->bits, &t, &n) != CAPNP_OK)
+      return CAPNP_ERR_KIND;
+    return eval_quote(t, n, out, len);
+  }
+  if (ev->which == TY_TEXT) {
+    const char *t = NULL;
+    size_t n = 0;
+    if (capnp_get_text(&ev->ptr, 0, &t, &n) != CAPNP_OK)
+      return CAPNP_ERR_KIND;
+    return eval_quote(t, n, out, len);
+  }
+  if (ev->which == TY_STRUCT)
+    return capnp_dyn_encode_text(d, ev->tname, &ev->ptr, out, len);
+  if (ev->which == TY_LIST &&
+      (ev->elem_which == TY_TEXT || ev->elem_which == 0)) {
+    uint32_t i, n = capnp_list_len(&ev->ptr);
+    char *buf = (char *)malloc((size_t)n * 64 + 3);
+    size_t w = 0;
+    if (!buf)
+      return CAPNP_ERR_ALLOC;
+    buf[w++] = '[';
+    for (i = 0; i < n; i++) {
+      const char *t = NULL;
+      size_t tn = 0;
+      char *q = NULL;
+      size_t qn = 0;
+      if (i) {
+        buf[w++] = ',';
+        buf[w++] = ' ';
+      }
+      if (capnp_list_get_text(&ev->ptr, i, &t, &tn) != CAPNP_OK) {
+        free(buf);
+        return CAPNP_ERR_KIND;
+      }
+      if (eval_quote(t, tn, &q, &qn)) {
+        free(buf);
+        return CAPNP_ERR_ALLOC;
+      }
+      memcpy(buf + w, q, qn);
+      w += qn;
+      free(q);
+    }
+    buf[w++] = ']';
+    buf[w] = 0;
+    *out = buf;
+    *len = w;
+    return CAPNP_OK;
+  }
+  return CAPNP_ERR_KIND;
+}
+
+static int read_ident(const char **pp, char *out, size_t n) {
+  const char *p = *pp;
+  size_t i = 0;
+  if (!isalpha((unsigned char)*p) && *p != '_')
+    return -1;
+  while (isalnum((unsigned char)*p) || *p == '_') {
+    if (i + 1 >= n)
+      return -1;
+    out[i++] = *p++;
+  }
+  out[i] = 0;
+  *pp = p;
+  return 0;
+}
+
+int capnp_dyn_eval(const capnp_dyn_t *d, const char *expr, char **out,
+                   size_t *len) {
+  const char *p;
+  char ident[160];
+  ev_t ev;
+  capnp_ptr_t node, value, type, field;
+  int rc;
+  if (!d || !expr || !out || !len)
+    return CAPNP_ERR_ARG;
+  p = expr;
+  if (read_ident(&p, ident, sizeof(ident)))
+    return CAPNP_ERR_KIND;
+  memset(&value, 0, sizeof(value));
+  memset(&type, 0, sizeof(type));
+  if (find_schema_node(d, ident, 4, &node) == CAPNP_OK) {
+    if (capnp_getp(&node, 4, &value) != CAPNP_OK)
+      return CAPNP_ERR_KIND;
+    capnp_getp(&node, 3, &type);
+    rc = ev_from_value(d, &value, &type, &ev);
+    if (rc)
+      return rc;
+  } else if (find_schema_node(d, ident, 1, &node) == CAPNP_OK) {
+    if (*p != '.')
+      return CAPNP_ERR_KIND;
+    p++;
+    if (read_ident(&p, ident, sizeof(ident)))
+      return CAPNP_ERR_KIND;
+    if (field_node(&node, ident, &field) != CAPNP_OK)
+      return CAPNP_ERR_KIND;
+    if (capnp_getp(&field, 3, &value) != CAPNP_OK)
+      return CAPNP_ERR_KIND;
+    capnp_getp(&field, 2, &type);
+    rc = ev_from_value(d, &value, &type, &ev);
+    if (rc)
+      return rc;
+  } else {
+    return CAPNP_ERR_KIND;
+  }
+  /* The struct-start branch advanced p with a side effect inside the
+   * condition. Walk the rest of the path from the current p. */
+  while (*p) {
+    if (*p == '.') {
+      p++;
+      if (read_ident(&p, ident, sizeof(ident)))
+        return CAPNP_ERR_KIND;
+      rc = ev_field(d, &ev, ident);
+      if (rc)
+        return rc;
+    } else if (*p == '[') {
+      char *end = NULL;
+      unsigned long idx;
+      p++;
+      idx = strtoul(p, &end, 10);
+      if (end == p || *end != ']')
+        return CAPNP_ERR_KIND;
+      p = end + 1;
+      rc = ev_index(&ev, (uint32_t)idx);
+      if (rc)
+        return rc;
+    } else {
+      return CAPNP_ERR_KIND;
+    }
+  }
+  return format_ev(d, &ev, out, len);
+}
