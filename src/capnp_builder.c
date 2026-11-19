@@ -761,6 +761,191 @@ int capnp_builder_copy_ptr(capnp_bptr_t *slot, const capnp_ptr_t *src) {
   return capnp_copy_ptr_to_word(slot->b, slot->seg, slot->word, src, 0);
 }
 
+static uint64_t load_w(const capnp_builder_t *b, uint32_t seg, size_t word) {
+  return capnp_load_le64(b->segs[seg].data + word * CAPNP_WORD_BYTES);
+}
+
+static int list_nwords(int esize, uint32_t count, size_t *out) {
+  size_t n;
+  switch (esize) {
+  case CAPNP_SZ_VOID:
+    n = 0;
+    break;
+  case CAPNP_SZ_BIT:
+    n = ((size_t)count + 63u) / 64u;
+    break;
+  case CAPNP_SZ_BYTE:
+    n = ((size_t)count + 7u) / 8u;
+    break;
+  case CAPNP_SZ_TWO:
+    n = ((size_t)count + 3u) / 4u;
+    break;
+  case CAPNP_SZ_FOUR:
+    n = ((size_t)count + 1u) / 2u;
+    break;
+  case CAPNP_SZ_EIGHT:
+  case CAPNP_SZ_PTR:
+    n = count;
+    break;
+  default:
+    return CAPNP_ERR_KIND;
+  }
+  *out = n;
+  return CAPNP_OK;
+}
+
+int capnp_builder_new_orphan_struct(capnp_builder_t *b, uint16_t dwords,
+                                    uint16_t pwords, capnp_orphan_t *o,
+                                    capnp_bptr_t *body) {
+  size_t n = (size_t)dwords + pwords;
+  uint32_t seg = 0;
+  size_t word = 0;
+  if (!b || !o)
+    return CAPNP_ERR_ARG;
+  memset(o, 0, sizeof(*o));
+  if (n) {
+    if (alloc_words(b, n, &seg, &word))
+      return CAPNP_ERR_ALLOC;
+    memset(wbytes(b, seg, word), 0, n * CAPNP_WORD_BYTES);
+  }
+  o->b = b;
+  o->seg = seg;
+  o->word = word;
+  o->kind = CAPNP_PK_STRUCT;
+  o->dwords = dwords;
+  o->pwords = pwords;
+  o->live = 1;
+  if (body) {
+    body->b = b;
+    body->seg = seg;
+    body->word = word;
+  }
+  return CAPNP_OK;
+}
+
+int capnp_builder_new_orphan_list(capnp_builder_t *b, int esize, uint32_t count,
+                                  capnp_orphan_t *o, capnp_bptr_t *start) {
+  size_t n = 0;
+  uint32_t seg = 0;
+  size_t word = 0;
+  if (!b || !o)
+    return CAPNP_ERR_ARG;
+  if (list_nwords(esize, count, &n))
+    return CAPNP_ERR_KIND;
+  memset(o, 0, sizeof(*o));
+  if (n) {
+    if (alloc_words(b, n, &seg, &word))
+      return CAPNP_ERR_ALLOC;
+    memset(wbytes(b, seg, word), 0, n * CAPNP_WORD_BYTES);
+  }
+  o->b = b;
+  o->seg = seg;
+  o->word = word;
+  o->kind = CAPNP_PK_LIST;
+  o->esize = esize;
+  o->count = count;
+  o->live = 1;
+  if (start) {
+    start->b = b;
+    start->seg = seg;
+    start->word = word;
+  }
+  return CAPNP_OK;
+}
+
+int capnp_builder_adopt(const capnp_bptr_t *slot, capnp_orphan_t *o) {
+  int rc;
+  if (!slot || !slot->b || !o || !o->live || o->b != slot->b)
+    return CAPNP_ERR_ARG;
+  if (slot->word >= slot->b->segs[slot->seg].words)
+    return CAPNP_ERR_BOUNDS;
+  if (o->kind == CAPNP_PK_STRUCT) {
+    if (o->dwords == 0 && o->pwords == 0)
+      store_w(slot->b, slot->seg, slot->word, capnp_wp_make_struct(-1, 0, 0));
+    else if ((rc = write_struct_ptr(slot->b, slot->seg, slot->word, o->seg,
+                                    o->word, o->dwords, o->pwords)))
+      return rc;
+  } else if (o->kind == CAPNP_PK_LIST) {
+    if ((rc = write_list_ptr(slot->b, slot->seg, slot->word, o->seg, o->word,
+                             o->esize, o->count)))
+      return rc;
+  } else {
+    return CAPNP_ERR_KIND;
+  }
+  o->live = 0;
+  return CAPNP_OK;
+}
+
+/* Follow a near or single-far pointer to the object it names. */
+static int orphan_from_word(capnp_builder_t *b, uint32_t seg, size_t word,
+                            capnp_orphan_t *o) {
+  uint64_t w;
+  int kind;
+  if (seg >= b->nsegs || word >= b->segs[seg].words)
+    return CAPNP_ERR_BOUNDS;
+  w = load_w(b, seg, word);
+  kind = capnp_wp_kind(w);
+  if (kind == CAPNP_WK_FAR && !capnp_wp_far_two(w)) {
+    seg = capnp_wp_far_seg(w);
+    word = capnp_wp_far_off(w);
+    if (seg >= b->nsegs || word >= b->segs[seg].words)
+      return CAPNP_ERR_BOUNDS;
+    w = load_w(b, seg, word);
+    kind = capnp_wp_kind(w);
+  }
+  if (kind == CAPNP_WK_STRUCT) {
+    size_t n = (size_t)capnp_wp_struct_dwords(w) + capnp_wp_struct_pwords(w);
+    o->kind = CAPNP_PK_STRUCT;
+    o->dwords = capnp_wp_struct_dwords(w);
+    o->pwords = capnp_wp_struct_pwords(w);
+    if (n == 0) {
+      o->seg = seg;
+      o->word = word;
+    } else {
+      int64_t body = (int64_t)word + 1 + capnp_wp_offset(w);
+      if (body < 0 || (size_t)body >= b->segs[seg].words)
+        return CAPNP_ERR_BOUNDS;
+      o->seg = seg;
+      o->word = (size_t)body;
+    }
+    return CAPNP_OK;
+  }
+  if (kind == CAPNP_WK_LIST) {
+    int64_t start;
+    if (capnp_wp_list_esize(w) == CAPNP_SZ_COMPOSITE)
+      return CAPNP_ERR_KIND;
+    start = (int64_t)word + 1 + capnp_wp_offset(w);
+    o->kind = CAPNP_PK_LIST;
+    o->esize = capnp_wp_list_esize(w);
+    o->count = capnp_wp_list_count(w);
+    if (o->count == 0) {
+      o->seg = seg;
+      o->word = word;
+      return CAPNP_OK;
+    }
+    if (start < 0 || (size_t)start >= b->segs[seg].words)
+      return CAPNP_ERR_BOUNDS;
+    o->seg = seg;
+    o->word = (size_t)start;
+    return CAPNP_OK;
+  }
+  return CAPNP_ERR_KIND;
+}
+
+int capnp_builder_disown(const capnp_bptr_t *slot, capnp_orphan_t *o) {
+  int rc;
+  if (!slot || !slot->b || !o)
+    return CAPNP_ERR_ARG;
+  memset(o, 0, sizeof(*o));
+  rc = orphan_from_word(slot->b, slot->seg, slot->word, o);
+  if (rc)
+    return rc;
+  store_w(slot->b, slot->seg, slot->word, 0);
+  o->b = slot->b;
+  o->live = 1;
+  return CAPNP_OK;
+}
+
 int capnp_builder_serialize(const capnp_builder_t *b, uint8_t **out,
                             size_t *out_len) {
   size_t table_bytes, body_words = 0, total, off;

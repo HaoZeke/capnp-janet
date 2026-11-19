@@ -146,6 +146,35 @@ CAPNP_JANET_EXPORT size_t capnp_builder_ptr_word(size_t body_word, uint16_t dwor
 
 CAPNP_JANET_EXPORT int capnp_builder_copy_ptr(capnp_bptr_t *slot, const capnp_ptr_t *src);
 
+/* An object allocated in the arena and not yet attached to a pointer
+ * slot, the same relationship as a C++ Orphan. adopt writes the pointer
+ * and clears `live`. disown nulls the slot and returns the object. */
+typedef struct capnp_orphan {
+  capnp_builder_t *b;
+  uint32_t seg;
+  size_t word;
+  int kind; /* CAPNP_PK_STRUCT or CAPNP_PK_LIST */
+  uint16_t dwords;
+  uint16_t pwords;
+  int esize;
+  uint32_t count;
+  int live;
+} capnp_orphan_t;
+
+CAPNP_JANET_EXPORT int capnp_builder_new_orphan_struct(capnp_builder_t *b,
+                                                       uint16_t dwords,
+                                                       uint16_t pwords,
+                                                       capnp_orphan_t *o,
+                                                       capnp_bptr_t *body);
+CAPNP_JANET_EXPORT int capnp_builder_new_orphan_list(capnp_builder_t *b, int esize,
+                                                     uint32_t count,
+                                                     capnp_orphan_t *o,
+                                                     capnp_bptr_t *start);
+CAPNP_JANET_EXPORT int capnp_builder_adopt(const capnp_bptr_t *slot,
+                                           capnp_orphan_t *o);
+CAPNP_JANET_EXPORT int capnp_builder_disown(const capnp_bptr_t *slot,
+                                            capnp_orphan_t *o);
+
 CAPNP_JANET_EXPORT int capnp_builder_serialize(const capnp_builder_t *b, uint8_t **out,
                             size_t *out_len);
 

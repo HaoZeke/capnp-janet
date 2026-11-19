@@ -95,6 +95,13 @@ test_robust = executable(
 )
 test('robust', test_robust)
 
+test_orphan = executable(
+  'test_orphan',
+  'test/test_orphan.c',
+  dependencies: capnp_janet_dep,
+)
+test('orphan', test_orphan)
+
 test_list_text = executable(
   'test_list_text',
   'test/test_list_text.c',
