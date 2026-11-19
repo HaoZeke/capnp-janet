@@ -847,15 +847,197 @@ static int list_nwords(int esize, uint32_t count, size_t *out) {
   return CAPNP_OK;
 }
 
+/* Words past s->words are allocated with calloc and reused as if they
+ * were still zero. A reclaimed tail has to be cleared before the next
+ * object is placed there. */
+static void zero_words(capnp_builder_t *b, uint32_t seg, size_t start,
+                       size_t n) {
+  capnp_bseg_t *s;
+  if (!b || n == 0 || seg >= b->nsegs)
+    return;
+  s = &b->segs[seg];
+  if (start >= s->words)
+    return;
+  if (n > s->words - start)
+    n = s->words - start;
+  memset(s->data + start * CAPNP_WORD_BYTES, 0, n * CAPNP_WORD_BYTES);
+}
+
+/* A zero-word list may name the segment end, the way C++ allocate(0)
+ * does. checkOffset treats that end as in bounds. Shrinking the segment
+ * below the target makes the pointer past the end. */
+static void note_zero_list(uint32_t content_seg, size_t content_word, int esize,
+                           uint32_t count, uint32_t watch, size_t *pin) {
+  size_t n = 0;
+  if (esize == CAPNP_SZ_COMPOSITE)
+    return;
+  if (list_nwords(esize, count, &n) || n != 0)
+    return;
+  if (content_seg == watch && content_word > *pin)
+    *pin = content_word;
+}
+
+static void walk_slot(capnp_builder_t *b, uint32_t seg, size_t word, int depth,
+                      uint32_t watch, size_t *pin);
+
+static void walk_struct_ptrs(capnp_builder_t *b, uint32_t seg, size_t body,
+                             uint16_t dw, uint16_t pw, int depth,
+                             uint32_t watch, size_t *pin) {
+  uint16_t i;
+  if (seg >= b->nsegs)
+    return;
+  for (i = 0; i < pw; i++) {
+    size_t pwrd = body + (size_t)dw + i;
+    if (pwrd < b->segs[seg].words)
+      walk_slot(b, seg, pwrd, depth + 1, watch, pin);
+  }
+}
+
+static void walk_list_body(capnp_builder_t *b, uint32_t seg, size_t start,
+                           int esize, uint32_t count, int depth, uint32_t watch,
+                           size_t *pin) {
+  note_zero_list(seg, start, esize, count, watch, pin);
+  if (seg >= b->nsegs)
+    return;
+  if (esize == CAPNP_SZ_PTR) {
+    uint32_t i;
+    for (i = 0; i < count; i++) {
+      size_t pwrd = start + i;
+      if (pwrd < b->segs[seg].words)
+        walk_slot(b, seg, pwrd, depth + 1, watch, pin);
+    }
+    return;
+  }
+  if (esize != CAPNP_SZ_COMPOSITE || start >= b->segs[seg].words)
+    return;
+  {
+    uint64_t tag = load_w(b, seg, start);
+    uint16_t dw, pw;
+    size_t step, i, elems;
+    int32_t off;
+    if (capnp_wp_kind(tag) != CAPNP_WK_STRUCT)
+      return;
+    dw = capnp_wp_struct_dwords(tag);
+    pw = capnp_wp_struct_pwords(tag);
+    step = (size_t)dw + pw;
+    off = capnp_wp_offset(tag);
+    if (off > 0)
+      elems = (size_t)off;
+    else if (step)
+      elems = (size_t)count / step;
+    else
+      elems = 0;
+    for (i = 0; i < elems; i++) {
+      size_t base = start + 1u + i * step;
+      walk_struct_ptrs(b, seg, base, dw, pw, depth, watch, pin);
+    }
+  }
+}
+
+static void walk_word(capnp_builder_t *b, uint32_t seg, size_t ptr_word,
+                      uint64_t w, int depth, uint32_t watch, size_t *pin) {
+  int kind;
+  if (!b || depth > 64 || seg >= b->nsegs)
+    return;
+  kind = capnp_wp_kind(w);
+  if (kind == CAPNP_WK_STRUCT || kind == CAPNP_WK_LIST) {
+    int64_t at = (int64_t)ptr_word + 1 + capnp_wp_offset(w);
+    if (at < 0)
+      return;
+    if (kind == CAPNP_WK_STRUCT) {
+      uint16_t dw = capnp_wp_struct_dwords(w);
+      uint16_t pw = capnp_wp_struct_pwords(w);
+      if ((size_t)dw + pw == 0)
+        return;
+      if ((size_t)at >= b->segs[seg].words)
+        return;
+      walk_struct_ptrs(b, seg, (size_t)at, dw, pw, depth, watch, pin);
+      return;
+    }
+    walk_list_body(b, seg, (size_t)at, capnp_wp_list_esize(w),
+                   capnp_wp_list_count(w), depth, watch, pin);
+    return;
+  }
+  if (kind != CAPNP_WK_FAR)
+    return;
+  if (capnp_wp_far_two(w)) {
+    uint32_t pseg = capnp_wp_far_seg(w);
+    uint32_t poff = capnp_wp_far_off(w);
+    uint64_t pad, tag;
+    uint32_t cseg;
+    size_t coff;
+    if (poff > UINT32_MAX - 1u || pseg >= b->nsegs ||
+        (size_t)poff + 1u >= b->segs[pseg].words)
+      return;
+    pad = load_w(b, pseg, poff);
+    tag = load_w(b, pseg, (size_t)poff + 1u);
+    if (capnp_wp_kind(pad) != CAPNP_WK_FAR || capnp_wp_far_two(pad) ||
+        capnp_wp_offset(tag) != 0)
+      return;
+    cseg = capnp_wp_far_seg(pad);
+    coff = capnp_wp_far_off(pad);
+    if (cseg >= b->nsegs)
+      return;
+    if (capnp_wp_kind(tag) == CAPNP_WK_STRUCT) {
+      uint16_t dw = capnp_wp_struct_dwords(tag);
+      uint16_t pw = capnp_wp_struct_pwords(tag);
+      if ((size_t)dw + pw == 0)
+        return;
+      if (coff >= b->segs[cseg].words)
+        return;
+      walk_struct_ptrs(b, cseg, coff, dw, pw, depth, watch, pin);
+      return;
+    }
+    if (capnp_wp_kind(tag) == CAPNP_WK_LIST)
+      walk_list_body(b, cseg, coff, capnp_wp_list_esize(tag),
+                     capnp_wp_list_count(tag), depth, watch, pin);
+    return;
+  }
+  {
+    uint32_t tseg = capnp_wp_far_seg(w);
+    size_t toff = capnp_wp_far_off(w);
+    uint64_t landing;
+    if (tseg >= b->nsegs || toff >= b->segs[tseg].words)
+      return;
+    landing = load_w(b, tseg, toff);
+    walk_word(b, tseg, toff, landing, depth + 1, watch, pin);
+  }
+}
+
+static void walk_slot(capnp_builder_t *b, uint32_t seg, size_t word, int depth,
+                      uint32_t watch, size_t *pin) {
+  if (!b || depth > 64 || seg >= b->nsegs || word >= b->segs[seg].words)
+    return;
+  walk_word(b, seg, word, load_w(b, seg, word), depth, watch, pin);
+}
+
+/* Highest word a live zero-word list names in `seg`. The segment must
+ * stay at least this long so the target is not past the end. */
+static size_t empty_list_pin(capnp_builder_t *b, uint32_t seg) {
+  size_t pin = 0;
+  if (!b || b->nsegs == 0 || b->segs[0].words == 0)
+    return 0;
+  walk_slot(b, 0, 0, 0, seg, &pin);
+  return pin;
+}
+
 static void reclaim_tail(capnp_builder_t *b, uint32_t seg, size_t start,
                          size_t n) {
   capnp_bseg_t *s;
+  size_t pin, keep;
   if (!b || n == 0 || seg >= b->nsegs)
     return;
   s = &b->segs[seg];
   if (start > s->words || n > s->words - start || start + n != s->words)
     return;
-  s->words = start;
+  zero_words(b, seg, start, n);
+  pin = empty_list_pin(b, seg);
+  /* A target equal to the word count is the segment end, which a
+   * zero-word object may name. Do not move the end below that word. */
+  keep = pin > start ? pin : start;
+  if (keep > s->words)
+    keep = s->words;
+  s->words = keep;
   /* Segment 0 holds the root. An emptied later segment is a malloc
    * the message no longer needs. */
   if (s->words == 0 && seg > 0 && seg + 1u == b->nsegs) {
@@ -867,11 +1049,14 @@ static void reclaim_tail(capnp_builder_t *b, uint32_t seg, size_t start,
 
 static void drop_ptr(capnp_builder_t *b, uint32_t seg, size_t word, int depth);
 
-/* Free the object named by a struct or list pointer word `w` that lives
- * at `ptr_word`. When `pad_after` is set, `ptr_word` is a landing pad
- * sitting just after that object and is released with it. */
-static void release_near(capnp_builder_t *b, uint32_t seg, size_t ptr_word,
-                         uint64_t w, int depth, int pad_after) {
+/* Zero the struct or list `w` describes. `target` is that object's
+ * first word (struct body, list content, or composite tag), so a
+ * double-far landing pad can name word 0 of its segment. A zero-word
+ * list may name the segment end. When `with_pad` is set and the object
+ * ends on `pad_word`, that landing-pad word is released with it. */
+static void release_target(capnp_builder_t *b, uint32_t seg, size_t target,
+                           uint64_t w, int depth, int with_pad,
+                           size_t pad_word) {
   int kind = capnp_wp_kind(w);
   if (seg >= b->nsegs)
     return;
@@ -879,34 +1064,34 @@ static void release_near(capnp_builder_t *b, uint32_t seg, size_t ptr_word,
     uint16_t dw = capnp_wp_struct_dwords(w);
     uint16_t pw = capnp_wp_struct_pwords(w);
     size_t n = (size_t)dw + pw;
-    int64_t body;
     uint16_t i;
     if (n == 0)
       return;
-    body = (int64_t)ptr_word + 1 + capnp_wp_offset(w);
-    if (body < 0 || (size_t)body >= b->segs[seg].words)
+    if (target >= b->segs[seg].words)
       return;
+    /* WireHelpers::zeroObject walks pointer words from the first to the
+     * last, then zeroes the struct body (layout.c++). */
     for (i = 0; i < pw; i++) {
-      size_t pwrd = (size_t)body + dw + i;
+      size_t pwrd = target + dw + i;
       if (pwrd < b->segs[seg].words)
         drop_ptr(b, seg, pwrd, depth + 1);
     }
-    if (pad_after && (size_t)body + n == ptr_word)
-      reclaim_tail(b, seg, (size_t)body, n + 1u);
+    zero_words(b, seg, target, n);
+    if (with_pad && target + n == pad_word)
+      reclaim_tail(b, seg, target, n + 1u);
     else
-      reclaim_tail(b, seg, (size_t)body, n);
+      reclaim_tail(b, seg, target, n);
     return;
   }
   if (kind != CAPNP_WK_LIST)
     return;
   if (capnp_wp_list_esize(w) == CAPNP_SZ_COMPOSITE) {
-    int64_t tag_at = (int64_t)ptr_word + 1 + capnp_wp_offset(w);
     uint64_t tag;
     uint16_t dw, pw;
     size_t step, words, i, count;
-    if (tag_at < 0 || (size_t)tag_at >= b->segs[seg].words)
+    if (target >= b->segs[seg].words)
       return;
-    tag = load_w(b, seg, (size_t)tag_at);
+    tag = load_w(b, seg, target);
     if (capnp_wp_kind(tag) != CAPNP_WK_STRUCT)
       return;
     dw = capnp_wp_struct_dwords(tag);
@@ -914,8 +1099,10 @@ static void release_near(capnp_builder_t *b, uint32_t seg, size_t ptr_word,
     step = (size_t)dw + pw;
     words = (size_t)capnp_wp_list_count(w);
     count = step ? words / step : 0;
+    /* Same order as zeroObject on an inline composite: each element's
+     * pointers from first to last, then the tag and element words. */
     for (i = 0; i < count; i++) {
-      size_t base = (size_t)tag_at + 1u + i * step;
+      size_t base = target + 1u + i * step;
       uint16_t p;
       for (p = 0; p < pw; p++) {
         size_t pwrd = base + dw + p;
@@ -923,34 +1110,53 @@ static void release_near(capnp_builder_t *b, uint32_t seg, size_t ptr_word,
           drop_ptr(b, seg, pwrd, depth + 1);
       }
     }
-    if (pad_after && (size_t)tag_at + 1u + words == ptr_word)
-      reclaim_tail(b, seg, (size_t)tag_at, words + 2u);
+    zero_words(b, seg, target, words + 1u);
+    if (with_pad && target + 1u + words == pad_word)
+      reclaim_tail(b, seg, target, words + 2u);
     else
-      reclaim_tail(b, seg, (size_t)tag_at, words + 1u);
+      reclaim_tail(b, seg, target, words + 1u);
     return;
   }
   {
-    int64_t start = (int64_t)ptr_word + 1 + capnp_wp_offset(w);
     size_t n = 0;
     int esize = capnp_wp_list_esize(w);
     uint32_t count = capnp_wp_list_count(w);
     if (list_nwords(esize, count, &n))
       return;
-    if (start < 0 || ((n > 0) && (size_t)start >= b->segs[seg].words))
+    if (n > 0 && target >= b->segs[seg].words)
       return;
     if (esize == CAPNP_SZ_PTR) {
       uint32_t i;
       for (i = 0; i < count; i++) {
-        size_t pwrd = (size_t)start + i;
+        size_t pwrd = target + i;
         if (pwrd < b->segs[seg].words)
           drop_ptr(b, seg, pwrd, depth + 1);
       }
     }
-    if (pad_after && n > 0 && (size_t)start + n == ptr_word)
-      reclaim_tail(b, seg, (size_t)start, n + 1u);
+    if (n > 0)
+      zero_words(b, seg, target, n);
+    if (with_pad && n > 0 && target + n == pad_word)
+      reclaim_tail(b, seg, target, n + 1u);
     else
-      reclaim_tail(b, seg, (size_t)start, n);
+      reclaim_tail(b, seg, target, n);
   }
+}
+
+/* Free the object named by a struct or list pointer word `w` that lives
+ * at `ptr_word`. When `pad_after` is set, `ptr_word` is a landing pad
+ * sitting just after that object and is released with it. */
+static void release_near(capnp_builder_t *b, uint32_t seg, size_t ptr_word,
+                         uint64_t w, int depth, int pad_after) {
+  int kind = capnp_wp_kind(w);
+  int64_t at;
+  if (seg >= b->nsegs)
+    return;
+  if (kind != CAPNP_WK_STRUCT && kind != CAPNP_WK_LIST)
+    return;
+  at = (int64_t)ptr_word + 1 + capnp_wp_offset(w);
+  if (at < 0)
+    return;
+  release_target(b, seg, (size_t)at, w, depth, pad_after, ptr_word);
 }
 
 static void drop_ptr(capnp_builder_t *b, uint32_t seg, size_t word, int depth) {
@@ -987,13 +1193,16 @@ static void drop_ptr(capnp_builder_t *b, uint32_t seg, size_t word, int depth) {
       return;
     cseg = capnp_wp_far_seg(pad);
     coff = capnp_wp_far_off(pad);
-    if (cseg >= b->nsegs || (coff > 0 && coff - 1u >= b->segs[cseg].words))
+    /* coff == words is the segment end, which a zero-word object may
+     * name. A target past that is not an object. Word 0 is a real
+     * object when the segment is non-empty, the same as any other
+     * in-bounds offset. C++ zeroObject follows pad->farTarget with no
+     * special case for the first word (layout.c++). */
+    if (cseg >= b->nsegs || coff > b->segs[cseg].words)
       return;
-    /* Tag offset is 0, and the object starts at coff. A near pointer
-     * one word before coff names that object. */
-    if (coff > 0 && (capnp_wp_kind(tag) == CAPNP_WK_STRUCT ||
-                     capnp_wp_kind(tag) == CAPNP_WK_LIST))
-      release_near(b, cseg, coff - 1u, tag, depth, 0);
+    if (capnp_wp_kind(tag) == CAPNP_WK_STRUCT ||
+        capnp_wp_kind(tag) == CAPNP_WK_LIST)
+      release_target(b, cseg, coff, tag, depth, 0, 0);
     reclaim_tail(b, pseg, poff, 2);
     return;
   }
@@ -1123,6 +1332,10 @@ int capnp_builder_adopt(const capnp_bptr_t *slot, capnp_orphan_t *o) {
     return CAPNP_ERR_ARG;
   if ((rc = raw_slot_checked(slot)) != CAPNP_OK)
     return rc;
+  if (o->kind != CAPNP_PK_STRUCT && o->kind != CAPNP_PK_LIST)
+    return CAPNP_ERR_KIND;
+  /* WireHelpers::adopt zeroes the slot's old target before linking. */
+  drop_slot(slot->b, slot->seg, slot->word);
   if (o->kind == CAPNP_PK_STRUCT) {
     if (o->dwords == 0 && o->pwords == 0)
       store_w(slot->b, slot->seg, slot->word, capnp_wp_make_struct(-1, 0, 0));

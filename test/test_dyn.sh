@@ -268,4 +268,41 @@ cmp "$TMP/utag-ref.can" "$TMP/utag-our.can"
 grep -a -q first "$TMP/utag-our.bin"
 capnp decode -I"$INC" "$TMP/utag.capnp" UTag <"$TMP/utag-our.bin" | grep -q 'count = 0'
 
+# A repeated struct that omits a defaulted field must not keep the
+# previous field. The same reuse must not leak a shrunk tail text into
+# a later struct.
+printf '%s\n' '{"vStruct":{"x":1,"y":2},"vStruct":{"x":9}}' | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupst-ref.bin"
+printf '%s\n' '{"vStruct":{"x":1,"y":2},"vStruct":{"x":9}}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupst-our.bin"
+cmp "$TMP/dupst-ref.bin" "$TMP/dupst-our.bin"
+"$BIN" canon "$TMP/dupst-ref.bin" "$TMP/dupst-ref.can"
+"$BIN" canon "$TMP/dupst-our.bin" "$TMP/dupst-our.can"
+cmp "$TMP/dupst-ref.can" "$TMP/dupst-our.can"
+capnp encode -I"$INC" "$PARITY_SCHEMA" Parity >"$TMP/dupstt-ref.bin" <<'EOF'
+(vStruct = (x = 1, y = 2), vStruct = (x = 9))
+EOF
+"$CLI" encode -I"$INC" "$PARITY_SCHEMA" Parity >"$TMP/dupstt-our.bin" <<'EOF'
+(vStruct = (x = 1, y = 2), vStruct = (x = 9))
+EOF
+cmp "$TMP/dupstt-ref.bin" "$TMP/dupstt-our.bin"
+printf '%s\n' '{"lStruct":[{"x":1,"y":2}],"lStruct":[{"x":5}]}' | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupls-ref.bin"
+printf '%s\n' '{"lStruct":[{"x":1,"y":2}],"lStruct":[{"x":5}]}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupls-our.bin"
+cmp "$TMP/dupls-ref.bin" "$TMP/dupls-our.bin"
+capnp encode -I"$INC" "$PARITY_SCHEMA" Parity >"$TMP/duplst-ref.bin" <<'EOF'
+(lStruct = [(x = 1, y = 2)], lStruct = [(x = 5)])
+EOF
+"$CLI" encode -I"$INC" "$PARITY_SCHEMA" Parity >"$TMP/duplst-our.bin" <<'EOF'
+(lStruct = [(x = 1, y = 2)], lStruct = [(x = 5)])
+EOF
+cmp "$TMP/duplst-ref.bin" "$TMP/duplst-our.bin"
+printf '%s\n' '{"uNote":"ABCD1234EFGH5678","uNote":"","vStruct":{}}' | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupsh-ref.bin"
+printf '%s\n' '{"uNote":"ABCD1234EFGH5678","uNote":"","vStruct":{}}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupsh-our.bin"
+cmp "$TMP/dupsh-ref.bin" "$TMP/dupsh-our.bin"
+capnp encode -I"$INC" "$PARITY_SCHEMA" Parity >"$TMP/dupsht-ref.bin" <<'EOF'
+(uNote = "ABCD1234EFGH5678", uNote = "", vStruct = ())
+EOF
+"$CLI" encode -I"$INC" "$PARITY_SCHEMA" Parity >"$TMP/dupsht-our.bin" <<'EOF'
+(uNote = "ABCD1234EFGH5678", uNote = "", vStruct = ())
+EOF
+cmp "$TMP/dupsht-ref.bin" "$TMP/dupsht-our.bin"
+
 echo "ok dyn"

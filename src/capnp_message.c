@@ -220,14 +220,59 @@ static int ptr_target(size_t word, int32_t off, size_t *target) {
   return CAPNP_OK;
 }
 
+/* Word count of a non-composite list body. Composite lists carry a tag
+ * and are never a zero-word object. */
+static int list_body_words(int esize, uint32_t count, size_t *out) {
+  size_t n;
+  switch (esize) {
+  case CAPNP_SZ_VOID:
+    n = 0;
+    break;
+  case CAPNP_SZ_BIT:
+    n = ((size_t)count + 63u) / 64u;
+    break;
+  case CAPNP_SZ_BYTE:
+    n = ((size_t)count + 7u) / 8u;
+    break;
+  case CAPNP_SZ_TWO:
+    n = ((size_t)count + 3u) / 4u;
+    break;
+  case CAPNP_SZ_FOUR:
+    n = ((size_t)count + 1u) / 2u;
+    break;
+  case CAPNP_SZ_EIGHT:
+  case CAPNP_SZ_PTR:
+    n = (size_t)count;
+    break;
+  default:
+    return -1;
+  }
+  *out = n;
+  return 0;
+}
+
+static int list_zero_words(int esize, uint32_t count) {
+  size_t n = 0;
+  if (esize == CAPNP_SZ_COMPOSITE)
+    return 0;
+  if (list_body_words(esize, count, &n))
+    return 0;
+  return n == 0;
+}
+
 static int land_struct(capnp_message_t *m, uint32_t seg, size_t body,
                        uint16_t dwords, uint16_t pwords, int depth,
                        capnp_ptr_t *out) {
   size_t nwords = (size_t)dwords + (size_t)pwords;
   if (seg >= m->nsegs)
     return CAPNP_ERR_SEGMENT;
-  if (body > m->segs[seg].words)
-    return CAPNP_ERR_BOUNDS;
+  /* checkOffset clamps an out-of-range target to the segment end.
+   * checkObject then accepts a zero-word object and rejects any other. */
+  if (body > m->segs[seg].words) {
+    if (nwords != 0)
+      return CAPNP_ERR_BOUNDS;
+    body = m->segs[seg].words;
+  }
   fill_obj(out, m, seg, body, CAPNP_PK_STRUCT, depth);
   out->dwords = dwords;
   out->pwords = pwords;
@@ -244,8 +289,13 @@ static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
                      uint32_t count, int depth, capnp_ptr_t *out) {
   if (seg >= m->nsegs)
     return CAPNP_ERR_SEGMENT;
-  if (start > m->segs[seg].words)
-    return CAPNP_ERR_BOUNDS;
+  /* Same clamp as SegmentReader::checkOffset. A zero-word list whose
+   * target is past the segment end is an empty list at that end. */
+  if (start > m->segs[seg].words) {
+    if (!list_zero_words(esize, count))
+      return CAPNP_ERR_BOUNDS;
+    start = m->segs[seg].words;
+  }
   fill_obj(out, m, seg, start, CAPNP_PK_LIST, depth);
   out->esize = esize;
   out->count = count;
@@ -324,6 +374,34 @@ static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
   }
 }
 
+/* A negative or overflowing offset is out of range. checkOffset turns
+ * that into the segment end, and a zero-word object still lands. */
+static int land_struct_off(capnp_message_t *m, uint32_t seg, size_t ptr_word,
+                           int32_t off, uint16_t dw, uint16_t pw, int depth,
+                           capnp_ptr_t *out) {
+  size_t body = 0;
+  int rc = ptr_target(ptr_word, off, &body);
+  if (rc) {
+    if (dw == 0 && pw == 0 && seg < m->nsegs)
+      return land_struct(m, seg, m->segs[seg].words, 0, 0, depth, out);
+    return rc;
+  }
+  return land_struct(m, seg, body, dw, pw, depth, out);
+}
+
+static int land_list_off(capnp_message_t *m, uint32_t seg, size_t ptr_word,
+                         int32_t off, int esize, uint32_t count, int depth,
+                         capnp_ptr_t *out) {
+  size_t start = 0;
+  int rc = ptr_target(ptr_word, off, &start);
+  if (rc) {
+    if (list_zero_words(esize, count) && seg < m->nsegs)
+      return land_list(m, seg, m->segs[seg].words, esize, count, depth, out);
+    return rc;
+  }
+  return land_list(m, seg, start, esize, count, depth, out);
+}
+
 static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
                         uint64_t w, int depth, capnp_ptr_t *out) {
   int kind;
@@ -373,22 +451,14 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
     kind = capnp_wp_kind(w);
     if (kind == CAPNP_WK_FAR)
       return CAPNP_ERR_KIND;
-    if (kind == CAPNP_WK_STRUCT) {
-      size_t body;
-      int rc = ptr_target(toff, capnp_wp_offset(w), &body);
-      if (rc)
-        return rc;
-      return land_struct(m, tseg, body, capnp_wp_struct_dwords(w),
-                         capnp_wp_struct_pwords(w), depth, out);
-    }
-    if (kind == CAPNP_WK_LIST) {
-      size_t start;
-      int rc = ptr_target(toff, capnp_wp_offset(w), &start);
-      if (rc)
-        return rc;
-      return land_list(m, tseg, start, capnp_wp_list_esize(w),
-                       capnp_wp_list_count(w), depth, out);
-    }
+    if (kind == CAPNP_WK_STRUCT)
+      return land_struct_off(m, tseg, toff, capnp_wp_offset(w),
+                             capnp_wp_struct_dwords(w), capnp_wp_struct_pwords(w),
+                             depth, out);
+    if (kind == CAPNP_WK_LIST)
+      return land_list_off(m, tseg, toff, capnp_wp_offset(w),
+                           capnp_wp_list_esize(w), capnp_wp_list_count(w), depth,
+                           out);
     if ((uint32_t)w == CAPNP_WK_CAP) {
       fill_obj(out, m, tseg, toff, CAPNP_PK_CAP, depth);
       out->count = (uint32_t)(w >> 32);
@@ -397,23 +467,14 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
     return CAPNP_ERR_KIND;
   }
 
-  if (kind == CAPNP_WK_STRUCT) {
-    size_t body;
-    int rc = ptr_target(word, capnp_wp_offset(w), &body);
-    if (rc)
-      return rc;
-    return land_struct(m, seg, body, capnp_wp_struct_dwords(w),
-                       capnp_wp_struct_pwords(w), depth, out);
-  }
+  if (kind == CAPNP_WK_STRUCT)
+    return land_struct_off(m, seg, word, capnp_wp_offset(w),
+                           capnp_wp_struct_dwords(w), capnp_wp_struct_pwords(w),
+                           depth, out);
 
-  if (kind == CAPNP_WK_LIST) {
-    size_t start;
-    int rc = ptr_target(word, capnp_wp_offset(w), &start);
-    if (rc)
-      return rc;
-    return land_list(m, seg, start, capnp_wp_list_esize(w),
-                     capnp_wp_list_count(w), depth, out);
-  }
+  if (kind == CAPNP_WK_LIST)
+    return land_list_off(m, seg, word, capnp_wp_offset(w), capnp_wp_list_esize(w),
+                         capnp_wp_list_count(w), depth, out);
 
   if (kind == CAPNP_WK_CAP) {
     if ((uint32_t)w != CAPNP_WK_CAP)
