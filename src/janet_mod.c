@@ -278,6 +278,27 @@ static Janet make_builder_ptr(Janet builder_abs, const capnp_bptr_t *body,
   return janet_wrap_abstract(w);
 }
 
+/* janet_abstract can panic. Close the scope before that panic leaves
+ * this frame, and restore the try before the caller runs user code so
+ * a later pcall still has its fiber. */
+static Janet make_scoped_ptr(const capnp_bptr_t *body, uint16_t dwords,
+                             uint16_t pwords, builder_scope_t **out_scope) {
+  builder_scope_t *volatile scope = scope_open();
+  JanetTryState ts;
+  JanetSignal sig = janet_try(&ts);
+  Janet ptr;
+  *out_scope = NULL;
+  if (sig) {
+    janet_restore(&ts);
+    scope_close(scope);
+    janet_signalv(sig, ts.payload);
+  }
+  ptr = make_builder_ptr(janet_wrap_nil(), body, dwords, pwords, scope);
+  janet_restore(&ts);
+  *out_scope = scope;
+  return ptr;
+}
+
 static Janet make_builder_list(Janet builder_abs, const capnp_bptr_t *first,
                                uint32_t count, uint16_t elem_dwords,
                                uint16_t elem_pwords, builder_scope_t *scope) {
@@ -1628,9 +1649,8 @@ static JanetSignal call_fill(Janet fill, Janet arg, Janet *out, JanetFiber **fib
 
 static int rpc_fill_cb(void *ctx, const capnp_bptr_t *params) {
   rpc_fill *f = (rpc_fill *)ctx;
-  builder_scope_t *scope = scope_open();
-  Janet ptr =
-      make_builder_ptr(janet_wrap_nil(), params, f->dwords, f->pwords, scope);
+  builder_scope_t *scope = NULL;
+  Janet ptr = make_scoped_ptr(params, f->dwords, f->pwords, &scope);
   Janet out;
   JanetFiber *fib = NULL;
   JanetSignal sig = call_fill(f->fill, ptr, &out, &fib);
@@ -1766,8 +1786,7 @@ static int janet_dispatch(void *server, uint64_t interface_id, uint16_t method_i
    * struct at the method's real size with capnp/alloc-struct.
    * The slot is a stack builder; close it when the handler returns
    * so a stashed handle cannot write into a dead frame. */
-  scope = scope_open();
-  args[3] = make_builder_ptr(janet_wrap_nil(), results, 0, 0, scope);
+  args[3] = make_scoped_ptr(results, 0, 0, &scope);
   sig = janet_pcall(janet_unwrap_function(w->handler), 4, args, &res, &fib);
   scope_close(scope);
   if (sig != JANET_SIGNAL_OK) {
