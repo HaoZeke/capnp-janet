@@ -74,12 +74,11 @@ typedef struct {
   size_t n;
   size_t i;
   int json;
-  capnp_builder_t *b;
 } ps_t;
 
 static int is_ptr_type(uint16_t w) {
   return w == TY_TEXT || w == TY_DATA || w == TY_LIST || w == TY_STRUCT ||
-         w == TY_IFACE || w == TY_ANY || w == 25 || w == 26 || w == 27;
+         w == TY_IFACE || w == TY_ANY;
 }
 
 static uint32_t data_byte(uint16_t which, uint32_t offset) {
@@ -747,8 +746,10 @@ static int encode_root(const capnp_dyn_t *d, const char *type_name,
   memset(&b, 0, sizeof(b));
   if (!st)
     return CAPNP_ERR_KIND;
-  if (encode_struct(&b, d, st, s, json, &any) || !b.data)
+  if (encode_struct(&b, d, st, s, json, &any) || !b.data) {
+    free(b.data);
     return CAPNP_ERR_ALLOC;
+  }
   *out = b.data;
   *len = b.n;
   return CAPNP_OK;
@@ -846,7 +847,7 @@ static int parse_string(ps_t *p, char **out, size_t *len) {
     unsigned char c = (unsigned char)p->s[p->i++];
     if (c == '\\') {
       if (p->i >= p->n)
-        return -1;
+        goto fail;
       c = (unsigned char)p->s[p->i++];
       if (c == 'n')
         c = '\n';
@@ -863,10 +864,10 @@ static int parse_string(ps_t *p, char **out, size_t *len) {
       else if (c == 'x') {
         int hi, lo;
         if (p->i + 2 > p->n)
-          return -1;
+          goto fail;
         if (p->json || (hi = hex_nibble((unsigned char)p->s[p->i])) < 0 ||
             (lo = hex_nibble((unsigned char)p->s[p->i + 1])) < 0)
-          return -1;
+          goto fail;
         p->i += 2;
         c = (unsigned char)((hi << 4) | lo);
       } else if (c == 'u') {
@@ -877,27 +878,30 @@ static int parse_string(ps_t *p, char **out, size_t *len) {
             (b4 = hex_nibble((unsigned char)p->s[p->i + 1])) < 0 ||
             (c4 = hex_nibble((unsigned char)p->s[p->i + 2])) < 0 ||
             (d = hex_nibble((unsigned char)p->s[p->i + 3])) < 0)
-          return -1;
+          goto fail;
         value = (unsigned)((a << 12) | (b4 << 8) | (c4 << 4) | d);
         p->i += 4;
         if (value >= 0xd800 && value <= 0xdfff)
-          return -1;
+          goto fail;
         if (buf_add_utf8(&b, value))
-          return -1;
+          goto fail;
         continue;
       } else {
-        return -1;
+        goto fail;
       }
     }
     if (buf_add(&b, (char *)&c, 1))
-      return -1;
+      goto fail;
   }
   if (p->i >= p->n || p->s[p->i] != '"')
-    return -1;
+    goto fail;
   p->i++;
   *out = b.data ? b.data : (char *)calloc(1, 1);
   *len = b.n;
   return *out ? 0 : -1;
+fail:
+  free(b.data);
+  return -1;
 }
 
 static int parse_number(ps_t *p, int *is_float, double *fv, int64_t *iv) {
@@ -1051,16 +1055,38 @@ static int parse_list(ps_t *p, const dyn_field *f, const capnp_bptr_t *body,
   p->i++;
   if (ppeek(p) == ']') {
     p->i++;
-    if (f->elem_which == TY_TEXT)
+    switch (f->elem_which) {
+    case TY_VOID:
+      return capnp_builder_set_list_void(body, dwords, index, 0);
+    case TY_BOOL:
+      return capnp_builder_set_list_bool(body, dwords, index, NULL, 0);
+    case TY_I8:
+    case TY_U8:
+      return capnp_builder_set_list_u8(body, dwords, index, NULL, 0);
+    case TY_I16:
+    case TY_U16:
+    case TY_ENUM:
+      return capnp_builder_set_list_u16(body, dwords, index, NULL, 0);
+    case TY_I32:
+    case TY_U32:
+    case TY_F32:
+      return capnp_builder_set_list_u32(body, dwords, index, NULL, 0);
+    case TY_I64:
+    case TY_U64:
+    case TY_F64:
+      return capnp_builder_set_list_u64(body, dwords, index, NULL, 0);
+    case TY_TEXT:
       return capnp_builder_set_list_text(body, dwords, index, NULL, 0);
-    if (f->elem_which == TY_STRUCT) {
+    case TY_STRUCT: {
       dyn_struct *es = find_id(p->d, f->elem_id);
       if (!es)
         return -1;
       return capnp_builder_set_list_struct(body, dwords, index, 0, es->dwords,
                                            es->pwords, NULL);
     }
-    return capnp_builder_init_ptr_list(body, dwords, index, 0, NULL);
+    default:
+      return capnp_builder_init_ptr_list(body, dwords, index, 0, NULL);
+    }
   }
   if (f->elem_which == TY_STRUCT) {
     dyn_struct *es = find_id(p->d, f->elem_id);
@@ -1130,21 +1156,24 @@ static int parse_list(ps_t *p, const dyn_field *f, const capnp_bptr_t *body,
         char **nt = (char **)realloc(texts, (size_t)nc * sizeof(*nt));
         size_t *nl = (size_t *)realloc(tlens, (size_t)nc * sizeof(*nl));
         int64_t *nn = (int64_t *)realloc(nums, (size_t)nc * sizeof(*nn));
+        if (nt)
+          texts = nt;
+        if (nl)
+          tlens = nl;
+        if (nn)
+          nums = nn;
         if (!nt || !nl || !nn)
-          return -1;
-        texts = nt;
-        tlens = nl;
-        nums = nn;
+          goto list_fail;
         cap = nc;
       }
       if (f->elem_which == TY_TEXT) {
         if (parse_string(p, &texts[count], &tlens[count]))
-          return -1;
+          goto list_fail;
       } else if (f->elem_which == TY_LIST) {
         /* Keep the raw slice start; parsed after the pointer list exists. */
         texts[count] = (char *)(uintptr_t)p->i;
         if (ppeek(p) != '[')
-          return -1;
+          goto list_fail;
         {
           int depth = 0;
           do {
@@ -1169,13 +1198,13 @@ static int parse_list(ps_t *p, const dyn_field *f, const capnp_bptr_t *body,
         int flt = 0;
         double fv = 0;
         if (parse_number(p, &flt, &fv, &nums[count]))
-          return -1;
+          goto list_fail;
       }
       count++;
       pskip(p);
     }
     if (ppeek(p) != ']')
-      return -1;
+      goto list_fail;
     p->i++;
     if (f->elem_which == TY_TEXT) {
       int rc = capnp_builder_set_list_text_n(
@@ -1190,7 +1219,7 @@ static int parse_list(ps_t *p, const dyn_field *f, const capnp_bptr_t *body,
     if (f->elem_which == TY_LIST) {
       dyn_field inner;
       if (capnp_builder_init_ptr_list(body, dwords, index, count, &first))
-        return -1;
+        goto list_fail;
       memset(&inner, 0, sizeof(inner));
       inner.type_which = TY_LIST;
       inner.elem_which = f->elem2_which;
@@ -1199,7 +1228,7 @@ static int parse_list(ps_t *p, const dyn_field *f, const capnp_bptr_t *body,
         capnp_bptr_t el = capnp_bptr_add(first, i);
         sub.i = (size_t)(uintptr_t)texts[i];
         if (parse_list(&sub, &inner, &el, 0, 0))
-          return -1;
+          goto list_fail;
       }
       free(texts);
       free(tlens);
@@ -1211,7 +1240,7 @@ static int parse_list(ps_t *p, const dyn_field *f, const capnp_bptr_t *body,
       if (f->elem_which == TY_I32 || f->elem_which == TY_U32) {
         uint32_t *raw = (uint32_t *)malloc((size_t)count * sizeof(uint32_t));
         if (!raw)
-          return -1;
+          goto list_fail;
         for (i = 0; i < count; i++)
           raw[i] = (uint32_t)nums[i];
         rc = capnp_builder_set_list_u32(body, dwords, index, raw, count);
@@ -1219,7 +1248,7 @@ static int parse_list(ps_t *p, const dyn_field *f, const capnp_bptr_t *body,
       } else {
         uint64_t *raw = (uint64_t *)malloc((size_t)count * sizeof(uint64_t));
         if (!raw)
-          return -1;
+          goto list_fail;
         for (i = 0; i < count; i++)
           raw[i] = (uint64_t)nums[i];
         rc = capnp_builder_set_list_u64(body, dwords, index, raw, count);
@@ -1230,6 +1259,15 @@ static int parse_list(ps_t *p, const dyn_field *f, const capnp_bptr_t *body,
       free(nums);
       return rc;
     }
+  list_fail:
+    if (f->elem_which == TY_TEXT) {
+      for (i = 0; i < count; i++)
+        free(texts[i]);
+    }
+    free(texts);
+    free(tlens);
+    free(nums);
+    return -1;
   }
   (void)slot;
   return -1;
@@ -1271,21 +1309,27 @@ static int parse_value(ps_t *p, const dyn_struct *st, const dyn_field *f,
       int flt = 0;
       double fv = 0;
       int64_t iv = 0;
-      if (parse_number(p, &flt, &fv, &iv))
+      if (parse_number(p, &flt, &fv, &iv)) {
+        free(bytes);
         return -1;
+      }
       if (n == cap) {
         size_t nc = cap ? cap * 2u : 8u;
         uint8_t *nb = (uint8_t *)realloc(bytes, nc);
-        if (!nb)
+        if (!nb) {
+          free(bytes);
           return -1;
+        }
         bytes = nb;
         cap = nc;
       }
       bytes[n++] = (uint8_t)iv;
       pskip(p);
     }
-    if (ppeek(p) != ']')
+    if (ppeek(p) != ']') {
+      free(bytes);
       return -1;
+    }
     p->i++;
     {
       int rc = capnp_builder_set_data(body, st->dwords, (uint16_t)f->offset, bytes, n);
@@ -1379,7 +1423,6 @@ static int decode_root(const capnp_dyn_t *d, const char *type_name, const char *
   p.s = text;
   p.n = len;
   p.json = json;
-  p.b = &b;
   open = json ? '{' : '(';
   endc = json ? '}' : ')';
   if (ppeek(&p) != open) {

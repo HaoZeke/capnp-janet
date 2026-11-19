@@ -92,6 +92,37 @@ static int cmd_read(const char *req, const char *msg) {
   CHECK(capnp_list_getp(&matrix, 0, &row) == CAPNP_OK, "row");
   CHECK(capnp_list_get_text(&row, 0, &text, &len) == CAPNP_OK, "cell");
   CHECK_STREQ(text, len, "x", "matrix x");
+  {
+    const char *b_in = "(name = \"a\", scores = [])";
+    const char *bad_str = "(title = \"unterminated";
+    const char *bad_lst = "(buckets = [(name = \"a\", scores = [1, \"bad\"])])";
+    uint8_t *msg_out = NULL;
+    size_t msg_len = 0;
+    capnp_message_t bm;
+    capnp_ptr_t broot, scores;
+    CHECK(capnp_dyn_decode_text(d, "Bucket", b_in, strlen(b_in), &msg_out,
+                                &msg_len) == CAPNP_OK,
+          "decode empty scores");
+    CHECK(capnp_message_from_flat(&bm, msg_out, msg_len) == CAPNP_OK &&
+              capnp_root(&bm, &broot) == CAPNP_OK &&
+              capnp_getp(&broot, 1, &scores) == CAPNP_OK,
+          "open bucket");
+    free(msg_out);
+    CHECK(scores.kind == CAPNP_PK_LIST && scores.esize == CAPNP_SZ_FOUR &&
+              scores.count == 0,
+          "empty scores has CAPNP_SZ_FOUR");
+    capnp_message_free(&bm);
+    msg_out = NULL;
+    CHECK(capnp_dyn_decode_text(d, "Conform", bad_str, strlen(bad_str),
+                                &msg_out, &msg_len) != CAPNP_OK,
+          "reject unterminated string without leak");
+    free(msg_out);
+    msg_out = NULL;
+    CHECK(capnp_dyn_decode_text(d, "Conform", bad_lst, strlen(bad_lst),
+                                &msg_out, &msg_len) != CAPNP_OK,
+          "reject bad list without leak");
+    free(msg_out);
+  }
   capnp_message_free(&m);
   capnp_dyn_free(d);
   return harness_finish();
