@@ -199,12 +199,19 @@ int capnp_accept_fd(int listen_fd, int *fd) {
   return CAPNP_OK;
 }
 
+static int link_from_fd_or_close(capnp_link_t *link, int fd) {
+  int rc = capnp_link_from_fd(link, fd);
+  if (rc && fd >= 0)
+    close(fd);
+  return rc;
+}
+
 int capnp_link_dial_tcp(capnp_link_t *link, const char *host, uint16_t port) {
   int fd, rc;
   rc = capnp_dial_tcp(host, port, &fd);
   if (rc)
     return rc;
-  return capnp_link_from_fd(link, fd);
+  return link_from_fd_or_close(link, fd);
 }
 
 int capnp_link_dial_unix(capnp_link_t *link, const char *path) {
@@ -212,7 +219,7 @@ int capnp_link_dial_unix(capnp_link_t *link, const char *path) {
   rc = capnp_dial_unix(path, &fd);
   if (rc)
     return rc;
-  return capnp_link_from_fd(link, fd);
+  return link_from_fd_or_close(link, fd);
 }
 
 int capnp_link_accept(int listen_fd, capnp_link_t *link) {
@@ -220,7 +227,7 @@ int capnp_link_accept(int listen_fd, capnp_link_t *link) {
   rc = capnp_accept_fd(listen_fd, &fd);
   if (rc)
     return rc;
-  return capnp_link_from_fd(link, fd);
+  return link_from_fd_or_close(link, fd);
 }
 
 int capnp_link_recv(capnp_link_t *link) {

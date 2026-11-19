@@ -9,6 +9,7 @@
 #include <capnp-janet/capnp_pointer.h>
 #include <capnp-janet/capnp_transport.h>
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,6 +94,57 @@ static void client_add(capnp_link_t *link, const char *what) {
     capnp_message_free(&m);
   }
   (void)i;
+}
+
+static int count_fds(void) {
+  DIR *d = opendir("/proc/self/fd");
+  struct dirent *ent;
+  int n = 0;
+  if (!d)
+    return -1;
+  while ((ent = readdir(d)) != NULL) {
+    if (ent->d_name[0] != '.')
+      n++;
+  }
+  closedir(d);
+  return n;
+}
+
+static void test_link_setup_closes_fd(void) {
+  int lfd = -1;
+  uint16_t port = 0;
+  int before, client = -1;
+  char dir[] = "/tmp/capnp-janet-XXXXXX";
+  char path[sizeof(dir) + 16];
+  check(capnp_listen_tcp("127.0.0.1", 0, &lfd, &port) == CAPNP_OK, "leak listen");
+  before = count_fds();
+  check(capnp_link_dial_tcp(NULL, "127.0.0.1", port) != CAPNP_OK, "null tcp link");
+  check(count_fds() == before, "tcp dial closes fd");
+  check(capnp_dial_tcp("127.0.0.1", port, &client) == CAPNP_OK, "tcp connect");
+  before = count_fds();
+  check(capnp_link_accept(lfd, NULL) != CAPNP_OK, "null accept link");
+  check(count_fds() == before, "accept closes fd");
+  if (client >= 0)
+    close(client);
+  close(lfd);
+  lfd = -1;
+  check(mkdtemp(dir) != NULL, "leak dir");
+  snprintf(path, sizeof(path), "%s/vat.sock", dir);
+  check(capnp_listen_unix(path, &lfd) == CAPNP_OK, "leak unix");
+  before = count_fds();
+  check(capnp_link_dial_unix(NULL, path) != CAPNP_OK, "null unix link");
+  check(count_fds() == before, "unix dial closes fd");
+  client = -1;
+  check(capnp_dial_unix(path, &client) == CAPNP_OK, "unix connect");
+  before = count_fds();
+  check(capnp_link_accept(lfd, NULL) != CAPNP_OK, "null unix accept");
+  check(count_fds() == before, "unix accept closes fd");
+  if (client >= 0)
+    close(client);
+  if (lfd >= 0)
+    close(lfd);
+  unlink(path);
+  rmdir(dir);
 }
 
 static void test_unix_replaces_only_socket(void) {
@@ -268,6 +320,7 @@ int main(int argc, char **argv) {
     return serve_peer((uint16_t)atoi(argv[2]));
   test_frame_little_endian();
   test_unix_replaces_only_socket();
+  test_link_setup_closes_fd();
   loopback(1);
   loopback(0);
   if (g_fail) {
