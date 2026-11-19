@@ -38,6 +38,9 @@ typedef struct capnp_ptr {
   /* Schema-evolution upgrade views (primitive list element as struct): */
   uint8_t body_byte; /* extra byte offset of data start within the body word */
   uint16_t data_bits; /* if non-zero, data-section size in bits (field @0 view) */
+  /* Pointer follows still allowed below this object. The root starts at
+   * depth_limit - 1, and each followed pointer consumes one. */
+  int depth_left;
 } capnp_ptr_t;
 
 /* Zero a message. Free with capnp_message_free. */

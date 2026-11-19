@@ -80,6 +80,14 @@ test_wire = executable(
 )
 test('wire', test_wire)
 
+test_robust = executable(
+  'test_robust',
+  'test/test_robust.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+test('robust', test_robust)
+
 test_list_text = executable(
   'test_list_text',
   'test/test_list_text.c',
