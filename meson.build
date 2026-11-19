@@ -385,6 +385,17 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
     },
     timeout: 60,
   )
+  test(
+    'rpc_janet_host',
+    bash,
+    args: [meson.project_source_root() / 'test/test_rpc_janet_host.sh'],
+    depends: [rpc_peer_server, rpc_peer_client],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+    timeout: 60,
+  )
 else
   message('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')
 endif

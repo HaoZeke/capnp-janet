@@ -4,16 +4,19 @@
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_message.h>
 #include <capnp-janet/capnp_rpc.h>
+#include <capnp-janet/capnp_transport.h>
 
 #include <janet.h>
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 typedef struct {
   capnp_message_t msg;
   JanetBuffer *view_buf;
+  int borrow;
 } capnp_msg_wrap;
 
 typedef struct {
@@ -44,7 +47,8 @@ typedef struct {
 static int msg_gc(void *p, size_t len) {
   (void)len;
   capnp_msg_wrap *w = (capnp_msg_wrap *)p;
-  capnp_message_free(&w->msg);
+  if (!w->borrow)
+    capnp_message_free(&w->msg);
   w->view_buf = NULL;
   return 0;
 }
@@ -1328,6 +1332,9 @@ typedef struct {
   rpc_frame *frames;
   uint32_t nframes;
   uint32_t cap_frames;
+  int fd;
+  Janet handler;
+  int has_handler;
 } rpc_conn_wrap;
 
 static void rpc_free_frames(rpc_conn_wrap *w) {
@@ -1342,13 +1349,26 @@ static void rpc_free_frames(rpc_conn_wrap *w) {
 
 static int rpc_gc(void *p, size_t len) {
   (void)len;
-  rpc_free_frames((rpc_conn_wrap *)p);
+  rpc_conn_wrap *w = (rpc_conn_wrap *)p;
+  rpc_free_frames(w);
+  if (w->fd >= 0)
+    close(w->fd);
+  w->fd = -1;
+  return 0;
+}
+
+static int rpc_gcmark(void *p, size_t len) {
+  (void)len;
+  rpc_conn_wrap *w = (rpc_conn_wrap *)p;
+  if (w->has_handler)
+    janet_mark(w->handler);
   return 0;
 }
 
 static const JanetAbstractType rpc_type = {
     .name = "capnp/rpc-conn",
     .gc = rpc_gc,
+    .gcmark = rpc_gcmark,
 };
 
 static rpc_conn_wrap *get_rpc(Janet *argv, int32_t n) {
@@ -1358,6 +1378,8 @@ static rpc_conn_wrap *get_rpc(Janet *argv, int32_t n) {
 static int rpc_send_cb(void *ctx, const uint8_t *data, size_t len) {
   rpc_conn_wrap *w = (rpc_conn_wrap *)ctx;
   uint8_t *copy;
+  if (w->fd >= 0)
+    return capnp_write_all(w->fd, data, len) == CAPNP_OK ? 0 : -1;
   if (w->nframes == w->cap_frames) {
     uint32_t ncap = w->cap_frames ? w->cap_frames * 2u : 4u;
     rpc_frame *p = (rpc_frame *)realloc(w->frames, (size_t)ncap * sizeof(*p));
@@ -1383,6 +1405,7 @@ static Janet cfun_rpc_connect(int32_t argc, Janet *argv) {
   (void)argv;
   w = janet_abstract(&rpc_type, sizeof(*w));
   memset(w, 0, sizeof(*w));
+  w->fd = -1;
   capnp_rpc_init(&w->conn, rpc_send_cb, w);
   return janet_wrap_abstract(w);
 }
@@ -1494,6 +1517,259 @@ static Janet cfun_rpc_finish(int32_t argc, Janet *argv) {
   janet_fixarity(argc, 2);
   if (capnp_rpc_send_finish(&w->conn, (uint32_t)janet_getinteger(argv, 1)) != 0)
     janet_panic("capnp/rpc-finish: send failed");
+  return janet_wrap_nil();
+}
+
+static int janet_dispatch(void *server, uint64_t interface_id, uint16_t method_id,
+                          const capnp_ptr_t *params, const capnp_bptr_t *results) {
+  rpc_conn_wrap *w = (rpc_conn_wrap *)server;
+  capnp_msg_wrap *msg;
+  Janet args[4];
+  Janet res;
+  if (!w->has_handler)
+    return -1;
+  msg = janet_abstract(&msg_type, sizeof(*msg));
+  memset(msg, 0, sizeof(*msg));
+  msg->borrow = 1;
+  if (params && params->msg)
+    msg->msg = *params->msg;
+  args[0] = janet_wrap_u64(interface_id);
+  args[1] = janet_wrap_number((double)method_id);
+  args[2] = make_ptr(janet_wrap_abstract(msg), params);
+  args[3] = make_builder_ptr(janet_wrap_nil(), results, 1, 1);
+  res = janet_call(janet_unwrap_function(w->handler), 4, args);
+  if (janet_checktype(res, JANET_NUMBER) && janet_unwrap_number(res) != 0)
+    return -1;
+  return 0;
+}
+
+static Janet cfun_rpc_serve(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  janet_fixarity(argc, 2);
+  janet_checktypes(argv[1], JANET_TFLAG_FUNCTION);
+  w->handler = argv[1];
+  w->has_handler = 1;
+  capnp_rpc_set_bootstrap(&w->conn, w, janet_dispatch);
+  return janet_wrap_nil();
+}
+
+typedef struct {
+  int fd;
+} rpc_listen_wrap;
+
+static int listen_gc(void *p, size_t len) {
+  (void)len;
+  rpc_listen_wrap *w = (rpc_listen_wrap *)p;
+  if (w->fd >= 0)
+    close(w->fd);
+  w->fd = -1;
+  return 0;
+}
+
+static const JanetAbstractType listen_type = {
+    .name = "capnp/rpc-listener",
+    .gc = listen_gc,
+};
+
+static Janet cfun_rpc_listen_tcp(int32_t argc, Janet *argv) {
+  const char *host;
+  uint16_t port, bound = 0;
+  int fd = -1;
+  rpc_listen_wrap *w;
+  janet_fixarity(argc, 2);
+  host = janet_getcstring(argv, 0);
+  port = (uint16_t)janet_getinteger(argv, 1);
+  if (capnp_listen_tcp(host, port, &fd, &bound) != CAPNP_OK)
+    janet_panic("capnp/rpc-listen-tcp: bind failed");
+  w = janet_abstract(&listen_type, sizeof(*w));
+  w->fd = fd;
+  {
+    Janet pair[2];
+    pair[0] = janet_wrap_abstract(w);
+    pair[1] = janet_wrap_number((double)bound);
+    return janet_wrap_tuple(janet_tuple_n(pair, 2));
+  }
+}
+
+static Janet cfun_rpc_listen_unix(int32_t argc, Janet *argv) {
+  const char *path;
+  int fd = -1;
+  rpc_listen_wrap *w;
+  janet_fixarity(argc, 1);
+  path = janet_getcstring(argv, 0);
+  if (capnp_listen_unix(path, &fd) != CAPNP_OK)
+    janet_panic("capnp/rpc-listen-unix: bind failed");
+  w = janet_abstract(&listen_type, sizeof(*w));
+  w->fd = fd;
+  return janet_wrap_abstract(w);
+}
+
+static Janet accept_conn(int lfd) {
+  int fd = -1;
+  rpc_conn_wrap *w;
+  if (capnp_accept_fd(lfd, &fd) != CAPNP_OK)
+    janet_panic("capnp/rpc-accept: accept failed");
+  w = janet_abstract(&rpc_type, sizeof(*w));
+  memset(w, 0, sizeof(*w));
+  w->fd = fd;
+  capnp_rpc_init(&w->conn, rpc_send_cb, w);
+  return janet_wrap_abstract(w);
+}
+
+static Janet cfun_rpc_accept(int32_t argc, Janet *argv) {
+  rpc_listen_wrap *l;
+  janet_fixarity(argc, 1);
+  l = janet_getabstract(argv, 0, &listen_type);
+  return accept_conn(l->fd);
+}
+
+static Janet dial_conn(int fd) {
+  rpc_conn_wrap *w = janet_abstract(&rpc_type, sizeof(*w));
+  memset(w, 0, sizeof(*w));
+  w->fd = fd;
+  capnp_rpc_init(&w->conn, rpc_send_cb, w);
+  return janet_wrap_abstract(w);
+}
+
+static Janet cfun_rpc_dial_tcp(int32_t argc, Janet *argv) {
+  int fd = -1;
+  janet_fixarity(argc, 2);
+  if (capnp_dial_tcp(janet_getcstring(argv, 0),
+                     (uint16_t)janet_getinteger(argv, 1), &fd) != CAPNP_OK)
+    janet_panic("capnp/rpc-dial-tcp: connect failed");
+  return dial_conn(fd);
+}
+
+static Janet cfun_rpc_dial_unix(int32_t argc, Janet *argv) {
+  int fd = -1;
+  janet_fixarity(argc, 1);
+  if (capnp_dial_unix(janet_getcstring(argv, 0), &fd) != CAPNP_OK)
+    janet_panic("capnp/rpc-dial-unix: connect failed");
+  return dial_conn(fd);
+}
+
+static Janet cfun_rpc_recv(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  uint8_t buf[65536];
+  size_t n = 0;
+  janet_fixarity(argc, 1);
+  if (w->fd < 0)
+    janet_panic("capnp/rpc-recv: connection has no socket");
+  if (capnp_read_frame(w->fd, buf, sizeof(buf), &n) != CAPNP_OK)
+    janet_panic("capnp/rpc-recv: short frame");
+  if (capnp_rpc_handle(&w->conn, buf, n))
+    janet_panic("capnp/rpc-recv: rejected frame");
+  return janet_wrap_nil();
+}
+
+static Janet cfun_rpc_provide(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  uint32_t q;
+  janet_fixarity(argc, 5);
+  q = capnp_rpc_send_provide(&w->conn, (uint32_t)janet_getinteger(argv, 1),
+                             janet_getcstring(argv, 2),
+                             (uint16_t)janet_getinteger(argv, 3),
+                             janet_getuinteger64(argv, 4));
+  if (q == (uint32_t)-1)
+    janet_panic("capnp/rpc-provide: not sent");
+  return janet_wrap_number((double)q);
+}
+
+static Janet cfun_rpc_send_accept(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  uint32_t q;
+  janet_fixarity(argc, 3);
+  q = capnp_rpc_send_accept(&w->conn, janet_getuinteger64(argv, 1),
+                            janet_getboolean(argv, 2));
+  if (q == (uint32_t)-1)
+    janet_panic("capnp/rpc-send-accept: not sent");
+  return janet_wrap_number((double)q);
+}
+
+static Janet cfun_rpc_disembargo(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  janet_fixarity(argc, 2);
+  if (capnp_rpc_send_disembargo_provide(&w->conn,
+                                        (uint32_t)janet_getinteger(argv, 1)))
+    janet_panic("capnp/rpc-disembargo: not sent");
+  return janet_wrap_nil();
+}
+
+static Janet cfun_rpc_answer_cap(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  int id;
+  janet_fixarity(argc, 2);
+  id = capnp_rpc_answer_cap_id(&w->conn, (uint32_t)janet_getinteger(argv, 1));
+  if (id < 0)
+    janet_panic("capnp/rpc-answer-cap: no capability");
+  return janet_wrap_number((double)id);
+}
+
+static Janet cfun_rpc_share_vat(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *a = get_rpc(argv, 0);
+  rpc_conn_wrap *b = get_rpc(argv, 1);
+  janet_fixarity(argc, 2);
+  capnp_rpc_set_vat(&b->conn, a->conn.vat);
+  return janet_wrap_nil();
+}
+
+static Janet cfun_rpc_provisions(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  uint64_t ids[64];
+  int n, i;
+  JanetArray *arr;
+  janet_fixarity(argc, 1);
+  n = capnp_rpc_pending_provisions(&w->conn, ids, 64);
+  arr = janet_array(n > 0 ? n : 0);
+  for (i = 0; i < n; i++)
+    janet_array_push(arr, janet_wrap_u64(ids[i]));
+  return janet_wrap_array(arr);
+}
+
+typedef struct {
+  capnp_rpc_stream_t stream;
+} rpc_stream_wrap;
+
+static const JanetAbstractType stream_type = {
+    .name = "capnp/rpc-stream",
+};
+
+static Janet cfun_rpc_stream(int32_t argc, Janet *argv) {
+  rpc_stream_wrap *s;
+  janet_fixarity(argc, 1);
+  s = janet_abstract(&stream_type, sizeof(*s));
+  capnp_rpc_stream_init(&s->stream, janet_getinteger(argv, 0));
+  return janet_wrap_abstract(s);
+}
+
+static Janet cfun_rpc_stream_send(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  rpc_stream_wrap *s = janet_getabstract(argv, 1, &stream_type);
+  rpc_fill fill;
+  int rc;
+  janet_arity(argc, 7, 8);
+  fill.dwords = (uint16_t)janet_getinteger(argv, 5);
+  fill.pwords = (uint16_t)janet_getinteger(argv, 6);
+  fill.fill = argc == 8 ? argv[7] : janet_wrap_nil();
+  if (argc == 8)
+    janet_checktypes(argv[7], JANET_TFLAG_CALLABLE);
+  rc = capnp_rpc_stream_send(&w->conn, &s->stream,
+                             (uint32_t)janet_getinteger(argv, 2),
+                             janet_getuinteger64(argv, 3),
+                             (uint16_t)janet_getinteger(argv, 4), fill.dwords,
+                             fill.pwords, argc == 8 ? rpc_fill_cb : NULL,
+                             argc == 8 ? &fill : NULL);
+  if (rc)
+    janet_panic("capnp/rpc-stream-send: rejected");
+  return janet_wrap_number((double)s->stream.qids[s->stream.nout - 1]);
+}
+
+static Janet cfun_rpc_stream_finish(int32_t argc, Janet *argv) {
+  rpc_conn_wrap *w = get_rpc(argv, 0);
+  rpc_stream_wrap *s = janet_getabstract(argv, 1, &stream_type);
+  janet_fixarity(argc, 2);
+  if (capnp_rpc_stream_finish(&w->conn, &s->stream))
+    janet_panic("capnp/rpc-stream-finish: a call failed");
   return janet_wrap_nil();
 }
 
@@ -1654,6 +1930,39 @@ static const JanetReg capnp_cfuns[] = {
      "(capnp/rpc-answer conn question-id)\n\nResults struct of an answer."},
     {"rpc-finish", cfun_rpc_finish,
      "(capnp/rpc-finish conn question-id)\n\nSend Finish for a question."},
+    {"rpc-serve", cfun_rpc_serve,
+     "(capnp/rpc-serve conn handler)\n\n"
+     "handler is (fn [interface-id method-id params results] ...). "
+     "params and results are valid only for the call."},
+    {"rpc-listen-tcp", cfun_rpc_listen_tcp,
+     "(capnp/rpc-listen-tcp host port)\n\nReturns [listener bound-port]."},
+    {"rpc-listen-unix", cfun_rpc_listen_unix,
+     "(capnp/rpc-listen-unix path)"},
+    {"rpc-accept", cfun_rpc_accept,
+     "(capnp/rpc-accept listener)\n\nA connected vat."},
+    {"rpc-dial-tcp", cfun_rpc_dial_tcp, "(capnp/rpc-dial-tcp host port)"},
+    {"rpc-dial-unix", cfun_rpc_dial_unix, "(capnp/rpc-dial-unix path)"},
+    {"rpc-recv", cfun_rpc_recv,
+     "(capnp/rpc-recv conn)\n\nRead one frame from the socket and handle it."},
+    {"rpc-provide", cfun_rpc_provide,
+     "(capnp/rpc-provide conn cap-id host port nonce)"},
+    {"rpc-send-accept", cfun_rpc_send_accept,
+     "(capnp/rpc-send-accept conn nonce embargo?)"},
+    {"rpc-disembargo", cfun_rpc_disembargo,
+     "(capnp/rpc-disembargo conn provide-question-id)"},
+    {"rpc-answer-cap", cfun_rpc_answer_cap,
+     "(capnp/rpc-answer-cap conn question-id)"},
+    {"rpc-share-vat", cfun_rpc_share_vat,
+     "(capnp/rpc-share-vat host guest)\n\n"
+     "Guest connections record level-3 provisions on host's vat."},
+    {"rpc-provisions", cfun_rpc_provisions,
+     "(capnp/rpc-provisions conn)\n\nNonces held for a third vat."},
+    {"rpc-stream", cfun_rpc_stream, "(capnp/rpc-stream window)"},
+    {"rpc-stream-send", cfun_rpc_stream_send,
+     "(capnp/rpc-stream-send conn stream cap-id interface-id method-id "
+     "data-words pointer-words &opt fill)"},
+    {"rpc-stream-finish", cfun_rpc_stream_finish,
+     "(capnp/rpc-stream-finish conn stream)"},
     {"build-message", cfun_build_message,
      "(capnp/build-message dwords pwords fields)\n\n"
      "Build a framed root struct. fields: array of "
