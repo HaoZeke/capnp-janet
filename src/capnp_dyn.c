@@ -4898,6 +4898,149 @@ static int build_list_from_vnode(const capnp_dyn_t *d, const rtype_t *elem_rt,
   }
 }
 
+static int copy_ptr_full(capnp_builder_t *b, uint32_t slot_seg, size_t slot_word,
+                         const capnp_ptr_t *src, int depth);
+
+/* Copy a list at the size it was built, the way adopt moves an orphan.
+ * The canonical copier trims composite elements and would not match
+ * capnp convert. */
+static int copy_list_full(capnp_builder_t *b, uint32_t slot_seg, size_t slot_word,
+                          const capnp_ptr_t *list, int depth) {
+  uint32_t n = list->count;
+  int esize = list->esize;
+  if (esize == CAPNP_SZ_COMPOSITE) {
+    int nd = list->dwords;
+    int np = list->pwords;
+    size_t step = (size_t)nd + (size_t)np;
+    capnp_bptr_t slot, first;
+    uint32_t i, k;
+    slot.b = b;
+    slot.seg = slot_seg;
+    slot.word = slot_word;
+    if (capnp_builder_set_list_struct(&slot, 0, 0, n, (uint16_t)nd,
+                                      (uint16_t)np, &first))
+      return -1;
+    for (i = 0; i < n; i++) {
+      capnp_ptr_t el;
+      if (capnp_list_getp(list, i, &el) != CAPNP_OK)
+        return -1;
+      for (k = 0; k < (uint32_t)nd; k++) {
+        uint64_t w = (k < el.dwords) ? capnp_get_u64(&el, k * 8u, 0) : 0;
+        capnp_store_le64(b->segs[first.seg].data +
+                             (first.word + (size_t)i * step + k) * 8u,
+                         w);
+      }
+      for (k = 0; k < (uint32_t)np; k++) {
+        capnp_ptr_t child;
+        size_t cslot = first.word + (size_t)i * step + (size_t)nd + k;
+        if (k < el.pwords) {
+          if (capnp_getp(&el, (uint16_t)k, &child) != CAPNP_OK)
+            return -1;
+          if (copy_ptr_full(b, first.seg, cslot, &child, depth + 1))
+            return -1;
+        }
+      }
+    }
+    return 0;
+  }
+  if (esize == CAPNP_SZ_PTR) {
+    capnp_bptr_t slot, first;
+    uint32_t i;
+    slot.b = b;
+    slot.seg = slot_seg;
+    slot.word = slot_word;
+    if (capnp_builder_init_ptr_list(&slot, 0, 0, n, &first))
+      return -1;
+    for (i = 0; i < n; i++) {
+      capnp_ptr_t el;
+      if (capnp_list_getp(list, i, &el) != CAPNP_OK)
+        return -1;
+      if (copy_ptr_full(b, first.seg, first.word + i, &el, depth + 1))
+        return -1;
+    }
+    return 0;
+  }
+  {
+    capnp_bptr_t slot;
+    const uint8_t *srcb =
+        list->msg->segs[list->seg].data + list->word * 8u;
+    slot.b = b;
+    slot.seg = slot_seg;
+    slot.word = slot_word;
+    switch (esize) {
+    case CAPNP_SZ_VOID:
+      return capnp_builder_set_list_void(&slot, 0, 0, n);
+    case CAPNP_SZ_BIT: {
+      size_t nbytes = ((size_t)n + 7u) / 8u;
+      capnp_orphan_t o;
+      capnp_bptr_t start;
+      if (capnp_builder_new_orphan_list(b, CAPNP_SZ_BIT, n, &o, &start))
+        return -1;
+      if (nbytes) {
+        uint8_t *dst = b->segs[start.seg].data + start.word * 8u;
+        memcpy(dst, srcb, nbytes);
+        if (n % 8u)
+          dst[nbytes - 1] &= (uint8_t)((1u << (n % 8u)) - 1u);
+      }
+      return capnp_builder_adopt(&slot, &o);
+    }
+    case CAPNP_SZ_BYTE:
+      return capnp_builder_set_list_u8(&slot, 0, 0, srcb, n);
+    case CAPNP_SZ_TWO:
+    case CAPNP_SZ_FOUR:
+    case CAPNP_SZ_EIGHT: {
+      size_t nbytes = (size_t)n * (esize == CAPNP_SZ_TWO ? 2u : esize == CAPNP_SZ_FOUR ? 4u : 8u);
+      capnp_orphan_t o;
+      capnp_bptr_t start;
+      if (capnp_builder_new_orphan_list(b, esize, n, &o, &start))
+        return -1;
+      if (nbytes)
+        memcpy(b->segs[start.seg].data + start.word * 8u, srcb, nbytes);
+      return capnp_builder_adopt(&slot, &o);
+    }
+    default:
+      return -1;
+    }
+  }
+}
+
+static int copy_ptr_full(capnp_builder_t *b, uint32_t slot_seg, size_t slot_word,
+                         const capnp_ptr_t *src, int depth) {
+  if (depth > MAX_DEPTH)
+    return -1;
+  if (!src || src->kind == CAPNP_PK_NULL) {
+    capnp_store_le64(b->segs[slot_seg].data + slot_word * 8u, 0);
+    return 0;
+  }
+  if (src->kind == CAPNP_PK_LIST)
+    return copy_list_full(b, slot_seg, slot_word, src, depth);
+  if (src->kind == CAPNP_PK_STRUCT) {
+    int nd = src->dwords;
+    int np = src->pwords;
+    capnp_bptr_t slot, body;
+    int k;
+    slot.b = b;
+    slot.seg = slot_seg;
+    slot.word = slot_word;
+    if (capnp_builder_struct(&slot, (uint16_t)nd, (uint16_t)np, &body))
+      return -1;
+    for (k = 0; k < nd; k++) {
+      uint64_t w = capnp_get_u64(src, (uint32_t)k * 8u, 0);
+      capnp_store_le64(b->segs[body.seg].data + (body.word + (size_t)k) * 8u, w);
+    }
+    for (k = 0; k < np; k++) {
+      capnp_ptr_t child;
+      if (capnp_getp(src, (uint16_t)k, &child) != CAPNP_OK)
+        return -1;
+      if (copy_ptr_full(b, body.seg, body.word + (size_t)nd + (size_t)k, &child,
+                        depth + 1))
+        return -1;
+    }
+    return 0;
+  }
+  return -1;
+}
+
 static int adopt_group_fields(const capnp_dyn_t *d, const dyn_struct_t *g,
                               const brand_env_t *env, const capnp_ptr_t *src,
                               const capnp_bptr_t *dst, int depth);
@@ -4930,7 +5073,7 @@ static int copy_group_field(const capnp_dyn_t *d, const dyn_struct_t *g,
       rc = -1;
     else if (child.kind != CAPNP_PK_NULL) {
       if (capnp_builder_slot(dst, g->dwords, (uint16_t)f->offset, &slot) ||
-          capnp_builder_copy_ptr(&slot, &child))
+          copy_ptr_full(slot.b, slot.seg, slot.word, &child, depth + 1))
         rc = -1;
     }
     free_rtype(&ft);

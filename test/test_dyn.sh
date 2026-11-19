@@ -351,6 +351,11 @@ EOF
 (grp = (guText = "first", guNum = 9))
 EOF
 cmp "$TMP/gtxt-ref.bin" "$TMP/gtxt-our.bin"
+# A group that holds a composite list must keep the element size
+# capnp convert builds. A trimmed copy is shorter.
+printf '%s\n' '{"call":{"op":"multiply","params":[{"literal":2},{"literal":3}]}}' | capnp convert -I"$INC" json:binary "$ROOT/schema/calculator.capnp" Expression >"$TMP/expr-ref.bin"
+printf '%s\n' '{"call":{"op":"multiply","params":[{"literal":2},{"literal":3}]}}' | "$CLI" convert -I"$INC" json:binary "$ROOT/schema/calculator.capnp" Expression >"$TMP/expr-our.bin"
+cmp "$TMP/expr-ref.bin" "$TMP/expr-our.bin"
 
 # A second discriminator tag is an error. A single tag still matches,
 # and a repeated ordinary field still keeps the last value.
