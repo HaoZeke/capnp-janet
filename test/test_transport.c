@@ -10,6 +10,7 @@
 #include <capnp-janet/capnp_transport.h>
 
 #include <dirent.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -370,6 +371,32 @@ static void test_bootstrap_frame_little_endian(void) {
         "word count high bytes clear");
 }
 
+static void test_write_pipe(void) {
+  int p[2];
+  uint8_t byte = 7, got = 0;
+  check(pipe(p) == 0, "pipe");
+  check(capnp_write_all(p[1], &byte, 1) == CAPNP_OK, "write pipe");
+  check(read(p[0], &got, 1) == 1 && got == 7, "pipe byte");
+  close(p[0]);
+  close(p[1]);
+}
+
+/* A closed peer must return an error. With the default SIGPIPE
+ * disposition, write() on that socket kills the process. */
+static void test_write_closed_socket(void) {
+  int sv[2];
+  uint8_t byte = 1;
+  struct sigaction sa, old;
+  check(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "closed pair");
+  close(sv[1]);
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = SIG_DFL;
+  check(sigaction(SIGPIPE, &sa, &old) == 0, "sigpipe default");
+  check(capnp_write_all(sv[0], &byte, 1) != CAPNP_OK, "closed write");
+  sigaction(SIGPIPE, &old, NULL);
+  close(sv[0]);
+}
+
 int main(int argc, char **argv) {
   if (argc >= 3 && strcmp(argv[1], "dial") == 0)
     return dial_peer((uint16_t)atoi(argv[2]));
@@ -378,6 +405,8 @@ int main(int argc, char **argv) {
   test_ipv4_literal();
   test_frame_little_endian();
   test_bootstrap_frame_little_endian();
+  test_write_pipe();
+  test_write_closed_socket();
   test_unix_replaces_only_socket();
   test_link_setup_closes_fd();
   loopback(1);

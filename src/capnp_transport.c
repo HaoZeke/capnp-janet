@@ -13,8 +13,17 @@
 
 int capnp_write_all(int fd, const uint8_t *data, size_t len) {
   size_t off = 0;
+  int flags = 0;
+#ifdef MSG_NOSIGNAL
+  flags = MSG_NOSIGNAL;
+#elif defined(SO_NOSIGPIPE)
+  int one = 1;
+  setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
+#endif
   while (off < len) {
-    ssize_t n = write(fd, data + off, len - off);
+    ssize_t n = send(fd, data + off, len - off, flags);
+    if (n < 0 && errno == ENOTSOCK)
+      n = write(fd, data + off, len - off);
     if (n < 0) {
       if (errno == EINTR)
         continue;
