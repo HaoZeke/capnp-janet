@@ -14,7 +14,8 @@
             "src/capnp_builder.c"
             "src/capnp_packed.c"
             "src/capnp_canonical.c"
-            "src/capnp_rpc.c"]
+            "src/capnp_rpc.c"
+            "src/capnp_transport.c"]
   :headers @["include/capnp-janet/capnp_builder.h"
              "include/capnp-janet/capnp_canonical.h"
              "include/capnp-janet/capnp_copy.h"

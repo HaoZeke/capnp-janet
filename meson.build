@@ -19,6 +19,7 @@ lib_sources = files(
   'src/capnp_packed.c',
   'src/capnp_canonical.c',
   'src/capnp_rpc.c',
+  'src/capnp_transport.c',
   'src/capnp_dyn.c',
 )
 
@@ -62,6 +63,7 @@ install_headers(
   'include/capnp-janet/capnp_copy.h',
   'include/capnp-janet/capnp_janet.h',
   'include/capnp-janet/capnp_rpc.h',
+  'include/capnp-janet/capnp_transport.h',
   'include/capnp-janet/capnp_dyn.h',
   subdir: 'capnp-janet',
 )
@@ -76,6 +78,13 @@ capnpc_janet = executable(
 dump_request = executable(
   'dump-request',
   'app/dump_request.c',
+)
+
+capnp_eval = executable(
+  'capnp-eval',
+  'app/capnp_eval.c',
+  dependencies: capnp_janet_dep,
+  install: true,
 )
 
 test_inc = include_directories('test')
@@ -237,6 +246,16 @@ if bash.found()
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
   )
+  test(
+    'eval',
+    bash,
+    args: [meson.project_source_root() / 'test/test_eval.sh'],
+    depends: [capnp_eval],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
 else
   message('codegen smoke: skipped (no bash).')
 endif
@@ -282,6 +301,14 @@ test_rpc_client = executable(
 )
 test('rpc_client', test_rpc_client)
 
+test_transport = executable(
+  'test_transport',
+  'test/test_transport.c',
+  dependencies: capnp_janet_dep,
+  c_args: ['-D_POSIX_C_SOURCE=200809L'],
+)
+test('transport', test_transport)
+
 # --- live-peer RPC interop: this vat against capnp-C++ ---------------
 #
 # Byte equality against our own encoders says nothing about whether the
@@ -303,6 +330,13 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
       '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
       '@INPUT@',
     ],
+  )
+
+  rpc_peer_client = executable(
+    'rpc_peer_client',
+    ['interop' / 'rpc_peer_client.c++', adder_cpp],
+    dependencies: capnp_rpc_dep,
+    override_options: ['cpp_std=c++17'],
   )
 
   rpc_peer_server = executable(
@@ -339,6 +373,17 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
     env: {
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
+  )
+  test(
+    'transport_peer',
+    bash,
+    args: [meson.project_source_root() / 'test/test_transport_peer.sh'],
+    depends: [test_transport, rpc_peer_server, rpc_peer_client],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+    timeout: 60,
   )
 else
   message('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')
