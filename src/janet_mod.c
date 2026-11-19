@@ -1579,6 +1579,35 @@ typedef struct {
   JanetFiber *fib;
 } rpc_fill;
 
+static void require_fill(Janet fill) {
+  if (janet_checktype(fill, JANET_FUNCTION) ||
+      janet_checktype(fill, JANET_CFUNCTION))
+    return;
+  janet_panic("capnp/rpc-call: fill must be a function");
+}
+
+/* A function goes through janet_pcall. A cfunction is invoked directly,
+ * inside janet_try, because janet_unwrap_function crashes on one. */
+static JanetSignal call_fill(Janet fill, Janet arg, Janet *out, JanetFiber **fib) {
+  *fib = NULL;
+  if (janet_checktype(fill, JANET_FUNCTION))
+    return janet_pcall(janet_unwrap_function(fill), 1, &arg, out, fib);
+  if (janet_checktype(fill, JANET_CFUNCTION)) {
+    JanetTryState ts;
+    JanetSignal sig = janet_try(&ts);
+    if (sig) {
+      janet_restore(&ts);
+      *out = ts.payload;
+      return sig;
+    }
+    *out = janet_unwrap_cfunction(fill)(1, &arg);
+    janet_restore(&ts);
+    return JANET_SIGNAL_OK;
+  }
+  *out = janet_cstringv("capnp/rpc-call: fill must be a function");
+  return JANET_SIGNAL_ERROR;
+}
+
 static int rpc_fill_cb(void *ctx, const capnp_bptr_t *params) {
   rpc_fill *f = (rpc_fill *)ctx;
   builder_scope_t *scope = scope_open();
@@ -1586,8 +1615,7 @@ static int rpc_fill_cb(void *ctx, const capnp_bptr_t *params) {
       make_builder_ptr(janet_wrap_nil(), params, f->dwords, f->pwords, scope);
   Janet out;
   JanetFiber *fib = NULL;
-  JanetSignal sig =
-      janet_pcall(janet_unwrap_function(f->fill), 1, &ptr, &out, &fib);
+  JanetSignal sig = call_fill(f->fill, ptr, &out, &fib);
   scope_close(scope);
   if (sig != JANET_SIGNAL_OK) {
     /* Leave the call unsent. The caller frees the builder, then
@@ -1639,7 +1667,7 @@ static Janet cfun_rpc_call(int32_t argc, Janet *argv) {
   fill.dwords = dwords;
   fill.pwords = pwords;
   if (argc == 7)
-    janet_checktypes(argv[6], JANET_TFLAG_CALLABLE);
+    require_fill(argv[6]);
   q = capnp_rpc_send_call(&w->conn, cap, iface, method, dwords, pwords,
                           argc == 7 ? rpc_fill_cb : NULL,
                           argc == 7 ? &fill : NULL);
@@ -1952,7 +1980,7 @@ static Janet cfun_rpc_stream_send(int32_t argc, Janet *argv) {
   fill.pwords = (uint16_t)janet_getinteger(argv, 6);
   fill.fill = argc == 8 ? argv[7] : janet_wrap_nil();
   if (argc == 8)
-    janet_checktypes(argv[7], JANET_TFLAG_CALLABLE);
+    require_fill(argv[7]);
   rc = capnp_rpc_stream_send(&w->conn, &s->stream,
                              (uint32_t)janet_getinteger(argv, 2),
                              janet_getuinteger64(argv, 3),
