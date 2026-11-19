@@ -198,6 +198,10 @@ static void store_w(capnp_builder_t *b, uint32_t seg, size_t word, uint64_t w) {
   capnp_store_le64(b->segs[seg].data + word * CAPNP_WORD_BYTES, w);
 }
 
+/* Release the object a pointer slot names, when that object is still
+ * the tail of its segment, then zero the slot. */
+static void drop_slot(capnp_builder_t *b, uint32_t seg, size_t word);
+
 static uint8_t *wbytes(capnp_builder_t *b, uint32_t seg, size_t word) {
   return b->segs[seg].data + word * CAPNP_WORD_BYTES;
 }
@@ -330,6 +334,7 @@ int capnp_builder_struct(const capnp_bptr_t *ptr, uint16_t dwords, uint16_t pwor
   int rc;
   if ((rc = raw_slot_checked(ptr)) != CAPNP_OK)
     return rc;
+  drop_slot(ptr->b, ptr->seg, ptr->word);
   if (n == 0) {
     /* encoding.html: zero-size struct is A=0 B=-1 C=D=0 (0xFFFFFFFC),
      * not offset 0 (that is a null pointer). */
@@ -467,7 +472,7 @@ int capnp_builder_clear_ptr(const capnp_bptr_t *body, uint16_t dwords,
   int rc = capnp_builder_slot(body, dwords, ptr_index, &slot);
   if (rc != CAPNP_OK)
     return rc;
-  store_w(slot.b, slot.seg, slot.word, 0);
+  drop_slot(slot.b, slot.seg, slot.word);
   return CAPNP_OK;
 }
 
@@ -509,9 +514,10 @@ static int write_text_at(capnp_builder_t *b, uint32_t slot_seg, size_t slot_word
 int capnp_builder_set_cap(const capnp_bptr_t *body, uint16_t dwords,
                           uint16_t ptr_index, uint32_t cap_index) {
   size_t ptr_word;
-  int rc = slot_word_checked(body, dwords, ptr_index, &ptr_word);
+  int   rc = slot_word_checked(body, dwords, ptr_index, &ptr_word);
   if (rc)
     return rc;
+  drop_slot(body->b, body->seg, ptr_word);
   store_w(body->b, body->seg, ptr_word, capnp_wp_make_cap(cap_index));
   return CAPNP_OK;
 }
@@ -526,6 +532,7 @@ int capnp_builder_set_text(const capnp_bptr_t *body, uint16_t dwords,
   rc = slot_word_checked(body, dwords, ptr_index, &ptr_word);
   if (rc)
     return rc;
+  drop_slot(body->b, body->seg, ptr_word);
   return write_text_at(body->b, body->seg, ptr_word, text, text_len);
 }
 
@@ -541,6 +548,7 @@ int capnp_builder_set_data(const capnp_bptr_t *body, uint16_t dwords,
     return CAPNP_ERR_ARG;
   if (slot_word_checked(body, dwords, ptr_index, &ptr_word))
     return CAPNP_ERR_BOUNDS;
+  drop_slot(body->b, body->seg, ptr_word);
   nwords = (data_len + 7u) / 8u;
   if (nwords) {
     if (alloc_words(body->b, nwords, &start_seg, &start_word))
@@ -566,6 +574,7 @@ static int set_list_prim(const capnp_bptr_t *body, uint16_t dwords,
     return CAPNP_ERR_BOUNDS;
   if (slot_word_checked(body, dwords, ptr_index, &ptr_word))
     return CAPNP_ERR_BOUNDS;
+  drop_slot(body->b, body->seg, ptr_word);
   if (elem_bytes && (size_t)nitems > SIZE_MAX / elem_bytes)
     return CAPNP_ERR_BOUNDS;
   nbytes = (size_t)nitems * elem_bytes;
@@ -662,6 +671,7 @@ int capnp_builder_set_list_bool(const capnp_bptr_t *body, uint16_t dwords,
     return CAPNP_ERR_BOUNDS;
   if (slot_word_checked(body, dwords, ptr_index, &ptr_word))
     return CAPNP_ERR_BOUNDS;
+  drop_slot(body->b, body->seg, ptr_word);
   nbytes = ((size_t)nitems + 7u) / 8u;
   nwords = (nbytes + 7u) / 8u;
   if (nwords) {
@@ -700,6 +710,7 @@ int capnp_builder_set_list_text_n(const capnp_bptr_t *body, uint16_t dwords,
     return CAPNP_ERR_BOUNDS;
   if (slot_word_checked(body, dwords, ptr_index, &list_ptr_word))
     return CAPNP_ERR_BOUNDS;
+  drop_slot(body->b, body->seg, list_ptr_word);
   if (nitems) {
     if (alloc_words(body->b, nitems, &list_seg, &list_start))
       return CAPNP_ERR_ALLOC;
@@ -740,6 +751,7 @@ int capnp_builder_init_ptr_list(const capnp_bptr_t *body, uint16_t dwords,
     return CAPNP_ERR_BOUNDS;
   if (slot_word_checked(body, dwords, ptr_index, &list_ptr_word))
     return CAPNP_ERR_BOUNDS;
+  drop_slot(body->b, body->seg, list_ptr_word);
   if (nitems) {
     if (alloc_words(body->b, nitems, &list_seg, &list_start))
       return CAPNP_ERR_ALLOC;
@@ -770,6 +782,7 @@ int capnp_builder_set_list_struct(const capnp_bptr_t *body, uint16_t dwords,
     return CAPNP_ERR_BOUNDS;
   if (slot_word_checked(body, dwords, ptr_index, &list_ptr_word))
     return CAPNP_ERR_BOUNDS;
+  drop_slot(body->b, body->seg, list_ptr_word);
   step = (size_t)elem_dwords + elem_pwords;
   if (step && (size_t)nitems > SIZE_MAX / step)
     return CAPNP_ERR_BOUNDS;
@@ -797,6 +810,7 @@ int capnp_builder_copy_ptr(capnp_bptr_t *slot, const capnp_ptr_t *src) {
   int rc = raw_slot_checked(slot);
   if (rc)
     return rc;
+  drop_slot(slot->b, slot->seg, slot->word);
   return capnp_copy_ptr_to_word(slot->b, slot->seg, slot->word, src, 0);
 }
 
@@ -831,6 +845,174 @@ static int list_nwords(int esize, uint32_t count, size_t *out) {
   }
   *out = n;
   return CAPNP_OK;
+}
+
+static void reclaim_tail(capnp_builder_t *b, uint32_t seg, size_t start,
+                         size_t n) {
+  capnp_bseg_t *s;
+  if (!b || n == 0 || seg >= b->nsegs)
+    return;
+  s = &b->segs[seg];
+  if (start > s->words || n > s->words - start || start + n != s->words)
+    return;
+  s->words = start;
+  /* Segment 0 holds the root. An emptied later segment is a malloc
+   * the message no longer needs. */
+  if (s->words == 0 && seg > 0 && seg + 1u == b->nsegs) {
+    free(s->data);
+    memset(s, 0, sizeof(*s));
+    b->nsegs--;
+  }
+}
+
+static void drop_ptr(capnp_builder_t *b, uint32_t seg, size_t word, int depth);
+
+/* Free the object named by a struct or list pointer word `w` that lives
+ * at `ptr_word`. When `pad_after` is set, `ptr_word` is a landing pad
+ * sitting just after that object and is released with it. */
+static void release_near(capnp_builder_t *b, uint32_t seg, size_t ptr_word,
+                         uint64_t w, int depth, int pad_after) {
+  int kind = capnp_wp_kind(w);
+  if (seg >= b->nsegs)
+    return;
+  if (kind == CAPNP_WK_STRUCT) {
+    uint16_t dw = capnp_wp_struct_dwords(w);
+    uint16_t pw = capnp_wp_struct_pwords(w);
+    size_t n = (size_t)dw + pw;
+    int64_t body;
+    uint16_t i;
+    if (n == 0)
+      return;
+    body = (int64_t)ptr_word + 1 + capnp_wp_offset(w);
+    if (body < 0 || (size_t)body >= b->segs[seg].words)
+      return;
+    for (i = 0; i < pw; i++) {
+      size_t pwrd = (size_t)body + dw + i;
+      if (pwrd < b->segs[seg].words)
+        drop_ptr(b, seg, pwrd, depth + 1);
+    }
+    if (pad_after && (size_t)body + n == ptr_word)
+      reclaim_tail(b, seg, (size_t)body, n + 1u);
+    else
+      reclaim_tail(b, seg, (size_t)body, n);
+    return;
+  }
+  if (kind != CAPNP_WK_LIST)
+    return;
+  if (capnp_wp_list_esize(w) == CAPNP_SZ_COMPOSITE) {
+    int64_t tag_at = (int64_t)ptr_word + 1 + capnp_wp_offset(w);
+    uint64_t tag;
+    uint16_t dw, pw;
+    size_t step, words, i, count;
+    if (tag_at < 0 || (size_t)tag_at >= b->segs[seg].words)
+      return;
+    tag = load_w(b, seg, (size_t)tag_at);
+    if (capnp_wp_kind(tag) != CAPNP_WK_STRUCT)
+      return;
+    dw = capnp_wp_struct_dwords(tag);
+    pw = capnp_wp_struct_pwords(tag);
+    step = (size_t)dw + pw;
+    words = (size_t)capnp_wp_list_count(w);
+    count = step ? words / step : 0;
+    for (i = 0; i < count; i++) {
+      size_t base = (size_t)tag_at + 1u + i * step;
+      uint16_t p;
+      for (p = 0; p < pw; p++) {
+        size_t pwrd = base + dw + p;
+        if (pwrd < b->segs[seg].words)
+          drop_ptr(b, seg, pwrd, depth + 1);
+      }
+    }
+    if (pad_after && (size_t)tag_at + 1u + words == ptr_word)
+      reclaim_tail(b, seg, (size_t)tag_at, words + 2u);
+    else
+      reclaim_tail(b, seg, (size_t)tag_at, words + 1u);
+    return;
+  }
+  {
+    int64_t start = (int64_t)ptr_word + 1 + capnp_wp_offset(w);
+    size_t n = 0;
+    int esize = capnp_wp_list_esize(w);
+    uint32_t count = capnp_wp_list_count(w);
+    if (list_nwords(esize, count, &n))
+      return;
+    if (start < 0 || ((n > 0) && (size_t)start >= b->segs[seg].words))
+      return;
+    if (esize == CAPNP_SZ_PTR) {
+      uint32_t i;
+      for (i = 0; i < count; i++) {
+        size_t pwrd = (size_t)start + i;
+        if (pwrd < b->segs[seg].words)
+          drop_ptr(b, seg, pwrd, depth + 1);
+      }
+    }
+    if (pad_after && n > 0 && (size_t)start + n == ptr_word)
+      reclaim_tail(b, seg, (size_t)start, n + 1u);
+    else
+      reclaim_tail(b, seg, (size_t)start, n);
+  }
+}
+
+static void drop_ptr(capnp_builder_t *b, uint32_t seg, size_t word, int depth) {
+  uint64_t w;
+  int kind;
+  if (!b || depth > 64 || seg >= b->nsegs || word >= b->segs[seg].words)
+    return;
+  w = load_w(b, seg, word);
+  if (w == 0)
+    return;
+  kind = capnp_wp_kind(w);
+  store_w(b, seg, word, 0);
+  if (kind == CAPNP_WK_STRUCT || kind == CAPNP_WK_LIST) {
+    release_near(b, seg, word, w, depth, 0);
+    return;
+  }
+  if (kind != CAPNP_WK_FAR)
+    return;
+  if (capnp_wp_far_two(w)) {
+    uint32_t pseg = capnp_wp_far_seg(w);
+    uint32_t poff = capnp_wp_far_off(w);
+    uint64_t pad, tag;
+    uint32_t cseg;
+    size_t coff;
+    if (poff > UINT32_MAX - 1u || pseg >= b->nsegs ||
+        (size_t)poff + 1u >= b->segs[pseg].words)
+      return;
+    pad = load_w(b, pseg, poff);
+    tag = load_w(b, pseg, (size_t)poff + 1u);
+    store_w(b, pseg, poff, 0);
+    store_w(b, pseg, (size_t)poff + 1u, 0);
+    if (capnp_wp_kind(pad) != CAPNP_WK_FAR || capnp_wp_far_two(pad) ||
+        capnp_wp_offset(tag) != 0)
+      return;
+    cseg = capnp_wp_far_seg(pad);
+    coff = capnp_wp_far_off(pad);
+    if (cseg >= b->nsegs || (coff > 0 && coff - 1u >= b->segs[cseg].words))
+      return;
+    /* Tag offset is 0, and the object starts at coff. A near pointer
+     * one word before coff names that object. */
+    if (coff > 0 && (capnp_wp_kind(tag) == CAPNP_WK_STRUCT ||
+                     capnp_wp_kind(tag) == CAPNP_WK_LIST))
+      release_near(b, cseg, coff - 1u, tag, depth, 0);
+    reclaim_tail(b, pseg, poff, 2);
+    return;
+  }
+  {
+    uint32_t tseg = capnp_wp_far_seg(w);
+    size_t toff = capnp_wp_far_off(w);
+    uint64_t landing;
+    if (tseg >= b->nsegs || toff >= b->segs[tseg].words)
+      return;
+    landing = load_w(b, tseg, toff);
+    store_w(b, tseg, toff, 0);
+    if (capnp_wp_kind(landing) == CAPNP_WK_STRUCT ||
+        capnp_wp_kind(landing) == CAPNP_WK_LIST)
+      release_near(b, tseg, toff, landing, depth, 1);
+  }
+}
+
+static void drop_slot(capnp_builder_t *b, uint32_t seg, size_t word) {
+  drop_ptr(b, seg, word, 0);
 }
 
 int capnp_builder_new_orphan_struct(capnp_builder_t *b, uint16_t dwords,

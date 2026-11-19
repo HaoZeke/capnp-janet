@@ -166,9 +166,44 @@ EOF
 "$BIN" grow "$TMP/request.bin" "$TMP/grow.bin"
 
 "$BIN" reject "$TMP/request.bin" Conform text '(tiny = 1, tiny = 2)' tiny
-"$BIN" reject "$TMP/request.bin" Conform json '{"tiny":1,"tiny":2}' tiny
 "$BIN" reject "$TMP/request.bin" Conform text '(nope = 1)' nope
-"$BIN" reject "$TMP/request.bin" Conform json '{"nope":1,"nope":2}' nope
+# A repeated JSON name keeps the last value, matching capnp 1.4.0.
+# Unknown names stay ignored, so a repeated unknown name is not an error.
+printf '%s\n' '{"nope":1,"nope":2}' >"$TMP/dup-unk.json"
+"$BIN" json-decode "$TMP/request.bin" "$TMP/dup-unk.json" "$TMP/dup-unk.bin"
+printf '%s\n' '{"vI8":1,"vI8":2}' | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dup-ref.bin"
+printf '%s\n' '{"vI8":1,"vI8":2}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dup-our.bin"
+"$BIN" canon "$TMP/dup-ref.bin" "$TMP/dup-ref.can"
+"$BIN" canon "$TMP/dup-our.bin" "$TMP/dup-our.can"
+cmp "$TMP/dup-ref.can" "$TMP/dup-our.can"
+capnp decode -I"$INC" "$PARITY_SCHEMA" Parity <"$TMP/dup-our.bin" | grep -q 'vI8 = 2'
+printf '%s\n' '{"vText":"a","vText":"bb"}' | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupt-ref.bin"
+printf '%s\n' '{"vText":"a","vText":"bb"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupt-our.bin"
+"$BIN" canon "$TMP/dupt-ref.bin" "$TMP/dupt-ref.can"
+"$BIN" canon "$TMP/dupt-our.bin" "$TMP/dupt-our.can"
+cmp "$TMP/dupt-ref.can" "$TMP/dupt-our.can"
+printf '%s\n' '{"uNote":"first","uNote":"second"}' | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupu-ref.bin"
+printf '%s\n' '{"uNote":"first","uNote":"second"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupu-our.bin"
+"$BIN" canon "$TMP/dupu-ref.bin" "$TMP/dupu-ref.can"
+"$BIN" canon "$TMP/dupu-our.bin" "$TMP/dupu-our.can"
+cmp "$TMP/dupu-ref.can" "$TMP/dupu-our.can"
+# Switching arms selects the last one. capnp leaves the previous
+# text reachable; this library releases it, so compare the decoded value.
+printf '%s\n' '{"uNote":"first","uCount":9}' | capnp convert -I"$INC" json:text "$PARITY_SCHEMA" Parity >"$TMP/dupa-ref.txt"
+printf '%s\n' '{"uNote":"first","uCount":9}' | "$CLI" convert -I"$INC" json:text "$PARITY_SCHEMA" Parity >"$TMP/dupa-our.txt"
+cmp "$TMP/dupa-ref.txt" "$TMP/dupa-our.txt"
+grep -q 'uCount = 9' "$TMP/dupa-our.txt"
+printf '%s\n' '{"uNote":"first","uCount":9}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupa-our.bin"
+"$BIN" canon "$TMP/dupa-our.bin" "$TMP/dupa-our.can"
+if grep -a -q first "$TMP/dupa-our.can"; then
+  echo "replaced union text was kept" >&2
+  exit 1
+fi
+printf '%s\n' '{"valUnion":"vTxt","v_payload":"a","v_payload":"zz"}' | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupv-ref.bin"
+printf '%s\n' '{"valUnion":"vTxt","v_payload":"a","v_payload":"zz"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupv-our.bin"
+"$BIN" canon "$TMP/dupv-ref.bin" "$TMP/dupv-ref.can"
+"$BIN" canon "$TMP/dupv-our.bin" "$TMP/dupv-our.can"
+cmp "$TMP/dupv-ref.can" "$TMP/dupv-our.can"
 "$BIN" reject "$TMP/request.bin" Conform text '(tiny = 1) junk' junk
 "$BIN" reject "$TMP/request.bin" Conform json '{"tiny":"abc"}' 'bad value for field tiny: "abc"'
 "$BIN" reject "$TMP/request.bin" Conform json '{"tiny":999}' 'bad value for field tiny: 999'
