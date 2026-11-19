@@ -43,6 +43,7 @@ packs import.
 - Generated scalar-default, union, group, struct, and list reader/builder helpers
 - `capnp_janet_lookup_into` + `janet/policy.janet` for compiled `.jimage` packs
 - Traversal word budget and depth limit (C++ defaults)
+- Dynamic field access over a `CodeGeneratorRequest`, plus text and JSON codecs (`capnp_dyn.h`)
 
 ## Parity
 
@@ -235,10 +236,12 @@ docs/orgmode/  architecture notes
 ## Compatibility boundaries
 
 The supported surface includes readers, arena builders, packed and canonical
-codecs, generated typed helpers, and the C RPC vat through level 4. It does not
-expose C++ orphan ownership, generated pointer-default constants, a dynamic
-schema API, or Janet wrappers for the C RPC vat. Calls outside the documented
-list-evolution matrix return a kind error or the supplied default.
+codecs, generated typed helpers, the C dynamic API in `capnp_dyn.h` (text and
+JSON over a compiled `CodeGeneratorRequest`), and the C RPC vat through level
+4. It does not expose C++ orphan ownership, generated pointer-default
+constants, a `.capnp` source parser, or Janet wrappers for the C RPC vat.
+Calls outside the documented list-evolution matrix return a kind error or the
+supplied default.
 
 ## Related
 

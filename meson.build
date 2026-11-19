@@ -19,6 +19,7 @@ lib_sources = files(
   'src/capnp_packed.c',
   'src/capnp_canonical.c',
   'src/capnp_rpc.c',
+  'src/capnp_dyn.c',
 )
 
 # MSVC writes an import library only when something is dllexport, so a
@@ -61,6 +62,7 @@ install_headers(
   'include/capnp-janet/capnp_copy.h',
   'include/capnp-janet/capnp_janet.h',
   'include/capnp-janet/capnp_rpc.h',
+  'include/capnp-janet/capnp_dyn.h',
   subdir: 'capnp-janet',
 )
 
@@ -69,6 +71,11 @@ capnpc_janet = executable(
   'app/capnpc_janet.c',
   dependencies: capnp_janet_dep,
   install: true,
+)
+
+dump_request = executable(
+  'dump-request',
+  'app/dump_request.c',
 )
 
 test_inc = include_directories('test')
@@ -185,6 +192,13 @@ test_conform = executable(
   dependencies: capnp_janet_dep,
 )
 
+test_dyn = executable(
+  'test_dyn',
+  'test/test_dyn.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+
 if bash.found()
   test(
     'codegen',
@@ -201,6 +215,16 @@ if bash.found()
     bash,
     args: [meson.project_source_root() / 'test/test_differential.sh'],
     depends: [test_conform],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
+  test(
+    'dyn',
+    bash,
+    args: [meson.project_source_root() / 'test/test_dyn.sh'],
+    depends: [dump_request, test_dyn],
     workdir: meson.project_source_root(),
     env: {
       'CAPNP_JANET_BUILD': meson.project_build_root(),
