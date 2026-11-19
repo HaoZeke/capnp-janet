@@ -556,6 +556,18 @@ static Janet cfun_init_struct_list(int32_t argc, Janet *argv) {
   return make_builder_list(parent->builder_abs, &first, count, dwords, pwords);
 }
 
+static Janet cfun_init_ptr_list(int32_t argc, Janet *argv) {
+  janet_fixarity(argc, 3);
+  capnp_builder_ptr_wrap *parent = get_builder_ptr(argv, 0);
+  uint16_t index = get_pointer_index(parent, argv, 1, "capnp/init-ptr-list");
+  uint32_t count = janet_getuinteger(argv, 2);
+  capnp_bptr_t first;
+  check_builder_result(capnp_builder_init_ptr_list(&parent->body, parent->dwords,
+                                                   index, count, &first),
+                       "capnp/init-ptr-list");
+  return make_builder_list(parent->builder_abs, &first, count, 0, 1);
+}
+
 static Janet cfun_struct_list_at(int32_t argc, Janet *argv) {
   janet_fixarity(argc, 2);
   capnp_builder_list_wrap *list = get_builder_list(argv, 0);
@@ -1379,6 +1391,10 @@ static const JanetReg capnp_cfuns[] = {
     {"init-struct-list", cfun_init_struct_list,
      "(capnp/init-struct-list body pointer-index count data-words "
      "pointer-words)\n\nInitialize a List(Struct) in the same arena."},
+    {"init-ptr-list", cfun_init_ptr_list,
+     "(capnp/init-ptr-list body pointer-index count)\n\n"
+     "Initialize a list of pointers. Each element is a 0-data, 1-pointer "
+     "body, so struct-list-at then set-text or init-struct fills it."},
     {"struct-list-at", cfun_struct_list_at,
      "(capnp/struct-list-at list index)\n\nMutable struct-list element."},
     {"finish-builder", cfun_finish_builder,

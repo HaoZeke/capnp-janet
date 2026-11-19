@@ -120,6 +120,12 @@ grep -q '(defn CodegenFeatures-get-samples-at \[list index\]' codegen-features.j
 grep -q '(defn CodegenFeatures-get-names-at \[list index\]' codegen-features.janet
 grep -q '(defn CodegenFeatures-get-big-values-at \[list index\]' codegen-features.janet
 grep -q '(defn CodegenFeatures-get-tones-at \[list index\]' codegen-features.janet
+grep -q '(def answer 42)' codegen-features.janet
+grep -q '(def greeting "hello")' codegen-features.janet
+grep -q '(defn CodegenFeatures-init-matrix \[ptr count\]' codegen-features.janet
+grep -q 'capnp/init-ptr-list ptr' codegen-features.janet
+grep -q '(defn CodegenFeatures-get-anything \[ptr\]' codegen-features.janet
+grep -q 'capnp/getp ptr' codegen-features.janet
 
 MODULE=${CAPNP_JANET_MODULE:-$BUILD/capnp.so}
 if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then

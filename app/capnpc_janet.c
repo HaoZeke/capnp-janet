@@ -214,6 +214,12 @@ static const char *type_kw(uint16_t which) {
     return "interface";
   case TYPE_ANY_POINTER:
     return "any-pointer";
+  case 25:
+    return "any-struct";
+  case 26:
+    return "any-list";
+  case 27:
+    return "capability";
   default:
     return "unknown";
   }
@@ -750,6 +756,13 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       if (capnp_getp(&typ, 0, &element_type) == CAPNP_OK &&
           element_type.kind == CAPNP_PK_STRUCT)
         element_which = capnp_get_u16(&element_type, 0, 0xffff);
+      if (element_which == TYPE_LIST) {
+        fprintf(out, "(defn %s-init-%s [ptr count]\n", sname, fname);
+        emit_union_select(out, sname, fname, is_union_member);
+        fprintf(out, "  (capnp/init-ptr-list ptr %u count))\n",
+                (unsigned)offset);
+        break;
+      }
       if (element_which == TYPE_STRUCT) {
         int child_dwords, child_pwords;
         struct_shape(nodes, capnp_get_u64(&element_type, 8, 0),
@@ -893,6 +906,10 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       break;
     }
     case TYPE_STRUCT:
+    case TYPE_ANY_POINTER:
+    case 25: /* AnyStruct */
+    case 26: /* AnyList */
+    case 27: /* Capability */
       fprintf(out,
               "(defn %s-get-%s [ptr]\n  (capnp/getp ptr %u))\n", sname, fname,
               (unsigned)offset);
@@ -901,6 +918,120 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       break;
     }
   }
+}
+
+static void janet_quote(FILE *out, const char *s, size_t n) {
+  size_t i;
+  fputc('"', out);
+  for (i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (c == '"' || c == '\\') {
+      fputc('\\', out);
+      fputc((char)c, out);
+    } else if (c == '\n') {
+      fputs("\\n", out);
+    } else if (c == '\t') {
+      fputs("\\t", out);
+    } else if (c < 0x20 || c == 0x7f) {
+      fprintf(out, "\\x%02x", c);
+    } else {
+      fputc((char)c, out);
+    }
+  }
+  fputc('"', out);
+}
+
+static void emit_const(FILE *out, const capnp_ptr_t *node) {
+  capnp_ptr_t value;
+  char name[256];
+  uint16_t which;
+  const char *text;
+  size_t text_len;
+  if (capnp_get_u16(node, 12, 0xffff) != NODE_CONST)
+    return;
+  type_short_name(get_text(node, 0), name, sizeof(name));
+  if (capnp_getp(node, 4, &value) != CAPNP_OK || value.kind != CAPNP_PK_STRUCT)
+    return;
+  which = capnp_get_u16(&value, 0, 0xffff);
+  fprintf(out, "(def %s ", name);
+  switch (which) {
+  case TYPE_VOID:
+    fputs("nil", out);
+    break;
+  case TYPE_BOOL:
+    fputs(capnp_get_bool(&value, 16, 0) ? "true" : "false", out);
+    break;
+  case TYPE_INT8:
+    fprintf(out, "%d", (int)(int8_t)capnp_get_u8(&value, 2, 0));
+    break;
+  case TYPE_UINT8:
+    fprintf(out, "%u", (unsigned)capnp_get_u8(&value, 2, 0));
+    break;
+  case TYPE_INT16:
+    fprintf(out, "%d", (int)(int16_t)capnp_get_u16(&value, 2, 0));
+    break;
+  case TYPE_UINT16:
+  case TYPE_ENUM:
+    fprintf(out, "%u", (unsigned)capnp_get_u16(&value, 2, 0));
+    break;
+  case TYPE_INT32:
+    fprintf(out, "%d", (int)(int32_t)capnp_get_u32(&value, 4, 0));
+    break;
+  case TYPE_UINT32:
+    fprintf(out, "%u", (unsigned)capnp_get_u32(&value, 4, 0));
+    break;
+  case TYPE_INT64: {
+    int64_t i64;
+    uint64_t bits = capnp_get_u64(&value, 8, 0);
+    memcpy(&i64, &bits, sizeof(i64));
+    if (i64 < INT64_C(-9007199254740992) || i64 > INT64_C(9007199254740992))
+      fprintf(out, "(int/s64 \"%lld\")", (long long)i64);
+    else
+      fprintf(out, "%lld", (long long)i64);
+    break;
+  }
+  case TYPE_UINT64: {
+    uint64_t u64 = capnp_get_u64(&value, 8, 0);
+    if (u64 > UINT64_C(9007199254740992))
+      fprintf(out, "(int/u64 \"%llu\")", (unsigned long long)u64);
+    else
+      fprintf(out, "%llu", (unsigned long long)u64);
+    break;
+  }
+  case TYPE_FLOAT32: {
+    uint32_t bits = capnp_get_u32(&value, 4, 0);
+    float f32;
+    memcpy(&f32, &bits, sizeof(f32));
+    fprintf(out, "%.9g", (double)f32);
+    break;
+  }
+  case TYPE_FLOAT64: {
+    uint64_t bits = capnp_get_u64(&value, 8, 0);
+    double f64;
+    memcpy(&f64, &bits, sizeof(f64));
+    fprintf(out, "%.17g", f64);
+    break;
+  }
+  case TYPE_TEXT:
+    if (capnp_get_text(&value, 0, &text, &text_len) != CAPNP_OK)
+      fputs("\"\"", out);
+    else
+      janet_quote(out, text, text_len);
+    break;
+  case TYPE_DATA: {
+    const uint8_t *data = NULL;
+    size_t n = 0;
+    if (capnp_get_data(&value, 0, &data, &n) != CAPNP_OK || !data)
+      fputs("\"\"", out);
+    else
+      janet_quote(out, (const char *)data, n);
+    break;
+  }
+  default:
+    fputs("nil", out);
+    break;
+  }
+  fputs(")\n", out);
 }
 
 static void emit_enum(FILE *out, const capnp_ptr_t *node) {
@@ -970,6 +1101,8 @@ static int write_module(const char *filename, const capnp_ptr_t *nodes,
       emit_enum(out, &node);
     else if (which == NODE_IFACE)
       emit_interface(out, &node, nodes);
+    else if (which == NODE_CONST)
+      emit_const(out, &node);
   }
 
   fclose(out);
