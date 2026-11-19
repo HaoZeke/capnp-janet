@@ -97,9 +97,47 @@ static void test_list_orphan_roundtrip(void) {
   capnp_message_free(&m);
 }
 
+static void test_struct_list_orphan(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body, slot, first;
+  capnp_orphan_t orphan;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m;
+  capnp_ptr_t r, list, el;
+
+  capnp_builder_init(&b);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
+  check(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "body");
+  check(capnp_builder_new_orphan_struct_list(&b, 2, 1, 0, &orphan, &first) ==
+            CAPNP_OK,
+        "struct list");
+  check(capnp_builder_set_u64(&first, 0, 3) == CAPNP_OK, "elem0");
+  first.word += 1;
+  check(capnp_builder_set_u64(&first, 0, 9) == CAPNP_OK, "elem1");
+  check(capnp_builder_slot(&body, 0, 0, &slot) == CAPNP_OK, "slot");
+  check(capnp_builder_adopt(&slot, &orphan) == CAPNP_OK, "adopt composite");
+  check(capnp_builder_disown(&slot, &orphan) == CAPNP_OK, "disown composite");
+  check(orphan.esize == CAPNP_SZ_COMPOSITE, "esize");
+  check(capnp_builder_adopt(&slot, &orphan) == CAPNP_OK, "readopt composite");
+  check(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ser");
+  capnp_builder_free(&b);
+  check(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "parse");
+  free(flat);
+  check(capnp_root(&m, &r) == CAPNP_OK, "root read");
+  check(capnp_getp(&r, 0, &list) == CAPNP_OK, "list");
+  check(capnp_list_len(&list) == 2, "len");
+  check(capnp_list_getp(&list, 0, &el) == CAPNP_OK, "el0");
+  check(capnp_get_u64(&el, 0, 0) == 3, "3");
+  check(capnp_list_getp(&list, 1, &el) == CAPNP_OK, "el1");
+  check(capnp_get_u64(&el, 0, 0) == 9, "9");
+  capnp_message_free(&m);
+}
+
 int main(void) {
   test_adopt_matches_direct();
   test_list_orphan_roundtrip();
+  test_struct_list_orphan();
   if (g_fail) {
     fprintf(stderr, "%d orphan checks failed\n", g_fail);
     return 1;

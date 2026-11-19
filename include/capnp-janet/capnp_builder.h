@@ -170,6 +170,12 @@ CAPNP_JANET_EXPORT int capnp_builder_new_orphan_list(capnp_builder_t *b, int esi
                                                      uint32_t count,
                                                      capnp_orphan_t *o,
                                                      capnp_bptr_t *start);
+/* A composite list. `first`, when set, is the first element body. For a
+ * composite orphan, `count` on the orphan is the wire word count of the
+ * elements (not the element count), which is what the list pointer stores. */
+CAPNP_JANET_EXPORT int capnp_builder_new_orphan_struct_list(
+    capnp_builder_t *b, uint32_t count, uint16_t elem_dwords,
+    uint16_t elem_pwords, capnp_orphan_t *o, capnp_bptr_t *first);
 CAPNP_JANET_EXPORT int capnp_builder_adopt(const capnp_bptr_t *slot,
                                            capnp_orphan_t *o);
 CAPNP_JANET_EXPORT int capnp_builder_disown(const capnp_bptr_t *slot,

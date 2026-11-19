@@ -853,6 +853,45 @@ int capnp_builder_new_orphan_list(capnp_builder_t *b, int esize, uint32_t count,
   return CAPNP_OK;
 }
 
+int capnp_builder_new_orphan_struct_list(capnp_builder_t *b, uint32_t count,
+                                          uint16_t elem_dwords,
+                                          uint16_t elem_pwords,
+                                          capnp_orphan_t *o,
+                                          capnp_bptr_t *first) {
+  size_t step = (size_t)elem_dwords + elem_pwords;
+  size_t content = (size_t)count * step;
+  size_t need = 1 + content;
+  uint32_t seg = 0;
+  size_t word = 0;
+  if (!b || !o)
+    return CAPNP_ERR_ARG;
+  if (count && step == 0)
+    return CAPNP_ERR_KIND;
+  if (count && content / count != step)
+    return CAPNP_ERR_BOUNDS;
+  memset(o, 0, sizeof(*o));
+  if (alloc_words(b, need, &seg, &word))
+    return CAPNP_ERR_ALLOC;
+  memset(wbytes(b, seg, word), 0, need * CAPNP_WORD_BYTES);
+  store_w(b, seg, word,
+          capnp_wp_make_struct((int32_t)count, elem_dwords, elem_pwords));
+  o->b = b;
+  o->seg = seg;
+  o->word = word;
+  o->kind = CAPNP_PK_LIST;
+  o->esize = CAPNP_SZ_COMPOSITE;
+  o->count = (uint32_t)content;
+  o->dwords = elem_dwords;
+  o->pwords = elem_pwords;
+  o->live = 1;
+  if (first) {
+    first->b = b;
+    first->seg = seg;
+    first->word = word + 1;
+  }
+  return CAPNP_OK;
+}
+
 int capnp_builder_adopt(const capnp_bptr_t *slot, capnp_orphan_t *o) {
   int rc;
   if (!slot || !slot->b || !o || !o->live || o->b != slot->b)
@@ -912,8 +951,23 @@ static int orphan_from_word(capnp_builder_t *b, uint32_t seg, size_t word,
   }
   if (kind == CAPNP_WK_LIST) {
     int64_t start;
-    if (capnp_wp_list_esize(w) == CAPNP_SZ_COMPOSITE)
-      return CAPNP_ERR_KIND;
+    if (capnp_wp_list_esize(w) == CAPNP_SZ_COMPOSITE) {
+      uint64_t tag;
+      start = (int64_t)word + 1 + capnp_wp_offset(w);
+      if (start < 0 || (size_t)start >= b->segs[seg].words)
+        return CAPNP_ERR_BOUNDS;
+      tag = load_w(b, seg, (size_t)start);
+      if (capnp_wp_kind(tag) != CAPNP_WK_STRUCT)
+        return CAPNP_ERR_KIND;
+      o->kind = CAPNP_PK_LIST;
+      o->esize = CAPNP_SZ_COMPOSITE;
+      o->count = capnp_wp_list_count(w);
+      o->dwords = capnp_wp_struct_dwords(tag);
+      o->pwords = capnp_wp_struct_pwords(tag);
+      o->seg = seg;
+      o->word = (size_t)start;
+      return CAPNP_OK;
+    }
     start = (int64_t)word + 1 + capnp_wp_offset(w);
     o->kind = CAPNP_PK_LIST;
     o->esize = capnp_wp_list_esize(w);
