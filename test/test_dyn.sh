@@ -165,7 +165,18 @@ capnp encode "$SCHEMA" Conform >"$TMP/grow.bin" <<'EOF'
 EOF
 "$BIN" grow "$TMP/request.bin" "$TMP/grow.bin"
 
-"$BIN" reject "$TMP/request.bin" Conform text '(tiny = 1, tiny = 2)' tiny
+# A repeated text field keeps the last value, matching C++ 1.4.0.
+capnp encode "$SCHEMA" Conform >"$TMP/duptxt-ref.bin" <<'EOF'
+(tiny = 1, tiny = 2)
+EOF
+"$CLI" encode "$SCHEMA" Conform >"$TMP/duptxt-our.bin" <<'EOF'
+(tiny = 1, tiny = 2)
+EOF
+cmp "$TMP/duptxt-ref.bin" "$TMP/duptxt-our.bin"
+"$BIN" canon "$TMP/duptxt-ref.bin" "$TMP/duptxt-ref.can"
+"$BIN" canon "$TMP/duptxt-our.bin" "$TMP/duptxt-our.can"
+cmp "$TMP/duptxt-ref.can" "$TMP/duptxt-our.can"
+capnp decode "$SCHEMA" Conform <"$TMP/duptxt-our.bin" | grep -q 'tiny = 2'
 "$BIN" reject "$TMP/request.bin" Conform text '(nope = 1)' nope
 # A repeated JSON name keeps the last value, matching capnp 1.4.0.
 # Unknown names stay ignored, so a repeated unknown name is not an error.
@@ -187,18 +198,26 @@ printf '%s\n' '{"uNote":"first","uNote":"second"}' | "$CLI" convert -I"$INC" jso
 "$BIN" canon "$TMP/dupu-ref.bin" "$TMP/dupu-ref.can"
 "$BIN" canon "$TMP/dupu-our.bin" "$TMP/dupu-our.can"
 cmp "$TMP/dupu-ref.can" "$TMP/dupu-our.can"
-# Switching arms selects the last one. capnp leaves the previous
-# text reachable; this library releases it, so compare the decoded value.
-printf '%s\n' '{"uNote":"first","uCount":9}' | capnp convert -I"$INC" json:text "$PARITY_SCHEMA" Parity >"$TMP/dupa-ref.txt"
-printf '%s\n' '{"uNote":"first","uCount":9}' | "$CLI" convert -I"$INC" json:text "$PARITY_SCHEMA" Parity >"$TMP/dupa-our.txt"
-cmp "$TMP/dupa-ref.txt" "$TMP/dupa-our.txt"
-grep -q 'uCount = 9' "$TMP/dupa-our.txt"
+# Switching arms selects the last one and leaves the previous arm
+# reachable. Raw and canonical bytes match C++ 1.4.0.
+printf '%s\n' '{"uNote":"first","uCount":9}' | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupa-ref.bin"
 printf '%s\n' '{"uNote":"first","uCount":9}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupa-our.bin"
+cmp "$TMP/dupa-ref.bin" "$TMP/dupa-our.bin"
+"$BIN" canon "$TMP/dupa-ref.bin" "$TMP/dupa-ref.can"
 "$BIN" canon "$TMP/dupa-our.bin" "$TMP/dupa-our.can"
-if grep -a -q first "$TMP/dupa-our.can"; then
-  echo "replaced union text was kept" >&2
-  exit 1
-fi
+cmp "$TMP/dupa-ref.can" "$TMP/dupa-our.can"
+capnp decode -I"$INC" "$PARITY_SCHEMA" Parity <"$TMP/dupa-our.bin" | grep -q 'uCount = 9'
+grep -a -q first "$TMP/dupa-our.bin"
+capnp encode -I"$INC" "$PARITY_SCHEMA" Parity >"$TMP/dupat-ref.bin" <<'EOF'
+(uNote = "first", uCount = 9)
+EOF
+"$CLI" encode -I"$INC" "$PARITY_SCHEMA" Parity >"$TMP/dupat-our.bin" <<'EOF'
+(uNote = "first", uCount = 9)
+EOF
+cmp "$TMP/dupat-ref.bin" "$TMP/dupat-our.bin"
+"$BIN" canon "$TMP/dupat-ref.bin" "$TMP/dupat-ref.can"
+"$BIN" canon "$TMP/dupat-our.bin" "$TMP/dupat-our.can"
+cmp "$TMP/dupat-ref.can" "$TMP/dupat-our.can"
 printf '%s\n' '{"valUnion":"vTxt","v_payload":"a","v_payload":"zz"}' | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupv-ref.bin"
 printf '%s\n' '{"valUnion":"vTxt","v_payload":"a","v_payload":"zz"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupv-our.bin"
 "$BIN" canon "$TMP/dupv-ref.bin" "$TMP/dupv-ref.can"
@@ -227,5 +246,26 @@ EOF
 capnp compile -I"$INC" -o- "$TMP/u.capnp" >"$TMP/u_req.bin"
 "$BIN" disc "$TMP/u_req.bin" ok
 "$BIN" disc "$TMP/u_req.bin" oob
+
+# A discriminator tag clears only the chosen arm. The previous arm
+# stays reachable, matching Builder::clear.
+cat >"$TMP/utag.capnp" <<'EOF'
+@0x9a8b7c6d5e4f3013;
+using Json = import "/capnp/compat/json.capnp";
+struct UTag $Json.discriminator(name = "kind") {
+  union {
+    note @0 :Text;
+    count @1 :UInt32;
+  }
+}
+EOF
+printf '%s\n' '{"note":"first","kind":"count"}' | capnp convert -I"$INC" json:binary "$TMP/utag.capnp" UTag >"$TMP/utag-ref.bin"
+printf '%s\n' '{"note":"first","kind":"count"}' | "$CLI" convert -I"$INC" json:binary "$TMP/utag.capnp" UTag >"$TMP/utag-our.bin"
+cmp "$TMP/utag-ref.bin" "$TMP/utag-our.bin"
+"$BIN" canon "$TMP/utag-ref.bin" "$TMP/utag-ref.can"
+"$BIN" canon "$TMP/utag-our.bin" "$TMP/utag-our.can"
+cmp "$TMP/utag-ref.can" "$TMP/utag-our.can"
+grep -a -q first "$TMP/utag-our.bin"
+capnp decode -I"$INC" "$TMP/utag.capnp" UTag <"$TMP/utag-our.bin" | grep -q 'count = 0'
 
 echo "ok dyn"

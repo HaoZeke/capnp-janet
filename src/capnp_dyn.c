@@ -4884,13 +4884,10 @@ static int build_field_from_vnode(const capnp_dyn_t *d, const dyn_struct_t *st,
   if (depth > MAX_DEPTH || !v)
     return -1;
   if (f->disc != 0xffff && st->disc_count) {
-    uint32_t ui;
-    /* The last union member seen selects the arm. Drop the previous
-     * arm, including any pointer it owned, before writing this one. */
-    for (ui = 0; ui < st->nfields; ui++) {
-      if (st->fields[ui].disc != 0xffff)
-        clear_field_wire(d, st, &st->fields[ui], env, body, depth + 1);
-    }
+    /* DynamicStruct::Builder::set calls setInUnion, which stores the
+     * discriminant and leaves every other arm in place (dynamic.c++).
+     * JsonCodec::decodeField reaches that set through adopt
+     * (compat/json.c++). */
     if (capnp_builder_set_u16(body, st->disc_byte, f->disc))
       return -1;
   }
@@ -5275,13 +5272,9 @@ static int decode_json_field_entry(
       if (uf->disc != 0xffff && st->disc_count &&
           strlen(uf->disc_name) == val->slen &&
           memcmp(uf->disc_name, val->str, val->slen) == 0) {
-        {
-          uint32_t ui;
-          for (ui = 0; ui < st->nfields; ui++) {
-            if (st->fields[ui].disc != 0xffff)
-              clear_field_wire(d, st, &st->fields[ui], env, body, depth + 1);
-          }
-        }
+        /* A discriminator tag is Builder::clear on that arm only
+         * (compat/json.c++). clear() stores the discriminant and
+         * zeroes this arm. Other arms stay. */
         if (capnp_builder_set_u16(body, st->disc_byte, uf->disc))
           return -1;
         clear_field_wire(d, st, uf, env, body, depth + 1);
@@ -5470,18 +5463,14 @@ static int build_struct_from_vnode(const capnp_dyn_t *d,
   }
 
   if (!json) {
+    /* ValueTranslator::fillStructValue adopts each assignment in
+     * order (compiler/node-translator.c++). TextCodec::decode calls
+     * it (serialize-text.c++). A repeated name overwrites the slot,
+     * so the last value remains. */
     for (i = 0; i < v->count; i++) {
       const vnode_t *kv = v->kids[i];
       const char *key = kv->key ? kv->key : "";
       const dyn_field_t *f;
-      uint32_t j;
-      for (j = 0; j < i; j++) {
-        const char *prev = v->kids[j]->key ? v->kids[j]->key : "";
-        if (strcmp(prev, key) == 0) {
-          dyn_err_text(d, "duplicate field", key, strlen(key));
-          return -1;
-        }
-      }
       f = find_field(st, key);
       if (!f) {
         dyn_err_text(d, "unknown field", key, strlen(key));
