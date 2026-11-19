@@ -1326,6 +1326,74 @@ int capnp_builder_new_orphan_struct_list(capnp_builder_t *b, uint32_t count,
   return CAPNP_OK;
 }
 
+/* Drop an orphan the caller will not adopt. Pointer children are
+ * released first, then the object's own words are zeroed, matching
+ * OrphanBuilder::euthanize. */
+int capnp_builder_orphan_free(capnp_orphan_t *o) {
+  capnp_builder_t *b;
+  size_t n = 0;
+  if (!o || !o->live || !o->b)
+    return CAPNP_ERR_ARG;
+  b = o->b;
+  if (o->seg >= b->nsegs) {
+    o->live = 0;
+    return CAPNP_ERR_SEGMENT;
+  }
+  if (o->kind == CAPNP_PK_STRUCT) {
+    uint16_t i;
+    n = (size_t)o->dwords + o->pwords;
+    for (i = 0; i < o->pwords; i++) {
+      size_t pwrd = o->word + o->dwords + i;
+      if (n && pwrd < b->segs[o->seg].words)
+        drop_ptr(b, o->seg, pwrd, 0);
+    }
+  } else if (o->kind == CAPNP_PK_LIST && o->esize == CAPNP_SZ_COMPOSITE) {
+    uint64_t tag;
+    uint16_t dw, pw;
+    size_t step, i, elems;
+    n = (size_t)o->count + 1u;
+    if (o->word >= b->segs[o->seg].words) {
+      o->live = 0;
+      return CAPNP_ERR_BOUNDS;
+    }
+    tag = load_w(b, o->seg, o->word);
+    dw = capnp_wp_struct_dwords(tag);
+    pw = capnp_wp_struct_pwords(tag);
+    step = (size_t)dw + pw;
+    elems = step ? (size_t)o->count / step : 0;
+    for (i = 0; i < elems; i++) {
+      uint16_t p;
+      size_t base = o->word + 1u + i * step;
+      for (p = 0; p < pw; p++) {
+        size_t pwrd = base + dw + p;
+        if (pwrd < b->segs[o->seg].words)
+          drop_ptr(b, o->seg, pwrd, 0);
+      }
+    }
+  } else if (o->kind == CAPNP_PK_LIST) {
+    if (list_nwords(o->esize, o->count, &n)) {
+      o->live = 0;
+      return CAPNP_ERR_KIND;
+    }
+    if (o->esize == CAPNP_SZ_PTR) {
+      uint32_t i;
+      for (i = 0; i < o->count; i++) {
+        size_t pwrd = o->word + i;
+        if (pwrd < b->segs[o->seg].words)
+          drop_ptr(b, o->seg, pwrd, 0);
+      }
+    }
+  } else {
+    o->live = 0;
+    return CAPNP_ERR_KIND;
+  }
+  if (n)
+    zero_words(b, o->seg, o->word, n);
+  reclaim_tail(b, o->seg, o->word, n);
+  o->live = 0;
+  return CAPNP_OK;
+}
+
 int capnp_builder_adopt(const capnp_bptr_t *slot, capnp_orphan_t *o) {
   int rc;
   if (!slot || !slot->b || !o || !o->live || o->b != slot->b)

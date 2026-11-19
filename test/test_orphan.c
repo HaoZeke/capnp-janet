@@ -485,6 +485,34 @@ static void test_adopt_zeroes_occupied(void) {
   capnp_message_free(&m);
 }
 
+/* An orphan that is freed rather than adopted must not keep its text. */
+static void test_orphan_free_zeroes(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body, slot, obody;
+  capnp_orphan_t orphan;
+  uint8_t *flat = NULL;
+  size_t n = 0;
+
+  capnp_builder_init(&b);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "of root");
+  check(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "of body");
+  check(capnp_builder_set_text(&body, 0, 0, "keep", 4) == CAPNP_OK, "of keep");
+  check(capnp_builder_new_orphan_struct(&b, 2, 1, &orphan, &obody) == CAPNP_OK,
+        "of orphan");
+  memcpy(b.segs[obody.seg].data + obody.word * 8, "DATAWORD_SECRET!", 16);
+  check(capnp_builder_set_text(&obody, 2, 0, "SECRET_ORPHAN", 13) == CAPNP_OK,
+        "of secret");
+  check(capnp_builder_orphan_free(&orphan) == CAPNP_OK, "of free");
+  check(capnp_builder_slot(&body, 0, 0, &slot) == CAPNP_OK, "of slot");
+  check(capnp_builder_adopt(&slot, &orphan) == CAPNP_ERR_ARG, "of dead");
+  check(capnp_builder_serialize(&b, &flat, &n) == CAPNP_OK, "of ser");
+  capnp_builder_free(&b);
+  check(!contains_bytes(flat, n, "DATAWORD_SECRET!"), "of data gone");
+  check(!contains_bytes(flat, n, "SECRET_ORPHAN"), "of secret gone");
+  check(contains_bytes(flat, n, "keep"), "of keep stays");
+  free(flat);
+}
+
 int main(void) {
   test_adopt_matches_direct();
   test_list_orphan_roundtrip();
@@ -499,6 +527,7 @@ int main(void) {
   test_empty_list_after_reclaim();
   test_zero_list_past_end();
   test_adopt_zeroes_occupied();
+  test_orphan_free_zeroes();
   if (g_fail) {
     fprintf(stderr, "%d orphan checks failed\n", g_fail);
     return 1;

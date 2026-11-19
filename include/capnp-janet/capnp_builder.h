@@ -178,6 +178,9 @@ CAPNP_JANET_EXPORT int capnp_builder_new_orphan_struct_list(
     uint16_t elem_pwords, capnp_orphan_t *o, capnp_bptr_t *first);
 CAPNP_JANET_EXPORT int capnp_builder_adopt(const capnp_bptr_t *slot,
                                            capnp_orphan_t *o);
+/* Zero the orphan's words and drop its pointer children. The orphan
+ * is not live afterwards, and adopt of it fails. */
+CAPNP_JANET_EXPORT int capnp_builder_orphan_free(capnp_orphan_t *o);
 CAPNP_JANET_EXPORT int capnp_builder_disown(const capnp_bptr_t *slot,
                                             capnp_orphan_t *o);
 
