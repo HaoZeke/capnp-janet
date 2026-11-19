@@ -464,6 +464,34 @@ static int cmd_canon(const char *msg_path, const char *out) {
   return 0;
 }
 
+static int cmd_reject(const char *req, const char *type, const char *which,
+                       const char *text, const char *needle) {
+  capnp_dyn_t *d = NULL;
+  uint8_t *reqb = NULL, *msg = NULL;
+  size_t rn = 0, mn = 0;
+  int json = strcmp(which, "json") == 0;
+  int rc;
+  const char *err;
+  if (load_file(req, &reqb, &rn))
+    return 1;
+  if (capnp_dyn_init(&d, reqb, rn) != CAPNP_OK) {
+    free(reqb);
+    return 1;
+  }
+  free(reqb);
+  rc = json ? capnp_dyn_decode_json(d, type, text, strlen(text), &msg, &mn)
+            : capnp_dyn_decode_text(d, type, text, strlen(text), &msg, &mn);
+  err = capnp_dyn_error(d);
+  free(msg);
+  if (rc == CAPNP_OK || !err || !strstr(err, needle)) {
+    fprintf(stderr, "reject %s: rc=%d err=%s\n", which, rc, err ? err : "");
+    capnp_dyn_free(d);
+    return 1;
+  }
+  capnp_dyn_free(d);
+  return 0;
+}
+
 static int cmd_grow(const char *req, const char *msg_path) {
   capnp_dyn_t *d = NULL;
   capnp_message_t m = {0};
@@ -524,6 +552,8 @@ int main(int argc, char **argv) {
     return cmd_canon(argv[2], argv[3]);
   if (argc == 4 && strcmp(argv[1], "grow") == 0)
     return cmd_grow(argv[2], argv[3]);
+  if (argc == 7 && strcmp(argv[1], "reject") == 0)
+    return cmd_reject(argv[2], argv[3], argv[4], argv[5], argv[6]);
   fprintf(stderr, "usage: test_dyn <mode> ...\n");
   return 2;
 }

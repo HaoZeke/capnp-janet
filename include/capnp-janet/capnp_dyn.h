@@ -25,6 +25,10 @@ CAPNP_JANET_EXPORT int capnp_dyn_init(capnp_dyn_t **out, const uint8_t *request,
                                       size_t len);
 CAPNP_JANET_EXPORT void capnp_dyn_free(capnp_dyn_t *d);
 
+/* Empty string when the last decode succeeded or no decode has run.
+ * Otherwise a short message that names the field or token. */
+CAPNP_JANET_EXPORT const char *capnp_dyn_error(const capnp_dyn_t *d);
+
 CAPNP_JANET_EXPORT int capnp_dyn_get_bool(const capnp_dyn_t *d, const capnp_ptr_t *s,
                                           const char *type_name, const char *field,
                                           int *out);

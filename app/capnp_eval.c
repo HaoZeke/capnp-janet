@@ -711,6 +711,8 @@ static int run_convert(const capnp_dyn_t *dyn, const char *type_name,
                                                clen, &msg_bytes, &mlen);
       if (rc != CAPNP_OK ||
           capnp_message_from_flat(&m, msg_bytes, mlen) != CAPNP_OK) {
+        if (rc != CAPNP_OK && capnp_dyn_error(dyn)[0])
+          fprintf(stderr, "capnp-eval: %s\n", capnp_dyn_error(dyn));
         free(msg_bytes);
         free(in_buf);
         return 1;

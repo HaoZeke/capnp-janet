@@ -165,4 +165,12 @@ capnp encode "$SCHEMA" Conform >"$TMP/grow.bin" <<'EOF'
 EOF
 "$BIN" grow "$TMP/request.bin" "$TMP/grow.bin"
 
+"$BIN" reject "$TMP/request.bin" Conform text '(tiny = 1, tiny = 2)' tiny
+"$BIN" reject "$TMP/request.bin" Conform json '{"tiny":1,"tiny":2}' tiny
+"$BIN" reject "$TMP/request.bin" Conform text '(nope = 1)' nope
+"$BIN" reject "$TMP/request.bin" Conform json '{"nope":1,"nope":2}' nope
+"$BIN" reject "$TMP/request.bin" Conform text '(tiny = 1) junk' junk
+printf '%s\n' '{"tiny":1,"nope":9}' >"$TMP/unk.json"
+"$BIN" json-decode "$TMP/request.bin" "$TMP/unk.json" "$TMP/unk.bin"
+
 echo "ok dyn"

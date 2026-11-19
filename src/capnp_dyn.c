@@ -150,6 +150,7 @@ struct capnp_dyn {
   dyn_enum_t *enums;
   uint32_t nenums;
   uint32_t ecap;
+  char err[384];
 };
 
 static int buf_add(buf_t *b, const char *s, size_t n) {
@@ -672,6 +673,39 @@ int capnp_dyn_init(capnp_dyn_t **out, const uint8_t *request, size_t len) {
   }
   *out = d;
   return CAPNP_OK;
+}
+
+static void dyn_set_err(const capnp_dyn_t *d, const char *msg) {
+  capnp_dyn_t *w = (capnp_dyn_t *)d;
+  if (!w)
+    return;
+  snprintf(w->err, sizeof(w->err), "%s", msg ? msg : "");
+}
+
+static void dyn_err_text(const capnp_dyn_t *d, const char *what, const char *text,
+                         size_t n) {
+  char tok[49];
+  size_t i;
+  capnp_dyn_t *w = (capnp_dyn_t *)d;
+  if (!w)
+    return;
+  if (n > sizeof(tok) - 1)
+    n = sizeof(tok) - 1;
+  for (i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)text[i];
+    tok[i] = (c < 32 || c == '"' || c == '\'') ? '?' : (char)c;
+  }
+  tok[n] = 0;
+  if (n == 0)
+    snprintf(w->err, sizeof(w->err), "%s", what);
+  else
+    snprintf(w->err, sizeof(w->err), "%s: %s", what, tok);
+}
+
+const char *capnp_dyn_error(const capnp_dyn_t *d) {
+  if (!d || !d->err[0])
+    return "";
+  return d->err;
 }
 
 void capnp_dyn_free(capnp_dyn_t *d) {
@@ -5281,11 +5315,26 @@ static int build_struct_from_vnode(const capnp_dyn_t *d,
   if (!json) {
     for (i = 0; i < v->count; i++) {
       const vnode_t *kv = v->kids[i];
-      const dyn_field_t *f = find_field(st, kv->key ? kv->key : "");
-      if (!f)
+      const char *key = kv->key ? kv->key : "";
+      const dyn_field_t *f;
+      uint32_t j;
+      for (j = 0; j < i; j++) {
+        const char *prev = v->kids[j]->key ? v->kids[j]->key : "";
+        if (strcmp(prev, key) == 0) {
+          dyn_err_text(d, "duplicate field", key, strlen(key));
+          return -1;
+        }
+      }
+      f = find_field(st, key);
+      if (!f) {
+        dyn_err_text(d, "unknown field", key, strlen(key));
         return -1;
-      if (build_field_from_vnode(d, st, f, env, kv, body, 0, depth + 1))
+      }
+      if (build_field_from_vnode(d, st, f, env, kv, body, 0, depth + 1)) {
+        if (!((const capnp_dyn_t *)d)->err[0])
+          dyn_err_text(d, "bad value", key, strlen(key));
         return -1;
+      }
     }
     return 0;
   }
@@ -5297,6 +5346,18 @@ static int build_struct_from_vnode(const capnp_dyn_t *d,
     memset(&unions_seen, 0, sizeof(unions_seen));
     if (v->count && !done)
       return -1;
+    for (i = 0; i < v->count; i++) {
+      const char *key = v->kids[i]->key ? v->kids[i]->key : "";
+      uint32_t j;
+      for (j = 0; j < i; j++) {
+        const char *prev = v->kids[j]->key ? v->kids[j]->key : "";
+        if (strcmp(prev, key) == 0) {
+          dyn_err_text(d, "duplicate field", key, strlen(key));
+          free(done);
+          return -1;
+        }
+      }
+    }
     while (remaining > 0) {
       uint32_t progressed = 0;
       for (i = 0; i < v->count; i++) {
@@ -5326,6 +5387,26 @@ static int build_struct_from_vnode(const capnp_dyn_t *d,
   }
 }
 
+static void dyn_err_scan(const capnp_dyn_t *d, const char *what, const scan_t *sc) {
+  const char *s;
+  size_t n = 0;
+  if (!sc || sc->i >= sc->n) {
+    dyn_set_err(d, what);
+    return;
+  }
+  s = sc->s + sc->i;
+  while (n < 48 && sc->i + n < sc->n) {
+    char c = s[n];
+    if (c == 0 || c == ' ' || c == '\n' || c == '\t' || c == '\r' || c == ',' ||
+        c == ')' || c == '(' || c == '}' || c == '{' || c == ']')
+      break;
+    n++;
+  }
+  if (n == 0)
+    n = 1;
+  dyn_err_text(d, what, s, n);
+}
+
 static int decode_root_impl(const capnp_dyn_t *d, const char *type_name,
                             const char *text, size_t len, int json,
                             uint8_t **out, size_t *out_len) {
@@ -5341,8 +5422,11 @@ static int decode_root_impl(const capnp_dyn_t *d, const char *type_name,
     return CAPNP_ERR_ARG;
   *out = NULL;
   *out_len = 0;
-  if (resolve_root_type_name(d, type_name, &rt, &st) != CAPNP_OK)
+  dyn_set_err(d, "");
+  if (resolve_root_type_name(d, type_name, &rt, &st) != CAPNP_OK) {
+    dyn_set_err(d, "unknown type");
     return CAPNP_ERR_KIND;
+  }
 
   memset(&sc, 0, sizeof(sc));
   sc.s = text;
@@ -5350,17 +5434,20 @@ static int decode_root_impl(const capnp_dyn_t *d, const char *type_name,
   if (json) {
     root_v = parse_json_val(&sc);
     if (!root_v || jpeek(&sc) != 0 || root_v->kind != VK_OBJ) {
+      dyn_err_scan(d, "json", &sc);
       free_vnode(root_v);
       free_rtype(&rt);
       return CAPNP_ERR_KIND;
     }
   } else {
     if (tpeek(&sc) != '(') {
+      dyn_err_scan(d, "text", &sc);
       free_rtype(&rt);
       return CAPNP_ERR_KIND;
     }
     root_v = parse_text_expr(&sc);
     if (!root_v || tpeek(&sc) != 0 || root_v->kind != VK_OBJ) {
+      dyn_err_scan(d, "text", &sc);
       free_vnode(root_v);
       free_rtype(&rt);
       return CAPNP_ERR_KIND;
@@ -5376,6 +5463,8 @@ static int decode_root_impl(const capnp_dyn_t *d, const char *type_name,
     return CAPNP_ERR_ALLOC;
   }
   if (build_struct_from_vnode(d, st, &rt.brand, root_v, &body, json, 0)) {
+    if (!d->err[0])
+      dyn_set_err(d, "parse error");
     capnp_builder_free(&b);
     free_vnode(root_v);
     free_rtype(&rt);
