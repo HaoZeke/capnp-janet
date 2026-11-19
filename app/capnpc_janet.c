@@ -1047,7 +1047,7 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
   for (uint32_t ai = 0; ai < nf; ai++) {
     capnp_ptr_t f, anns;
     char fname[128];
-    char title[360];
+    char title[512];
     if (capnp_list_getp(&fields, ai, &f) != CAPNP_OK)
       continue;
     if (capnp_getp(&f, 1, &anns) != CAPNP_OK || anns.kind != CAPNP_PK_LIST)

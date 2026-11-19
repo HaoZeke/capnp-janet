@@ -1,6 +1,8 @@
 # Client vat against a capnp-C++ Adder on 127.0.0.1:<port>.
 (import capnp)
 
+(unless (get (dyn :args) 1)
+  (os/exit 0))
 (def port (scan-number ((dyn :args) 1)))
 (def adder-id (int/u64 "0xea01e10cbc414411"))
 

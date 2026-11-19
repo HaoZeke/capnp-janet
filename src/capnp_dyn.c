@@ -2447,15 +2447,6 @@ static int gather_json_fields(const capnp_dyn_t *d, const dyn_struct_t *st,
       }
     }
     if (uf) {
-      /* Note: In C++ AnnotatedHandler::gatherForEncode:
-       * KJ_IF_MAYBE(which, reader.which()) { ... }
-       * Wait! What if no $Json annotations are used, vs AnnotatedHandler?
-       * In `capnp convert binary:json`, `codec.handleByAnnotation(rootType)` is ALWAYS called!
-       * Wait: in AnnotatedHandler::gatherForEncode (json.c++:1245), `reader.which()` is ALWAYS non-null if discriminant < unionFields.size()!
-       * Wait: why did `Conform` with `quiet @9 :Void` (discriminant 0) print `"quiet": null` in `capnp convert binary:json`?!
-       * Because in `AnnotatedHandler::gatherForEncode` (json.c++:1245), it does NOT skip `discriminantValue == 0 && !has(*field)`!
-       * Wait: what about in `JsonCodec::encode` (when `handleByAnnotation` is NOT called)?
-       * Wait: let's check what `capnp convert binary:json` vs `json-test.c++` does! */
       if (tag_name) {
         flat_json_field_t tag_item;
         memset(&tag_item, 0, sizeof(tag_item));

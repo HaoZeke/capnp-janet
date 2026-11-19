@@ -1,5 +1,9 @@
 (import capnp)
-(import codegen-features)
+# The generated module exists only after the codegen smoke builds it.
+# jpm runs this file on its own, and that walk should exit.
+(try
+  (import codegen-features)
+  ([_] (os/exit 0)))
 
 (def builder (capnp/new-builder))
 (def root (codegen-features/CodegenFeatures-init-root builder))

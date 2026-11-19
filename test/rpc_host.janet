@@ -1,5 +1,10 @@
 # Listen on TCP and implement Adder for a capnp-C++ client.
+# jpm runs every script under test/. Without an explicit request this
+# exits, so that walk does not block in accept.
 (import capnp)
+
+(unless (find |(= $ "serve") (dyn :args))
+  (os/exit 0))
 
 (def [listener port] (capnp/rpc-listen-tcp "127.0.0.1" 0))
 (print port)

@@ -17,9 +17,14 @@ export LD_LIBRARY_PATH="$MODDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 janet "$ROOT/test/rpc_borrow.janet"
 janet "$ROOT/test/rpc_level3.janet"
 janet "$ROOT/test/builder_scope.janet"
+# These scripts block or error when jpm runs them with no arguments.
+janet "$ROOT/test/rpc_host.janet"
+janet "$ROOT/test/rpc_client.janet"
+janet "$ROOT/test/rpc_stream.janet"
+janet "$ROOT/test/generated_builder_smoke.janet"
 
 PORTFILE=$(mktemp)
-janet "$ROOT/test/rpc_host.janet" >"$PORTFILE" &
+janet "$ROOT/test/rpc_host.janet" serve >"$PORTFILE" &
 HPID=$!
 trap 'kill $HPID 2>/dev/null || true; rm -f "$PORTFILE"' EXIT
 PORT=""

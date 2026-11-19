@@ -18,6 +18,10 @@ if ! command -v capnp >/dev/null 2>&1; then
 fi
 INC="$(dirname "$(dirname "$(command -v capnp)")")/include"
 TMP=$(mktemp -d)
+if grep -q 'Wait!' "$ROOT/src/capnp_dyn.c"; then
+  echo "encoder still has a scratch comment" >&2
+  exit 1
+fi
 trap 'rm -rf "$TMP"' EXIT
 
 # -o- is the compiler's schema parse: a CodeGeneratorRequest on stdout.

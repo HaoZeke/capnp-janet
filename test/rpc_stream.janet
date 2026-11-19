@@ -1,6 +1,8 @@
 # Stream three add calls at the capnp-C++ Adder.
 (import capnp)
 
+(unless (get (dyn :args) 1)
+  (os/exit 0))
 (def port (scan-number ((dyn :args) 1)))
 (def adder (int/u64 "0xea01e10cbc414411"))
 (def conn (capnp/rpc-dial-tcp "127.0.0.1" port))

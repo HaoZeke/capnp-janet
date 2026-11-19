@@ -85,8 +85,12 @@ static int parse_flat(capnp_message_t *m, const uint8_t *data, size_t len,
   nsegs = capnp_load_le32(data) + 1u;
   if (nsegs == 0 || nsegs > CAPNP_MAX_SEGMENTS)
     return CAPNP_ERR_FRAMING;
+  /* A 32-bit size_t cannot hold a segment table past SIZE_MAX/4.
+   * On a wider size_t the comparison is out of range for nsegs. */
+#if UINT32_MAX > SIZE_MAX / 4u
   if ((size_t)nsegs > (SIZE_MAX / 4u) - 1u)
     return CAPNP_ERR_FRAMING;
+#endif
   table_bytes = 4u + 4u * (size_t)nsegs;
   if (table_bytes % 8u != 0)
     table_bytes += 4u; /* pad */
