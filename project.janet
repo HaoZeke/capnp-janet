@@ -8,7 +8,8 @@
 
 (declare-native
   :name "capnp"
-  :cflags @["-std=c11" "-Iinclude"]
+  :cflags @["-std=c11" "-Iinclude" "-pthread"]
+  :lflags @["-pthread"]
   :source @["src/janet_mod.c"
             "src/capnp_message.c"
             "src/capnp_builder.c"

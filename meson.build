@@ -34,6 +34,7 @@ endif
 
 # dlsym lives in libdl on glibc before 2.34 and in libc after that.
 libdl = cc.find_library('dl', required: false)
+threads = dependency('threads')
 
 lib_sources = files(
   'src/capnp_message.c',
@@ -59,6 +60,7 @@ capnp_janet_lib = library(
   'capnp_janet',
   lib_sources,
   include_directories: inc,
+  dependencies: threads,
   c_args: capnp_janet_consumer_args + ['-DCAPNP_JANET_BUILDING'],
   install: true,
 )
@@ -332,7 +334,7 @@ test('rpc_client', test_rpc_client)
 test_transport = executable(
   'test_transport',
   'test/test_transport.c',
-  dependencies: capnp_janet_dep,
+  dependencies: [capnp_janet_dep, threads],
   c_args: ['-D_POSIX_C_SOURCE=200809L'],
 )
 test('transport', test_transport)

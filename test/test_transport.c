@@ -10,7 +10,10 @@
 #include <capnp-janet/capnp_transport.h>
 
 #include <dirent.h>
+#include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <semaphore.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -414,7 +417,9 @@ static void test_write_pipe(void) {
   int p[2];
   uint8_t byte = 7, got = 0;
   check(pipe(p) == 0, "pipe");
+  errno = EAGAIN;
   check(capnp_write_all(p[1], &byte, 1) == CAPNP_OK, "write pipe");
+  check(errno == EAGAIN, "pipe write preserves errno");
   check(read(p[0], &got, 1) == 1 && got == 7, "pipe byte");
   close(p[0]);
   close(p[1]);
@@ -436,6 +441,246 @@ static void test_write_closed_socket(void) {
   close(sv[0]);
 }
 
+/* The pipe fallback uses write(). A closed read end must return an
+ * error on Linux too, where SO_NOSIGPIPE is absent. */
+static void test_write_closed_pipe(void) {
+  int p[2];
+  uint8_t byte = 9;
+  struct sigaction sa, old;
+  check(pipe(p) == 0, "closed pipe");
+  close(p[0]);
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = SIG_DFL;
+  check(sigaction(SIGPIPE, &sa, &old) == 0, "sigpipe default pipe");
+  errno = 0;
+  check(capnp_write_all(p[1], &byte, 1) != CAPNP_OK && errno == EPIPE,
+        "closed pipe returns EPIPE");
+  sigaction(SIGPIPE, &old, NULL);
+  close(p[1]);
+}
+
+static void test_write_pending_sigpipe(void) {
+  int p[2], signo;
+  uint8_t byte = 3;
+  sigset_t block, old, pending;
+  struct sigaction sa, old_sa;
+  int pending_after;
+  check(pipe(p) == 0, "pending pipe");
+  close(p[0]);
+  sigemptyset(&block);
+  sigaddset(&block, SIGPIPE);
+  check(pthread_sigmask(SIG_BLOCK, &block, &old) == 0, "block sigpipe");
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = SIG_DFL;
+  check(sigaction(SIGPIPE, &sa, &old_sa) == 0, "pending sigpipe default");
+  check(pthread_kill(pthread_self(), SIGPIPE) == 0, "queue sigpipe");
+  check(sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1,
+        "sigpipe pending before write");
+  errno = 0;
+  check(capnp_write_all(p[1], &byte, 1) != CAPNP_OK && errno == EPIPE,
+        "pending closed pipe returns EPIPE");
+  pending_after = sigpending(&pending) == 0 &&
+                  sigismember(&pending, SIGPIPE) == 1;
+  check(pending_after, "sigpipe remains pending after write");
+  if (pending_after)
+    check(sigwait(&block, &signo) == 0 && signo == SIGPIPE, "consume sigpipe");
+  sigaction(SIGPIPE, &old_sa, NULL);
+  check(pthread_sigmask(SIG_SETMASK, &old, NULL) == 0, "restore sigpipe");
+  close(p[1]);
+}
+
+#if !defined(__APPLE__) && !defined(__OpenBSD__)
+/* sigpending() is only the union, so a process-directed SIGPIPE and the
+ * write's thread-directed one both look like one pending signal. Count
+ * them by dequeuing. */
+static int closed_write_fd(void) {
+  int p[2];
+  if (pipe(p) != 0)
+    return -1;
+  close(p[0]);
+  return p[1];
+}
+
+static int drain_sigpipe(void) {
+  sigset_t set;
+  struct timespec ts;
+  int n = 0;
+  sigemptyset(&set);
+  sigaddset(&set, SIGPIPE);
+  ts.tv_sec = 0;
+  ts.tv_nsec = 0;
+  while (sigtimedwait(&set, NULL, &ts) == SIGPIPE) {
+    n++;
+    if (n > 8)
+      break;
+  }
+  return n;
+}
+
+static void block_sigpipe(sigset_t *block, sigset_t *old) {
+  sigemptyset(block);
+  sigaddset(block, SIGPIPE);
+  check(pthread_sigmask(SIG_BLOCK, block, old) == 0, "block sigpipe set");
+}
+
+static void test_write_process_sigpipe(void) {
+  sigset_t block, old, pending;
+  struct sigaction sa, old_sa;
+  uint8_t byte = 3;
+  int fd, n;
+  block_sigpipe(&block, &old);
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = SIG_DFL;
+  check(sigaction(SIGPIPE, &sa, &old_sa) == 0, "process sigpipe default");
+
+  fd = closed_write_fd();
+  check(fd >= 0, "process pipe");
+  check(pthread_kill(pthread_self(), SIGPIPE) == 0, "queue thread sigpipe");
+  errno = 0;
+  check(capnp_write_all(fd, &byte, 1) != CAPNP_OK && errno == EPIPE,
+        "thread sigpipe write returns EPIPE");
+  close(fd);
+  n = drain_sigpipe();
+  check(n == 1, "thread sigpipe still exactly one after write");
+
+  fd = closed_write_fd();
+  check(fd >= 0, "process pipe 2");
+  check(kill(getpid(), SIGPIPE) == 0, "queue process sigpipe");
+  check(sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1,
+        "process sigpipe pending before write");
+  errno = 0;
+  check(capnp_write_all(fd, &byte, 1) != CAPNP_OK && errno == EPIPE,
+        "process sigpipe write returns EPIPE");
+  close(fd);
+  n = drain_sigpipe();
+  check(n == 1, "process sigpipe still exactly one after write");
+
+  sa.sa_handler = SIG_IGN;
+  check(sigaction(SIGPIPE, &sa, NULL) == 0, "sigpipe ignore");
+  fd = closed_write_fd();
+  check(fd >= 0, "ignored process pipe");
+  check(kill(getpid(), SIGPIPE) == 0, "queue ignored process sigpipe");
+  errno = 0;
+  check(capnp_write_all(fd, &byte, 1) != CAPNP_OK && errno == EPIPE,
+        "ignored process sigpipe write returns EPIPE");
+  close(fd);
+  n = drain_sigpipe();
+  check(n == 1, "ignored process sigpipe still exactly one after write");
+
+  sigaction(SIGPIPE, &old_sa, NULL);
+  check(pthread_sigmask(SIG_SETMASK, &old, NULL) == 0,
+        "restore process sigpipe mask");
+}
+
+static volatile sig_atomic_t g_waiter_stop;
+static volatile sig_atomic_t g_writer_stop;
+static volatile int g_waiter_hits;
+static volatile long g_writer_writes;
+static sem_t g_waiter_got;
+static sem_t g_waiter_ready;
+static sigset_t g_sigpipe_set;
+
+static void *sigpipe_waiter(void *arg) {
+  (void)arg;
+  sem_post(&g_waiter_ready);
+  while (!g_waiter_stop) {
+    struct timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = 50 * 1000 * 1000;
+    if (sigtimedwait(&g_sigpipe_set, NULL, &ts) == SIGPIPE) {
+      g_waiter_hits++;
+      sem_post(&g_waiter_got);
+    }
+  }
+  return NULL;
+}
+
+static void *sigpipe_writer(void *arg) {
+  uint8_t byte = 1;
+  (void)arg;
+  while (!g_writer_stop) {
+    int fd = closed_write_fd();
+    if (fd < 0)
+      break;
+    capnp_write_all(fd, &byte, 1);
+    close(fd);
+    g_writer_writes++;
+  }
+  return NULL;
+}
+
+static void test_write_sigpipe_two_threads(void) {
+  sigset_t block, old;
+  struct sigaction sa, old_sa;
+  pthread_t waiter, writer;
+  struct timespec pause, deadline;
+  uint8_t byte = 1;
+  int i, lost, nsend;
+  block_sigpipe(&block, &old);
+  g_sigpipe_set = block;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = SIG_DFL;
+  check(sigaction(SIGPIPE, &sa, &old_sa) == 0, "two thread sigpipe default");
+  check(sem_init(&g_waiter_got, 0, 0) == 0, "waiter sem");
+  check(sem_init(&g_waiter_ready, 0, 0) == 0, "ready sem");
+  g_waiter_stop = 0;
+  g_writer_stop = 0;
+  g_waiter_hits = 0;
+  g_writer_writes = 0;
+  check(pthread_create(&waiter, NULL, sigpipe_waiter, NULL) == 0,
+        "create waiter");
+  check(sem_wait(&g_waiter_ready) == 0, "waiter ready");
+  pause.tv_sec = 0;
+  pause.tv_nsec = 100 * 1000 * 1000;
+  nanosleep(&pause, NULL);
+  for (i = 0; i < 100; i++) {
+    int fd = closed_write_fd();
+    check(fd >= 0, "two thread pipe");
+    capnp_write_all(fd, &byte, 1);
+    close(fd);
+  }
+  pause.tv_nsec = 200 * 1000 * 1000;
+  nanosleep(&pause, NULL);
+  check(g_waiter_hits == 0,
+        "waiter saw no SIGPIPE from closed-pipe writes");
+  check(kill(getpid(), SIGPIPE) == 0, "explicit process sigpipe");
+  clock_gettime(CLOCK_REALTIME, &deadline);
+  deadline.tv_sec += 2;
+  check(sem_timedwait(&g_waiter_got, &deadline) == 0 && g_waiter_hits == 1,
+        "waiter received the explicit process SIGPIPE");
+
+  g_waiter_hits = 0;
+  check(pthread_create(&writer, NULL, sigpipe_writer, NULL) == 0,
+        "create writer");
+  pause.tv_nsec = 1000 * 1000;
+  for (i = 0; i < 5000 && g_writer_writes == 0; i++)
+    nanosleep(&pause, NULL);
+  check(g_writer_writes > 0, "writer running before the signals start");
+  lost = 0;
+  nsend = 40;
+  for (i = 0; i < nsend && !lost; i++) {
+    struct timespec step;
+    check(kill(getpid(), SIGPIPE) == 0, "stress process sigpipe");
+    clock_gettime(CLOCK_REALTIME, &step);
+    step.tv_sec += 2;
+    if (sem_timedwait(&g_waiter_got, &step) != 0)
+      lost++;
+  }
+  g_writer_stop = 1;
+  pthread_join(writer, NULL);
+  g_waiter_stop = 1;
+  pthread_join(waiter, NULL);
+  check(lost == 0 && g_waiter_hits == nsend,
+        "process SIGPIPE not swallowed beside closed-pipe writes");
+  sem_destroy(&g_waiter_got);
+  sem_destroy(&g_waiter_ready);
+  sigaction(SIGPIPE, &old_sa, NULL);
+  drain_sigpipe();
+  check(pthread_sigmask(SIG_SETMASK, &old, NULL) == 0,
+        "restore two thread sigpipe mask");
+}
+#endif
+
 int main(int argc, char **argv) {
   if (argc >= 3 && strcmp(argv[1], "dial") == 0)
     return dial_peer((uint16_t)atoi(argv[2]));
@@ -447,6 +692,12 @@ int main(int argc, char **argv) {
   test_size_to_i32();
   test_write_pipe();
   test_write_closed_socket();
+  test_write_closed_pipe();
+  test_write_pending_sigpipe();
+#if !defined(__APPLE__) && !defined(__OpenBSD__)
+  test_write_process_sigpipe();
+  test_write_sigpipe_two_threads();
+#endif
   test_unix_replaces_only_socket();
   test_unix_keeps_live_socket();
   test_link_setup_closes_fd();

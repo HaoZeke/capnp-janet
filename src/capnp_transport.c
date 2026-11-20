@@ -5,15 +5,114 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <pthread.h>
+#include <signal.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <time.h>
 #include <unistd.h>
+
+/* A pipe needs write(), which has no MSG_NOSIGNAL equivalent.
+ *
+ * kj 1.4.0 does not mask SIGPIPE around a write.
+ * UnixEventPort::ignoreSigpipe() installs signal(SIGPIPE, SIG_IGN)
+ * once (src/kj/async-unix.c++:218-231). The write paths then call
+ * ::writev or ::sendmsg with a zero flags word (src/kj/io.c++:450,
+ * src/kj/async-io-unix.c++:778, src/kj/async-io-unix.c++:815). An
+ * ignored signal that is not blocked is discarded, so those writes
+ * do not leave SIGPIPE pending. Copying that into this library would
+ * either change the host disposition or, while the caller already
+ * blocks SIGPIPE, still queue the write: a blocked signal is pending
+ * even when its disposition is SIG_IGN. There is no portable way to
+ * tell the write's signal from one already pending for the process.
+ * sigpending() is the union of the two sets, and on Linux both
+ * kill() and write() report si_code SI_USER.
+ *
+ * Where sigtimedwait() exists, it dequeues a thread-pending signal
+ * before a process-pending one. The write's SIGPIPE is thread
+ * directed. After EPIPE we dequeue one. If the pending set is then
+ * empty, the write coalesced with a signal this thread already had
+ * and we put that signal back. If a signal is still pending, the one
+ * removed was the write's and the process-directed signal stays.
+ * POSIX does not require that order. kj does not rely on it; its
+ * epoll poll uses sigtimedwait only to take signals the event loop
+ * itself is waiting for (src/kj/async-unix.c++:695). With both a
+ * thread and a process signal already pending, one is dropped. If
+ * another thread takes the process-directed signal while the write
+ * runs, one extra is raised.
+ *
+ * macOS and OpenBSD have no sigtimedwait (src/kj/async-unix.c++:43-46).
+ * A blocking sigwait can hang if another thread takes the
+ * process-directed signal first, the race kj describes at
+ * src/kj/async-unix.c++:959-963. On those platforms a SIGPIPE that
+ * was already pending is left untouched, so a process-directed
+ * signal can still be joined by the write's thread-directed one.
+ * pthread_sigmask, not sigprocmask, is what kj uses to change one
+ * thread's mask (src/kj/async-unix.c++:192).
+ */
+#if !defined(__APPLE__) && !defined(__OpenBSD__)
+static int sigpipe_pending(void) {
+  sigset_t pending;
+  if (sigpending(&pending) != 0)
+    return 0;
+  return sigismember(&pending, SIGPIPE) == 1;
+}
+#endif
+
+static void release_write_sigpipe(const sigset_t *block, int had) {
+#if !defined(__APPLE__) && !defined(__OpenBSD__)
+  struct timespec ts;
+  int signo;
+  ts.tv_sec = 0;
+  ts.tv_nsec = 0;
+  do {
+    signo = sigtimedwait(block, NULL, &ts);
+  } while (signo < 0 && errno == EINTR);
+  if (signo != SIGPIPE)
+    return;
+  if (had && !sigpipe_pending())
+    pthread_kill(pthread_self(), SIGPIPE);
+#else
+  int signo;
+  sigset_t pending;
+  if (had)
+    return;
+  if (sigpending(&pending) != 0 || sigismember(&pending, SIGPIPE) != 1)
+    return;
+  while (sigwait(block, &signo) == EINTR)
+    ;
+#endif
+}
+
+static ssize_t write_nosigpipe(int fd, const void *buf, size_t count) {
+  sigset_t block, old, pending;
+  ssize_t n;
+  int saved, had_sigpipe;
+  sigemptyset(&block);
+  sigaddset(&block, SIGPIPE);
+  if (pthread_sigmask(SIG_BLOCK, &block, &old) != 0)
+    return write(fd, buf, count);
+  had_sigpipe = sigpending(&pending) != 0 ||
+                sigismember(&pending, SIGPIPE) == 1;
+  n = write(fd, buf, count);
+  if (n < 0) {
+    saved = errno;
+    if (saved == EPIPE)
+      release_write_sigpipe(&block, had_sigpipe);
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    errno = saved;
+    return n;
+  }
+  pthread_sigmask(SIG_SETMASK, &old, NULL);
+  return n;
+}
 
 int capnp_write_all(int fd, const uint8_t *data, size_t len) {
   size_t off = 0;
   int flags = 0;
+  int saved_errno = errno;
 #ifdef MSG_NOSIGNAL
   flags = MSG_NOSIGNAL;
 #elif defined(SO_NOSIGPIPE)
@@ -21,9 +120,13 @@ int capnp_write_all(int fd, const uint8_t *data, size_t len) {
   setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof(one));
 #endif
   while (off < len) {
+    int saved = errno;
     ssize_t n = send(fd, data + off, len - off, flags);
-    if (n < 0 && errno == ENOTSOCK)
-      n = write(fd, data + off, len - off);
+    if (n < 0 && errno == ENOTSOCK) {
+      n = write_nosigpipe(fd, data + off, len - off);
+      if (n >= 0)
+        errno = saved;
+    }
     if (n < 0) {
       if (errno == EINTR)
         continue;
@@ -33,6 +136,7 @@ int capnp_write_all(int fd, const uint8_t *data, size_t len) {
       return CAPNP_ERR_ALLOC;
     off += (size_t)n;
   }
+  errno = saved_errno;
   return CAPNP_OK;
 }
 
