@@ -749,6 +749,25 @@ static void test_huge_counts_rejected(void) {
   capnp_builder_free(&b);
 }
 
+/* The wire list count is 29 bits, including lists that need no content. */
+static void test_wire_list_count_rejected(void) {
+  capnp_builder_t b = {0};
+  capnp_bptr_t root, body, slot;
+  capnp_orphan_t o = {0};
+
+  capnp_builder_init(&b);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "wc root");
+  check(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "wc body");
+  check(capnp_builder_slot(&body, 0, 0, &slot) == CAPNP_OK, "wc slot");
+  check(capnp_builder_new_orphan_list(
+            &b, CAPNP_SZ_VOID, CAPNP_BUILDER_MAX_SEGMENT_WORDS + 1u, &o,
+            NULL) == CAPNP_OK,
+        "wc orphan");
+  check(capnp_builder_adopt(&slot, &o) == CAPNP_ERR_BOUNDS, "wc adopt");
+  check(capnp_builder_orphan_free(&o) == CAPNP_OK, "wc free");
+  capnp_builder_free(&b);
+}
+
 /* A stale orphan referencing a freed builder must fail cleanly. */
 static void test_stale_orphan_after_builder_free(void) {
   capnp_builder_t b = {0};
@@ -919,6 +938,7 @@ int main(void) {
   test_stale_copy_after_adopt_clear_realloc();
   test_retired_orphan_keeps_no_pin();
   test_huge_counts_rejected();
+  test_wire_list_count_rejected();
   test_stale_orphan_after_builder_free();
   test_orphan_adopt_zero_list_over_tail();
   test_concurrent_zero_size_orphans();

@@ -299,6 +299,8 @@ static int write_list_ptr(capnp_builder_t *b, uint32_t slot_seg,
   uint32_t pad_seg;
   size_t pad_word;
 
+  if (count > CAPNP_BUILDER_MAX_SEGMENT_WORDS)
+    return CAPNP_ERR_BOUNDS;
   if (slot_seg == content_seg) {
     int32_t off =
         (int32_t)((int64_t)content_word - (int64_t)slot_word - 1);
