@@ -339,6 +339,13 @@ test_transport = executable(
 )
 test('transport', test_transport)
 
+test_abi_layout = executable(
+  'test_abi_layout',
+  'test/test_abi_layout.c',
+  dependencies: capnp_janet_dep,
+)
+test('abi_layout', test_abi_layout)
+
 # --- live-peer RPC interop: this vat against capnp-C++ ---------------
 #
 # Byte equality against our own encoders says nothing about whether the
@@ -490,6 +497,7 @@ if bash.found()
       test_rpc_handoff,
       test_rpc_client,
       test_transport,
+      test_abi_layout,
     ],
     workdir: meson.project_source_root(),
     timeout: 600,
@@ -497,6 +505,13 @@ if bash.found()
       'CAPNP_JANET_BUILD': meson.project_build_root(),
       'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root(),
     },
+  )
+  test(
+    'abi_diff',
+    bash,
+    args: [meson.project_source_root() / 'scripts/abi-diff.sh'],
+    workdir: meson.project_source_root(),
+    timeout: 600,
   )
 endif
 

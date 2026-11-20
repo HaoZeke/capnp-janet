@@ -32,6 +32,7 @@ bins=(
   test_rpc_handoff
   test_rpc_client
   test_transport
+  test_abi_layout
 )
 for b in "${bins[@]}"; do
   exe="$BUILD/$b"
