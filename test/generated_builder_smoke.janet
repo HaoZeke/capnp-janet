@@ -1,5 +1,91 @@
 (import capnp)
-(import codegen-features)
+
+# Compile schema/codegen-features.capnp when the plugin and capnp are
+# available, then import that module. A failed import is a failure.
+# jpm walks this file with neither tool present, and that walk exits 0.
+(defn dirname [p]
+  (def marks (string/find-all "/" p))
+  (if (empty? marks) "." (string/slice p 0 (last marks))))
+
+(defn abs-path [p]
+  (if (string/has-prefix? "/" p) p (string (os/cwd) "/" p)))
+
+(defn find-plugin []
+  (def cands @[])
+  (when-let [build (os/getenv "CAPNP_JANET_BUILD")]
+    (array/push cands (string build "/capnpc-janet")))
+  (array/push cands "build/capnpc-janet" "build-janet/capnpc-janet")
+  (var hit nil)
+  (each c cands
+    (when (and (not hit) (os/stat c))
+      (set hit (abs-path c))))
+  hit)
+
+(defn run-quiet [args &opt env]
+  (default env nil)
+  (def null (file/open "/dev/null" :w))
+  (def opts @{:out null :err null})
+  (when env (put opts :env env))
+  (try
+    (os/execute args :p opts)
+    ([_] 1)))
+
+(defn has-capnp []
+  (= 0 (run-quiet ["capnp" "--version"])))
+
+(defn module-dir []
+  (def roots @[])
+  (when-let [jp (os/getenv "JANET_PATH")]
+    (each part (string/split ":" jp)
+      (when (not (empty? part))
+        (array/push roots part))))
+  (each r @["build" "build-janet"]
+    (array/push roots r))
+  (var hit nil)
+  (each r roots
+    (when (and (not hit) (os/stat (string r "/codegen-features.janet")))
+      (set hit r)))
+  hit)
+
+(defn load-generated [dir]
+  (array/insert module/paths 0
+                 [(string dir "/:all:.janet") :source (fn [p] p)])
+  (def err
+    (try
+      (do (import codegen-features) nil)
+      ([e] e)))
+  (when err
+    (eprint err)
+    (os/exit 1)))
+
+(def plugin (find-plugin))
+(cond
+  (and plugin (has-capnp))
+  (do
+    (def here (or (dyn :current-file) "test/generated_builder_smoke.janet"))
+    (def schema (string (dirname here) "/../schema/codegen-features.capnp"))
+    (def dest (string "/tmp/capnp-janet-smoke-" (os/getpid)))
+    (os/mkdir dest)
+    (spit (string dest "/codegen-features.capnp") (slurp schema))
+    (def env (os/environ))
+    (def plugin-dir (dirname plugin))
+    (def old-ld (or (get env "LD_LIBRARY_PATH") ""))
+    (put env "LD_LIBRARY_PATH"
+         (if (empty? old-ld) plugin-dir (string plugin-dir ":" old-ld)))
+    (def back (os/cwd))
+    (os/cd dest)
+    (def rc (run-quiet ["capnp" "compile" (string "-o" plugin)
+                        "codegen-features.capnp"]
+                       env))
+    (os/cd back)
+    (when (or (not= rc 0)
+              (not (os/stat (string dest "/codegen-features.janet"))))
+      (eprint "codegen-features: capnp compile failed")
+      (os/exit 1))
+    (load-generated dest))
+  (module-dir)
+  (load-generated (module-dir))
+  (os/exit 0))
 
 (def builder (capnp/new-builder))
 (def root (codegen-features/CodegenFeatures-init-root builder))

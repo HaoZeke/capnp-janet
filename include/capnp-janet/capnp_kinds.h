@@ -2,6 +2,7 @@
 #ifndef CAPNP_JANET_KINDS_H
 #define CAPNP_JANET_KINDS_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 /* Shared-library export. MSVC only writes an import library
@@ -33,7 +34,10 @@ enum {
   CAPNP_ERR_PACKED = 7,
   CAPNP_ERR_ARG = 8,
   CAPNP_ERR_SEGMENT = 9,
-  CAPNP_ERR_IO = 10
+  CAPNP_ERR_IO = 10,
+  /* A schema value cannot describe a wire object, for example a
+   * discriminant that lands past the struct's data section. */
+  CAPNP_ERR_SCHEMA = 11
 };
 
 /* Wire pointer kinds (bits 0-1). */
@@ -65,7 +69,25 @@ enum {
 };
 
 #define CAPNP_WORD_BYTES 8u
+/* Same defaults as C++ ReaderOptions: 8 Mi words, nesting depth 64.
+ * capnp_message_init stores them on the message. A read that would pass
+ * either limit returns CAPNP_ERR_TRAVERSAL or CAPNP_ERR_DEPTH. */
 #define CAPNP_DEFAULT_TRAVERSAL_WORDS 8388608ull
 #define CAPNP_DEFAULT_DEPTH_LIMIT 64
+
+/* Double a table capacity. Rejects a cap that cannot double in uint32_t
+ * and a byte size that cannot be represented in size_t. */
+static inline int capnp_u32_grow(uint32_t cap, size_t elem, uint32_t *out_cap,
+                                 size_t *out_bytes) {
+  uint32_t ncap;
+  if (!out_cap || !out_bytes || elem == 0 || cap > UINT32_MAX / 2u)
+    return CAPNP_ERR_BOUNDS;
+  ncap = cap ? cap * 2u : 4u;
+  if ((size_t)ncap > SIZE_MAX / elem)
+    return CAPNP_ERR_BOUNDS;
+  *out_cap = ncap;
+  *out_bytes = (size_t)ncap * elem;
+  return CAPNP_OK;
+}
 
 #endif /* CAPNP_JANET_KINDS_H */

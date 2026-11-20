@@ -197,7 +197,7 @@ static int resolve_promised_answer(capnp_rpc_conn_t *c,
                                    const capnp_ptr_t *promised)
 {
   capnp_rpc_answer_t *a;
-  capnp_message_t stored;
+  capnp_message_t stored = {0};
   capnp_ptr_t root, ret, payload, cursor, table, desc, ops;
   uint32_t qid;
   int i, n, eid = -1;
@@ -571,11 +571,9 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
   if (rc == CAPNP_OK) {
-    capnp_bptr_t slot;
-    /* One data word and one pointer word covers the replies the bundled
-     * servers make; a richer server allocates inside dispatch. */
-    if (capnp_builder_slot(&payload, PAYLOAD_DW, 0, &slot) ||
-        capnp_builder_struct(&slot, 1, 1, &results))
+    /* The server allocates the result struct. A fixed 1-word body would
+     * drop every field past that, which C++ does not do. */
+    if (capnp_builder_slot(&payload, PAYLOAD_DW, 0, &results))
       rc = CAPNP_ERR_ALLOC;
     else
       rc = c->exports[eid].dispatch(c->exports[eid].server,
@@ -595,9 +593,12 @@ static void handle_release(capnp_rpc_conn_t *c, const capnp_ptr_t *rel)
   uint32_t count = capnp_get_u32(rel, RELEASE_REFCOUNT_OFF, 0);
   if (id >= CAPNP_RPC_MAX_EXPORTS || !c->exports[id].used)
     return;
-  c->exports[id].refcount -= (int)count;
-  if (c->exports[id].refcount <= 0)
+  /* Release.referenceCount is an untrusted UInt32 while the local count
+   * is signed. Do not narrow a large count before comparing it. */
+  if (count >= (uint32_t)c->exports[id].refcount)
     memset(&c->exports[id], 0, sizeof c->exports[id]);
+  else
+    c->exports[id].refcount -= (int)count;
 }
 
 /* Answer one Join question with a JoinResult payload. */
@@ -1005,8 +1006,8 @@ uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
     rc = capnp_builder_slot(&payload, PAYLOAD_DW, 0, &slot);
   if (rc == CAPNP_OK)
     rc = capnp_builder_struct(&slot, params_dwords, params_pwords, &params);
-  if (rc == CAPNP_OK && fill)
-    fill(fill_ctx, &params);
+  if (rc == CAPNP_OK && fill && fill(fill_ctx, &params) != 0)
+    rc = CAPNP_ERR_KIND;
   if (rc == CAPNP_OK)
     rc = flush(c, &b);
   capnp_builder_free(&b);
@@ -1068,7 +1069,7 @@ int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id)
 int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id)
 {
   capnp_rpc_question_t *q = question_find(c, question_id);
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, ret, payload, content, table, desc;
   int id = -1;
 
@@ -1378,7 +1379,7 @@ int capnp_rpc_pending_provisions(capnp_rpc_conn_t *c, uint64_t *out, int cap)
 
 int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
 {
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, body;
   int rc = CAPNP_OK;
   uint16_t which;

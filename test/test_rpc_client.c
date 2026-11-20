@@ -72,20 +72,24 @@ static int doubler_dispatch(void *server, uint64_t iid, uint16_t mid,
   (void)server;
   (void)iid;
   (void)mid;
+  capnp_bptr_t body;
   doubler_calls++;
   if (doubler_calls >= doubler_fail_from)
     return CAPNP_ERR_ARG;
+  if (capnp_builder_struct(results, 1, 0, &body))
+    return CAPNP_ERR_ALLOC;
   {
     uint32_t in = params->kind == CAPNP_PK_STRUCT
                       ? capnp_get_u32(params, 0, 0)
                       : 0;
-    return capnp_builder_set_u32(results, 0, in * 2);
+    return capnp_builder_set_u32(&body, 0, in * 2);
   }
 }
 
-static void fill_u32(void *ctx, const capnp_bptr_t *params)
+static int fill_u32(void *ctx, const capnp_bptr_t *params)
 {
   CHECK(capnp_builder_set_u32(params, 0, *(uint32_t *)ctx) == CAPNP_OK, "fill");
+  return 0;
 }
 
 int main(void)
@@ -111,7 +115,7 @@ int main(void)
   CHECK(capnp_rpc_is_answered(&client, q), "bootstrap answered");
   CHECK(!capnp_rpc_is_failed(&client, q), "bootstrap succeeded");
   {
-    capnp_message_t m;
+    capnp_message_t m = {0};
     capnp_ptr_t content;
     CHECK(capnp_rpc_answer_content(&client, q, &m, &content) == CAPNP_OK,
           "bootstrap content");
@@ -129,7 +133,7 @@ int main(void)
   CHECK(capnp_rpc_is_answered(&client, q), "call answered");
   CHECK(!capnp_rpc_is_failed(&client, q), "call succeeded");
   {
-    capnp_message_t m;
+    capnp_message_t m = {0};
     capnp_ptr_t content;
     CHECK(capnp_rpc_answer_content(&client, q, &m, &content) == CAPNP_OK,
           "call content");
@@ -203,6 +207,31 @@ int main(void)
      * remembering it failed. */
     CHECK(capnp_rpc_stream_send(&client, &s, 0, 0, 0, 1, 1, fill_u32, &v) != CAPNP_OK,
           "failed stream refuses further sends");
+  }
+
+  /* A peer controls Release.referenceCount. A value that does not fit the
+   * local signed counter must release the export rather than overflowing. */
+  {
+    capnp_builder_t b;
+    capnp_bptr_t root, msg, slot, rel;
+    uint8_t *flat = NULL;
+    size_t len = 0;
+    capnp_builder_init(&b);
+    CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "release root");
+    CHECK(capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK, "release msg");
+    CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RELEASE) == CAPNP_OK,
+          "release tag");
+    CHECK(capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK, "release slot");
+    CHECK(capnp_builder_struct(&slot, 1, 0, &rel) == CAPNP_OK, "release body");
+    CHECK(capnp_builder_set_u32(&rel, 0, 0) == CAPNP_OK, "release id");
+    CHECK(capnp_builder_set_u32(&rel, 4, UINT32_MAX) == CAPNP_OK,
+          "release count");
+    CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK,
+          "release serialize");
+    CHECK(capnp_rpc_handle(&vat, flat, len) == CAPNP_OK, "release handle");
+    CHECK(!vat.exports[0].used, "large release drops export");
+    free(flat);
+    capnp_builder_free(&b);
   }
 
   if (g_failures != 0) {

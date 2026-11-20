@@ -21,7 +21,7 @@ int main(void) {
   const char *items[] = {"python3", "script.py"};
   uint8_t *flat = NULL;
   size_t flat_len = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, lp;
   const char *s0, *s1;
   size_t n0, n1;

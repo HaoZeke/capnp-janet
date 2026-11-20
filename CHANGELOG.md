@@ -10,6 +10,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Added
 
+- `capnp_builder_orphan_free` zeroes an orphan that will not be adopted,
+  including text reachable from it, and leaves the orphan dead.
+- `capnp_dyn_error` returns the text of the last decode failure.
+- `capnp_u32_grow` grows a `uint32_t` capacity without wrapping.
 - Janet arena builders expose root, nested-struct, struct-list, pointer, and
   typed primitive-list construction without rebuilding intermediate messages.
 - Janet scalar access covers every signed/unsigned width, Float32/Float64,
@@ -20,6 +24,26 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp_builder_new_orphan_list` rejects an element count above `2^29 - 1`
+  when the orphan is created. It used to accept a larger count for void,
+  bit, byte, two-byte and four-byte elements and fail only at adopt. C++
+  1.4.0 rejects the same counts at creation.
+- `capnp_builder_new_orphan_struct_list` rejects an element count above
+  `2^29 - 1`. The tag stores that count, and a larger value is truncated
+  by the 30-bit offset mask. C++ 1.4.0 rejects the same counts.
+- `capnp_builder_set_text` rejects a length of `2^29 - 1` or more before
+  allocating. The NUL makes the list one byte longer than the text, and
+  that byte count has to fit in 29 bits.
+- An empty list is not left pointing past the segment after a tail
+  reclaim, and a zero-word list or struct aimed past the segment end
+  reads as empty.
+- `capnp_builder_adopt` zeroes the object an occupied slot already
+  named before it links the orphan.
+- A JSON lone surrogate is reported as `lone surrogate`. A valid pair
+  is still stored as UTF-8. C++ 1.4.0 stores CESU-8 for each `\u` unit
+  and accepts a lone surrogate.
+- A discriminant that does not land in the struct data section is
+  `CAPNP_ERR_SCHEMA` rather than an allocation error.
 - Scalar byte-range validation rejects offset arithmetic overflow before
   touching the message buffer.
 - `List(Text)` builders preserve explicit lengths, including embedded NUL
@@ -31,6 +55,18 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Changed
 
+- `capnp_builder_orphan_free` leaves the segment tail where it is, as
+  C++ `OrphanBuilder::euthanize` does. `capnp_orphan_t` identity lives in
+  an arena-owned table, so the public struct keeps its released layout.
+  C++ `Orphan` is move-only; keep one handle per orphan.
+- `capnp_rpc_fill_fn` returns `int`. A callback that returns `void` is
+  an incompatible pointer type. Return nonzero when the callback fails
+  so the call is not sent.
+- Decode, encode, and eval take a mutable `capnp_dyn_t`. Decode and
+  eval record `capnp_dyn_error` on that object.
+- `capnp_message_t` must be zero-initialized or passed to
+  `capnp_message_init` before it is parsed or freed. A second parse
+  releases the previous buffer.
 - Generated modules import `capnp` themselves, and CI executes their builders
   through the native module rather than checking source text alone.
 - Interop documentation describes the wired official-CLI and live C++ gates;

@@ -22,12 +22,12 @@
  *   - Far landing pads allocate inside the target object's segment
  *     (grow-in-place). If that segment is already at max_seg_words, a
  *     double-far landing pad is placed in another segment.
- *   - Hard ceiling per segment: CAPNP_BUILDER_MAX_SEGMENT_WORDS (1<<29).
+ *   - Hard ceiling per segment: CAPNP_BUILDER_MAX_SEGMENT_WORDS ((1<<29)-1).
  *   - Wire segment IDs are 0-based.
  */
 
 #define CAPNP_BUILDER_DEFAULT_FIRST_WORDS 1024u
-#define CAPNP_BUILDER_MAX_SEGMENT_WORDS (1u << 29)
+#define CAPNP_BUILDER_MAX_SEGMENT_WORDS ((1u << 29) - 1u)
 
 typedef struct capnp_bseg {
   uint8_t *data;
@@ -65,8 +65,8 @@ static inline capnp_bptr_t capnp_bptr_add(capnp_bptr_t base, size_t word_delta) 
 }
 
 CAPNP_JANET_EXPORT int capnp_builder_root(capnp_builder_t *b, capnp_bptr_t *root);
-CAPNP_JANET_EXPORT int capnp_builder_struct(capnp_bptr_t *ptr, uint16_t dwords, uint16_t pwords,
-                         capnp_bptr_t *body_out);
+CAPNP_JANET_EXPORT int capnp_builder_struct(const capnp_bptr_t *ptr, uint16_t dwords,
+                         uint16_t pwords, capnp_bptr_t *body_out);
 
 CAPNP_JANET_EXPORT int capnp_builder_set_u8(const capnp_bptr_t *body, uint32_t byte_offset,
                          uint8_t value);
@@ -136,10 +136,61 @@ CAPNP_JANET_EXPORT int capnp_builder_set_list_struct(const capnp_bptr_t *body, u
                                   uint16_t elem_dwords, uint16_t elem_pwords,
                                   capnp_bptr_t *first_elem);
 
+/* Zeroed pointer list. `first` is element 0; element i is `i` words later. */
+CAPNP_JANET_EXPORT int capnp_builder_init_ptr_list(const capnp_bptr_t *body, uint16_t dwords,
+                                uint16_t ptr_index, uint32_t nitems,
+                                capnp_bptr_t *first);
+
 CAPNP_JANET_EXPORT size_t capnp_builder_ptr_word(size_t body_word, uint16_t dwords,
                               uint16_t ptr_index);
 
 CAPNP_JANET_EXPORT int capnp_builder_copy_ptr(capnp_bptr_t *slot, const capnp_ptr_t *src);
+
+/* An object allocated in the arena and not yet attached to a pointer
+ * slot, the same relationship as a C++ Orphan. adopt writes the pointer
+ * and clears `live`. disown nulls the slot and returns the object.
+ *
+ * Identity lives in a table the arena owns, keyed by the public fields
+ * below. C++ Orphan is move-only, so a by-value copy is not a handle
+ * C++ allows. A copy made before adopt or free is rejected afterwards
+ * unless a later orphan occupies the same words with the same shape.
+ * Then the copy and that orphan share one record and only one of them
+ * succeeds. Keep one handle per orphan. */
+typedef struct capnp_orphan {
+  capnp_builder_t *b;
+  uint32_t seg;
+  size_t word;
+  int kind; /* CAPNP_PK_STRUCT or CAPNP_PK_LIST */
+  uint16_t dwords;
+  uint16_t pwords;
+  int esize;
+  uint32_t count;
+  int live;
+} capnp_orphan_t;
+
+CAPNP_JANET_EXPORT int capnp_builder_new_orphan_struct(capnp_builder_t *b,
+                                                       uint16_t dwords,
+                                                       uint16_t pwords,
+                                                       capnp_orphan_t *o,
+                                                       capnp_bptr_t *body);
+CAPNP_JANET_EXPORT int capnp_builder_new_orphan_list(capnp_builder_t *b, int esize,
+                                                     uint32_t count,
+                                                     capnp_orphan_t *o,
+                                                     capnp_bptr_t *start);
+/* A composite list. `first`, when set, is the first element body. For a
+ * composite orphan, `count` on the orphan is the wire word count of the
+ * elements (not the element count), which is what the list pointer stores. */
+CAPNP_JANET_EXPORT int capnp_builder_new_orphan_struct_list(
+    capnp_builder_t *b, uint32_t count, uint16_t elem_dwords,
+    uint16_t elem_pwords, capnp_orphan_t *o, capnp_bptr_t *first);
+CAPNP_JANET_EXPORT int capnp_builder_adopt(const capnp_bptr_t *slot,
+                                           capnp_orphan_t *o);
+/* Zero the orphan's words and drop its pointer children. The orphan
+ * is not live afterwards, and adopt of it fails. Like C++
+ * OrphanBuilder::euthanize this leaves the segment tail where it is. */
+CAPNP_JANET_EXPORT int capnp_builder_orphan_free(capnp_orphan_t *o);
+CAPNP_JANET_EXPORT int capnp_builder_disown(const capnp_bptr_t *slot,
+                                            capnp_orphan_t *o);
 
 CAPNP_JANET_EXPORT int capnp_builder_serialize(const capnp_builder_t *b, uint8_t **out,
                             size_t *out_len);

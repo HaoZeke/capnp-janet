@@ -5,6 +5,9 @@ enum Tone {
   loud @1;
 }
 
+const answer :UInt32 = 42;
+const greeting :Text = "hello";
+
 struct CodegenFeatures {
   enabled @0 :Bool = true;
   tiny @1 :Int8 = -7;
@@ -39,6 +42,8 @@ struct CodegenFeatures {
   empty @24 :List(Void);
   bigValues @25 :List(UInt64);
   tones @26 :List(Tone);
+  matrix @27 :List(List(Text));
+  anything @28 :AnyPointer;
 
   struct Child {
     code @0 :UInt32;

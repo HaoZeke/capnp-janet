@@ -6,7 +6,7 @@ Docs: https://capnp-janet.rgoswami.me/
 Repo: https://github.com/HaoZeke/capnp-janet
 Context7: /haozeke/capnp-janet
 
-`capnp_get_u32` returns `uint32_t`. It is not an out-parameter. AddressBook encode matches official `capnp encode` in schema order.
+`capnp_get_u32` returns `uint32_t`. It is not an out-parameter. Non-canonical AddressBook bytes match official `capnp encode` when nested objects are allocated in schema order. Canonical bytes do not depend on that order.
 
 ## Docs
 
@@ -47,10 +47,15 @@ pixi install && pixi run configure && pixi run build && pixi run test
 ```c
 #include <capnp-janet/capnp_message.h>
 
-capnp_message_t msg;
+capnp_message_t msg = {0};
 capnp_message_view_flat(&msg, bytes, len);
 capnp_ptr_t root;
 capnp_root(&msg, &root);
 const char *s; size_t n;
 capnp_get_text(&root, 0, &s, &n);
 ```
+
+Zero the message, or call `capnp_message_init`, before parsing or freeing
+it. JSON text is UTF-8: a `\u` surrogate pair is one scalar, and a lone
+surrogate is rejected (`lone surrogate`). C++ 1.4.0 stores each `\u` unit
+as CESU-8 and accepts a lone surrogate.

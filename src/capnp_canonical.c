@@ -18,6 +18,7 @@ static uint8_t *wptr(capnp_builder_t *b, uint32_t seg, size_t word) {
 static int alloc_local(capnp_builder_t *b, size_t n, uint32_t *out_seg,
                        size_t *out_word) {
   capnp_bseg_t *last;
+  size_t need;
   if (n == 0) {
     *out_seg = b->nsegs - 1;
     *out_word = b->segs[b->nsegs - 1].words;
@@ -26,11 +27,22 @@ static int alloc_local(capnp_builder_t *b, size_t n, uint32_t *out_seg,
   if (b->nsegs == 0)
     return CAPNP_ERR_ARG;
   last = &b->segs[b->nsegs - 1];
-  if (last->words + n > last->cap) {
+  if (n > CAPNP_BUILDER_MAX_SEGMENT_WORDS ||
+      n > SIZE_MAX - last->words)
+    return CAPNP_ERR_ALLOC;
+  need = last->words + n;
+  if (need > last->cap) {
     size_t ncap = last->cap ? last->cap * 2 : 16;
     uint8_t *p;
-    while (ncap < last->words + n)
+    while (ncap < need) {
+      if (ncap > CAPNP_BUILDER_MAX_SEGMENT_WORDS / 2u) {
+        ncap = CAPNP_BUILDER_MAX_SEGMENT_WORDS;
+        break;
+      }
       ncap *= 2;
+    }
+    if (ncap < need)
+      return CAPNP_ERR_ALLOC;
     p = (uint8_t *)realloc(last->data, ncap * CAPNP_WORD_BYTES);
     if (!p)
       return CAPNP_ERR_ALLOC;
@@ -123,7 +135,21 @@ static int write_list_to_slot(capnp_builder_t *b, uint32_t slot_seg,
     capnp_store_le64(wptr(b, tag_seg, tag_word), tag);
     off = (int32_t)((int64_t)tag_word - (int64_t)slot_word - 1);
     lw = capnp_wp_make_list(off, CAPNP_SZ_COMPOSITE, (uint32_t)content);
-    capnp_store_le64(wptr(b, slot_seg, slot_word), lw);
+    if (slot_seg == tag_seg) {
+      capnp_store_le64(wptr(b, slot_seg, slot_word), lw);
+    } else {
+      size_t pad;
+      uint32_t pad_seg;
+      if (alloc_local(b, 1, &pad_seg, &pad))
+        return CAPNP_ERR_ALLOC;
+      capnp_store_le64(wptr(b, pad_seg, pad),
+                       capnp_wp_make_list((int32_t)((int64_t)tag_word -
+                                                     (int64_t)pad - 1),
+                                          CAPNP_SZ_COMPOSITE,
+                                          (uint32_t)content));
+      capnp_store_le64(wptr(b, slot_seg, slot_word),
+                       capnp_wp_make_far(0, (uint32_t)pad, pad_seg));
+    }
     first = tag_word + 1;
     for (i = 0; i < n; i++) {
       capnp_ptr_t el;
@@ -152,16 +178,24 @@ static int write_list_to_slot(capnp_builder_t *b, uint32_t slot_seg,
     uint32_t list_seg, i;
     int32_t off;
     uint64_t lw;
-    if (n) {
-      if (alloc_local(b, n, &list_seg, &list_start))
-        return CAPNP_ERR_ALLOC;
-    } else {
-      list_seg = slot_seg;
-      list_start = slot_word + 1;
-    }
+    if (alloc_local(b, n, &list_seg, &list_start))
+      return CAPNP_ERR_ALLOC;
     off = (int32_t)((int64_t)list_start - (int64_t)slot_word - 1);
     lw = capnp_wp_make_list(off, CAPNP_SZ_PTR, n);
-    capnp_store_le64(wptr(b, slot_seg, slot_word), lw);
+    if (slot_seg == list_seg) {
+      capnp_store_le64(wptr(b, slot_seg, slot_word), lw);
+    } else {
+      size_t pad;
+      uint32_t pad_seg;
+      if (alloc_local(b, 1, &pad_seg, &pad))
+        return CAPNP_ERR_ALLOC;
+      capnp_store_le64(wptr(b, pad_seg, pad),
+                       capnp_wp_make_list((int32_t)((int64_t)list_start -
+                                                     (int64_t)pad - 1),
+                                          CAPNP_SZ_PTR, n));
+      capnp_store_le64(wptr(b, slot_seg, slot_word),
+                       capnp_wp_make_far(0, (uint32_t)pad, pad_seg));
+    }
     for (i = 0; i < n; i++) {
       capnp_ptr_t el;
       if (capnp_list_getp(list, i, &el) != CAPNP_OK)
@@ -189,20 +223,33 @@ static int write_list_to_slot(capnp_builder_t *b, uint32_t slot_seg,
     }
     nbytes = (bits + 7) / 8;
     nwords = (nbytes + 7) / 8;
+    if (alloc_local(b, nwords, &start_seg, &start))
+      return CAPNP_ERR_ALLOC;
     if (nwords) {
-      if (alloc_local(b, nwords, &start_seg, &start))
-        return CAPNP_ERR_ALLOC;
       memset(wptr(b, start_seg, start), 0, nwords * CAPNP_WORD_BYTES);
       srcb = list->msg->segs[list->seg].data + list->word * CAPNP_WORD_BYTES;
       if (nbytes)
         memcpy(wptr(b, start_seg, start), srcb, nbytes);
-    } else {
-      start_seg = slot_seg;
-      start = slot_word + 1;
+      if (esize == CAPNP_SZ_BIT && n % 8u)
+        wptr(b, start_seg, start)[nbytes - 1] &=
+            (uint8_t)((1u << (n % 8u)) - 1u);
     }
     off = (int32_t)((int64_t)start - (int64_t)slot_word - 1);
     lw = capnp_wp_make_list(off, esize, n);
-    capnp_store_le64(wptr(b, slot_seg, slot_word), lw);
+    if (slot_seg == start_seg) {
+      capnp_store_le64(wptr(b, slot_seg, slot_word), lw);
+    } else {
+      size_t pad;
+      uint32_t pad_seg;
+      if (alloc_local(b, 1, &pad_seg, &pad))
+        return CAPNP_ERR_ALLOC;
+      capnp_store_le64(wptr(b, pad_seg, pad),
+                       capnp_wp_make_list((int32_t)((int64_t)start -
+                                                     (int64_t)pad - 1),
+                                          esize, n));
+      capnp_store_le64(wptr(b, slot_seg, slot_word),
+                       capnp_wp_make_far(0, (uint32_t)pad, pad_seg));
+    }
     return CAPNP_OK;
   }
 }
@@ -236,7 +283,20 @@ int capnp_copy_ptr_to_word(capnp_builder_t *b, uint32_t slot_seg,
       return CAPNP_ERR_ALLOC;
     off = (int32_t)((int64_t)body - (int64_t)slot_word - 1);
     w = capnp_wp_make_struct(off, (uint16_t)nd, (uint16_t)np);
-    capnp_store_le64(wptr(b, slot_seg, slot_word), w);
+    if (slot_seg == body_seg) {
+      capnp_store_le64(wptr(b, slot_seg, slot_word), w);
+    } else {
+      size_t pad;
+      uint32_t pad_seg;
+      if (alloc_local(b, 1, &pad_seg, &pad))
+        return CAPNP_ERR_ALLOC;
+      capnp_store_le64(wptr(b, pad_seg, pad),
+                       capnp_wp_make_struct((int32_t)((int64_t)body -
+                                                       (int64_t)pad - 1),
+                                            (uint16_t)nd, (uint16_t)np));
+      capnp_store_le64(wptr(b, slot_seg, slot_word),
+                       capnp_wp_make_far(0, (uint32_t)pad, pad_seg));
+    }
     write_struct_body_data(b, body_seg, body, nd, src);
     for (k = 0; k < np; k++) {
       capnp_ptr_t child;
@@ -259,7 +319,7 @@ int capnp_canonicalize(const capnp_message_t *m, uint8_t **out,
                        size_t *out_len) {
   capnp_builder_t b;
   capnp_ptr_t root;
-  capnp_message_t mut;
+  capnp_message_t mut = {0};
   size_t root_word, nbytes;
   uint32_t root_seg;
   uint8_t *buf;
@@ -271,10 +331,14 @@ int capnp_canonicalize(const capnp_message_t *m, uint8_t **out,
 
   mut = *m;
   mut.owned = NULL;
-  mut.traversal_left = CAPNP_DEFAULT_TRAVERSAL_WORDS;
-  mut.depth_limit = CAPNP_DEFAULT_DEPTH_LIMIT;
-  if (capnp_root(&mut, &root))
-    return CAPNP_ERR_KIND;
+  /* A copy is a view. Leaving the magic set would make a later free
+   * of this stack slot release the source message. */
+  mut.ready = 0;
+  {
+    int rc = capnp_root(&mut, &root);
+    if (rc)
+      return rc;
+  }
 
   capnp_builder_init_sized(&b, CAPNP_BUILDER_DEFAULT_FIRST_WORDS);
   b.force_single = 1;
@@ -282,9 +346,15 @@ int capnp_canonicalize(const capnp_message_t *m, uint8_t **out,
     capnp_builder_free(&b);
     return CAPNP_ERR_ALLOC;
   }
-  if (capnp_copy_ptr_to_word(&b, root_seg, root_word, &root, 0)) {
-    capnp_builder_free(&b);
-    return CAPNP_ERR_ALLOC;
+  if (root.kind == CAPNP_PK_NULL) {
+    capnp_store_le64(wptr(&b, root_seg, root_word),
+                     capnp_wp_make_struct(-1, 0, 0));
+  } else {
+    int rc = capnp_copy_ptr_to_word(&b, root_seg, root_word, &root, 0);
+    if (rc) {
+      capnp_builder_free(&b);
+      return rc;
+    }
   }
   nbytes = b.segs[0].words * CAPNP_WORD_BYTES;
   buf = (uint8_t *)malloc(nbytes ? nbytes : 1);

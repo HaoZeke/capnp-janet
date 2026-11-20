@@ -9,5 +9,5 @@ Name: capnp-janet
 Description: Native Cap'n Proto runtime for Janet (and C embedders)
 URL: https://capnp-janet.rgoswami.me
 Version: @PROJECT_VERSION@
-Libs: -L${libdir} -lcapnp_janet
+Libs: -L${libdir} -lcapnp_janet -pthread
 Cflags: -I${includedir}

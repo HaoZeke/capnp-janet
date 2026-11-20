@@ -14,13 +14,13 @@ static void test_copy_struct_slot(void) {
   FILE *f;
   long sz;
   uint8_t *bin = NULL;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t book, people, alice;
   capnp_builder_t b;
   capnp_bptr_t root, body, slot;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m2;
+  capnp_message_t m2 = {0};
   capnp_ptr_t r;
   const char *name;
   size_t n;

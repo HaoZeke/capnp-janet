@@ -18,6 +18,7 @@
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_message.h>
 #include <capnp-janet/capnp_rpc.h>
+#include <capnp-janet/capnp_transport.h>
 
 /* Mirrors the id in schema/adder.capnp. */
 #define ADDER_IFACE 0xea01e10cbc414411ULL
@@ -37,55 +38,23 @@ static int send_fd(void *ctx, const uint8_t *data, size_t len)
 	return 0;
 }
 
-static ssize_t read_all(int fd, void *p, size_t count)
-{
-	size_t off = 0;
-	while (off < count) {
-		ssize_t n = read(fd, (char *)p + off, count - off);
-		if (n <= 0)
-			return n == 0 && off > 0 ? (ssize_t)off : n;
-		off += (size_t)n;
-	}
-	return (ssize_t)off;
-}
-
-/* Read one stream-framed message off the socket into `buf`. The segment
- * table says how much body follows, so the frame boundary is recoverable
- * from the stream without a length prefix of our own. */
+/* Read one stream-framed message. Segment counts are little-endian on
+ * the wire; a host-endian load of those bytes rejects a real reply on
+ * a big-endian machine. */
 static ssize_t read_frame(int fd, uint8_t *buf, size_t cap)
 {
-	uint32_t nsegs, i, table_bytes, total_words = 0;
-	if (read_all(fd, buf, 4) != 4)
+	size_t n = 0;
+	if (capnp_read_frame(fd, buf, cap, &n) != CAPNP_OK)
 		return -1;
-	memcpy(&nsegs, buf, 4);
-	nsegs += 1;
-	if (nsegs > 64)
-		return -1;
-	table_bytes = 4 + nsegs * 4;
-	if (table_bytes % 8)
-		table_bytes += 4;
-	if (table_bytes > cap)
-		return -1;
-	if (read_all(fd, buf + 4, table_bytes - 4) != (ssize_t)(table_bytes - 4))
-		return -1;
-	for (i = 0; i < nsegs; i++) {
-		uint32_t w;
-		memcpy(&w, buf + 4 + i * 4, 4);
-		total_words += w;
-	}
-	if (table_bytes + total_words * 8 > cap)
-		return -1;
-	if (read_all(fd, buf + table_bytes, total_words * 8) !=
-	    (ssize_t)(total_words * 8))
-		return -1;
-	return (ssize_t)(table_bytes + total_words * 8);
+	return (ssize_t)n;
 }
 
-static void fill_add(void *ctx, const capnp_bptr_t *params)
+static int fill_add(void *ctx, const capnp_bptr_t *params)
 {
 	const int64_t *ab = (const int64_t *)ctx;
 	capnp_builder_set_u64(params, 0, (uint64_t)ab[0]);
 	capnp_builder_set_u64(params, 8, (uint64_t)ab[1]);
+	return 0;
 }
 
 int main(int argc, char **argv)
@@ -171,7 +140,7 @@ int main(int argc, char **argv)
 		return 1;
 	}
 	{
-		capnp_message_t m;
+		capnp_message_t m = {0};
 		capnp_ptr_t content;
 		int64_t sum;
 		if (capnp_rpc_answer_content(&conn, qcall, &m, &content) != CAPNP_OK) {

@@ -3,6 +3,7 @@
 
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_message.h>
+#include <capnp-janet/capnp_pointer.h>
 
 #include <stdint.h>
 #include <stdlib.h>
@@ -14,7 +15,7 @@ static void test_list_u32(void) {
   uint32_t items[] = {1, 2, 100};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list;
 
   capnp_builder_init(&b);
@@ -76,7 +77,7 @@ static void test_data_blob(void) {
   const uint8_t blob[] = {0xde, 0xad, 0xbe, 0xef, 0x00, 0x01};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r;
   const uint8_t *out;
   size_t n;
@@ -103,7 +104,7 @@ static void test_list_f64(void) {
   double items[] = {1.5, -2.0, 3.25};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list;
 
   capnp_builder_init(&b);
@@ -129,7 +130,7 @@ static void test_f32(void) {
   float items[] = {1.5f, -2.0f, 3.25f};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list;
 
   capnp_builder_init(&b);
@@ -156,7 +157,7 @@ static void test_copy_flat(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL, *copy = NULL;
   size_t flen = 0, clen = 0;
-  capnp_message_t m, m2;
+  capnp_message_t m = {0}, m2 = {0};
   capnp_ptr_t r;
 
   capnp_builder_init(&b);
@@ -176,13 +177,53 @@ static void test_copy_flat(void) {
   capnp_message_free(&m2);
 }
 
+static void test_ptr_list_edges(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body, first;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m = {0};
+  capnp_ptr_t decoded, list;
+
+  capnp_builder_init_sized(&b, 1);
+  capnp_builder_set_max_seg_words(&b, 1);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "ptr root");
+  CHECK(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "ptr body");
+  CHECK(capnp_builder_init_ptr_list(&body, 0, 0, 0, &first) == CAPNP_OK,
+        "empty ptr list");
+  CHECK(first.b == &b, "empty first belongs to builder");
+  CHECK(capnp_builder_init_ptr_list(&body, 0, 1, 1, NULL) == CAPNP_ERR_BOUNDS,
+        "ptr index bounds");
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "ptr serialize");
+  capnp_builder_free(&b);
+  CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "ptr parse");
+  free(flat);
+  CHECK(capnp_root(&m, &decoded) == CAPNP_OK, "ptr decoded root");
+  CHECK(capnp_getp(&decoded, 0, &list) == CAPNP_OK, "ptr decoded list");
+  CHECK(capnp_list_len(&list) == 0, "empty ptr list length");
+  capnp_message_free(&m);
+
+  /* Zero-word list before a second pointer must target the segment head. */
+  capnp_builder_init(&b);
+  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "head root");
+  CHECK(capnp_builder_struct(&root, 0, 2, &body) == CAPNP_OK, "head body");
+  CHECK(capnp_builder_set_list_u32(&body, 0, 0, NULL, 0) == CAPNP_OK,
+        "empty u32 list at slot 0");
+  CHECK(capnp_builder_set_text(&body, 0, 1, "hi", 2) == CAPNP_OK, "text at 1");
+  CHECK(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "head ser");
+  capnp_builder_free(&b);
+  CHECK(capnp_wp_offset(capnp_load_le64(flat + 16)) == 1,
+        "slot 0 empty list offset points to segment head");
+  free(flat);
+}
+
 
 static void test_struct_u64(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r;
   const uint64_t want = 0x1122334455667788ULL;
 
@@ -217,7 +258,7 @@ static void test_struct_offset_overflow(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r;
 
   capnp_builder_init(&b);
@@ -248,7 +289,7 @@ static void test_list_u64(void) {
   uint64_t items[] = {1ULL, 0x100000001ULL, 0xdeadbeefcafebabeULL};
   uint8_t *flat = NULL;
   size_t flen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r, list;
 
   capnp_builder_init(&b);
@@ -279,5 +320,6 @@ int main(void) {
   test_f32();
   test_list_f64();
   test_copy_flat();
+  test_ptr_list_edges();
   return harness_finish();
 }

@@ -151,7 +151,7 @@ static void test_addressbook_roundtrip(void) {
   char path[1024];
   uint8_t *bin = NULL, *packed = NULL, *unpacked = NULL;
   size_t blen = 0, plen = 0, ulen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t book, people;
 
   if (!src || !src[0])
@@ -200,7 +200,7 @@ static void test_builder_then_pack(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL, *packed = NULL, *unpacked = NULL;
   size_t flen = 0, plen = 0, ulen = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t r;
 
   capnp_builder_init(&b);

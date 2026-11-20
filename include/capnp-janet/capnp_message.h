@@ -5,7 +5,9 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#define CAPNP_MAX_SEGMENTS 16
+/* Hostile segment tables stop here. The builder refuses to emit more,
+ * so a message it writes stays readable. */
+#define CAPNP_MAX_SEGMENTS 512u
 
 typedef struct capnp_segment {
   const uint8_t *data; /* words, little-endian */
@@ -13,13 +15,19 @@ typedef struct capnp_segment {
 } capnp_segment_t;
 
 typedef struct capnp_message {
-  capnp_segment_t segs[CAPNP_MAX_SEGMENTS];
+  capnp_segment_t *segs; /* heap table, nsegs long; NULL when nsegs == 0 */
   uint32_t nsegs;
   /* When non-NULL, owns a copy of the framed bytes (deserialize path). */
   uint8_t *owned;
   size_t owned_len;
   uint64_t traversal_left;
   int depth_limit;
+  /* capnp_message_init stores a magic value here. from_flat, view_flat,
+   * and from_segments release the previous buffer when they see it, so
+   * a message can be parsed again without leaking. The struct must be
+   * zero-initialized, or passed through capnp_message_init, before any
+   * of those calls: a zero ready means the message is not live. */
+  uint64_t ready;
 } capnp_message_t;
 
 /* Resolved object handle (struct or list). Never a far landing pad. */
@@ -38,6 +46,9 @@ typedef struct capnp_ptr {
   /* Schema-evolution upgrade views (primitive list element as struct): */
   uint8_t body_byte; /* extra byte offset of data start within the body word */
   uint16_t data_bits; /* if non-zero, data-section size in bits (field @0 view) */
+  /* Pointer follows still allowed below this object. The root starts at
+   * depth_limit - 1, and each followed pointer consumes one. */
+  int depth_left;
 } capnp_ptr_t;
 
 /* Zero a message. Free with capnp_message_free. */

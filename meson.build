@@ -13,12 +13,37 @@ project(
 
 inc = include_directories('include')
 
+cc = meson.get_compiler('c')
+
+# glibc 2.33 added mallinfo2. The pixi sysroot is older, and mallinfo
+# still reports the bytes the reparse check compares.
+robust_c_args = []
+if cc.compiles(
+  '#include <malloc.h>\nint main(void){struct mallinfo2 i=mallinfo2();return (int)i.uordblks;}',
+  name: 'mallinfo2',
+)
+  robust_c_args += ['-DCAPNP_HAS_MALLINFO2']
+elif cc.compiles(
+  '#include <malloc.h>\nint main(void){struct mallinfo i=mallinfo();return (int)i.uordblks;}',
+  name: 'mallinfo',
+)
+  robust_c_args += ['-DCAPNP_HAS_MALLINFO']
+else
+  message('robust heap check: no mallinfo2 or mallinfo; that check is skipped')
+endif
+
+# dlsym lives in libdl on glibc before 2.34 and in libc after that.
+libdl = cc.find_library('dl', required: false)
+threads = dependency('threads')
+
 lib_sources = files(
   'src/capnp_message.c',
   'src/capnp_builder.c',
   'src/capnp_packed.c',
   'src/capnp_canonical.c',
   'src/capnp_rpc.c',
+  'src/capnp_transport.c',
+  'src/capnp_dyn.c',
 )
 
 # MSVC writes an import library only when something is dllexport, so a
@@ -35,6 +60,7 @@ capnp_janet_lib = library(
   'capnp_janet',
   lib_sources,
   include_directories: inc,
+  dependencies: threads,
   c_args: capnp_janet_consumer_args + ['-DCAPNP_JANET_BUILDING'],
   install: true,
 )
@@ -61,12 +87,26 @@ install_headers(
   'include/capnp-janet/capnp_copy.h',
   'include/capnp-janet/capnp_janet.h',
   'include/capnp-janet/capnp_rpc.h',
+  'include/capnp-janet/capnp_transport.h',
+  'include/capnp-janet/capnp_dyn.h',
   subdir: 'capnp-janet',
 )
 
 capnpc_janet = executable(
   'capnpc-janet',
   'app/capnpc_janet.c',
+  dependencies: capnp_janet_dep,
+  install: true,
+)
+
+dump_request = executable(
+  'dump-request',
+  'app/dump_request.c',
+)
+
+capnp_eval = executable(
+  'capnp-eval',
+  'app/capnp_eval.c',
   dependencies: capnp_janet_dep,
   install: true,
 )
@@ -79,6 +119,22 @@ test_wire = executable(
   dependencies: capnp_janet_dep,
 )
 test('wire', test_wire)
+
+test_robust = executable(
+  'test_robust',
+  'test/test_robust.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+  c_args: robust_c_args,
+)
+test('robust', test_robust)
+
+test_orphan = executable(
+  'test_orphan',
+  'test/test_orphan.c',
+  dependencies: capnp_janet_dep,
+)
+test('orphan', test_orphan)
 
 test_list_text = executable(
   'test_list_text',
@@ -170,12 +226,61 @@ test(
 # consumer pulling this in as a subproject should not be told to install
 # one to build the library.
 bash = find_program('bash', required: false)
+test_conform = executable(
+  'test_conform',
+  'test/test_conform.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+
+dyn_deps = [capnp_janet_dep]
+if libdl.found()
+  dyn_deps += [libdl]
+endif
+
+test_dyn = executable(
+  'test_dyn',
+  'test/test_dyn.c',
+  include_directories: test_inc,
+  dependencies: dyn_deps,
+)
+
 if bash.found()
   test(
     'codegen',
     bash,
     args: [meson.project_source_root() / 'test/test_codegen.sh'],
     depends: [capnpc_janet],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
+  test(
+    'differential',
+    bash,
+    args: [meson.project_source_root() / 'test/test_differential.sh'],
+    depends: [test_conform],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
+  test(
+    'dyn',
+    bash,
+    args: [meson.project_source_root() / 'test/test_dyn.sh'],
+    depends: [test_dyn],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
+  test(
+    'eval',
+    bash,
+    args: [meson.project_source_root() / 'test/test_eval.sh'],
+    depends: [capnp_eval],
     workdir: meson.project_source_root(),
     env: {
       'CAPNP_JANET_BUILD': meson.project_build_root(),
@@ -226,6 +331,21 @@ test_rpc_client = executable(
 )
 test('rpc_client', test_rpc_client)
 
+test_transport = executable(
+  'test_transport',
+  'test/test_transport.c',
+  dependencies: [capnp_janet_dep, threads],
+  c_args: ['-D_POSIX_C_SOURCE=200809L'],
+)
+test('transport', test_transport)
+
+test_abi_layout = executable(
+  'test_abi_layout',
+  'test/test_abi_layout.c',
+  dependencies: capnp_janet_dep,
+)
+test('abi_layout', test_abi_layout)
+
 # --- live-peer RPC interop: this vat against capnp-C++ ---------------
 #
 # Byte equality against our own encoders says nothing about whether the
@@ -247,6 +367,51 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
       '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
       '@INPUT@',
     ],
+  )
+
+  wide_cpp = custom_target(
+    'wide-capnp-cpp',
+    input: 'schema' / 'wide.capnp',
+    output: ['wide.capnp.c++', 'wide.capnp.h'],
+    command: [
+      capnp_tool, 'compile',
+      '--src-prefix=' + meson.current_source_dir() / 'schema',
+      '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
+      '@INPUT@',
+    ],
+  )
+
+  wide_server = executable(
+    'wide_server',
+    'interop' / 'wide_server.c',
+    dependencies: capnp_janet_dep,
+    c_args: ['-D_POSIX_C_SOURCE=200809L'],
+  )
+
+  wide_client = executable(
+    'wide_client',
+    ['interop' / 'wide_client.c++', wide_cpp],
+    dependencies: capnp_rpc_dep,
+    override_options: ['cpp_std=c++17'],
+  )
+
+  test(
+    'wide_result',
+    bash,
+    args: [meson.project_source_root() / 'test/test_wide.sh'],
+    depends: [wide_server, wide_client],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+    timeout: 60,
+  )
+
+  rpc_peer_client = executable(
+    'rpc_peer_client',
+    ['interop' / 'rpc_peer_client.c++', adder_cpp],
+    dependencies: capnp_rpc_dep,
+    override_options: ['cpp_std=c++17'],
   )
 
   rpc_peer_server = executable(
@@ -274,8 +439,80 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
     depends: [rpc_peer_server, rpc_client_c],
     timeout: 60,
   )
+  test(
+    'rpc_janet',
+    bash,
+    args: [meson.project_source_root() / 'test/test_rpc_janet.sh'],
+    depends: [rpc_peer_server],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
+  test(
+    'transport_peer',
+    bash,
+    args: [meson.project_source_root() / 'test/test_transport_peer.sh'],
+    depends: [test_transport, rpc_peer_server, rpc_peer_client],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+    timeout: 60,
+  )
+  test(
+    'rpc_janet_host',
+    bash,
+    args: [meson.project_source_root() / 'test/test_rpc_janet_host.sh'],
+    depends: [rpc_peer_server, rpc_peer_client],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+    timeout: 60,
+  )
 else
   message('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')
+endif
+
+if bash.found()
+  test(
+    'valgrind_c',
+    bash,
+    args: [meson.project_source_root() / 'test/test_valgrind.sh'],
+    depends: [
+      test_wire,
+      test_robust,
+      test_orphan,
+      test_list_text,
+      test_addressbook,
+      test_calculator,
+      test_packed,
+      test_lists,
+      test_list_evolution,
+      test_multiseg,
+      test_canonical,
+      test_copy,
+      test_rpc_join,
+      test_rpc_handoff,
+      test_rpc_client,
+      test_transport,
+      test_abi_layout,
+    ],
+    workdir: meson.project_source_root(),
+    timeout: 600,
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+      'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root(),
+    },
+  )
+  test(
+    'abi_diff',
+    bash,
+    args: [meson.project_source_root() / 'scripts/abi-diff.sh'],
+    workdir: meson.project_source_root(),
+    timeout: 600,
+  )
 endif
 
 janet_dep = dependency('janet', required: get_option('janet'))

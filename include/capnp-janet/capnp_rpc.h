@@ -63,8 +63,10 @@ enum {
 
 struct capnp_rpc_conn;
 
-/* Handle one call on an exported capability. Write the reply into
- * `results`; return 0 to answer with it, non-zero for an exception. */
+/* Handle one call on an exported capability. `results` is the empty
+ * content pointer in the return Payload. Allocate the result struct
+ * with capnp_builder_struct at whatever size the method returns, then
+ * fill that body. Return 0 to answer, non-zero for an exception. */
 typedef int (*capnp_rpc_dispatch_fn)(void *server, uint64_t interface_id,
                                      uint16_t method_id,
                                      const capnp_ptr_t *params,
@@ -223,7 +225,9 @@ CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data
 /* --- client side -------------------------------------------------- */
 
 /* Write a call's parameter struct. */
-typedef void (*capnp_rpc_fill_fn)(void *ctx, const capnp_bptr_t *params);
+/* Return nonzero when the callback failed. The call is not sent, so
+ * the builder can be freed before the error is raised again. */
+typedef int (*capnp_rpc_fill_fn)(void *ctx, const capnp_bptr_t *params);
 
 /* Ask for the peer's bootstrap capability. Returns the questionId, or
  * (uint32_t)-1 when the question table is full. */

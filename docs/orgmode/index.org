@@ -12,7 +12,7 @@ C library embedders can link without the Janet VM.
 Sibling runtimes: [[https://c-capnproto.rgoswami.me][c-capnproto]] and
 [[https://capnp-fortran.rgoswami.me][capnp-fortran]]. Status: =0.2.5=.
 AddressBook encode matches official =capnp encode= when fields are set
-in schema order.
+in schema order. Canonical bytes do not depend on that order.
 
 * Install (shortest path)
 
@@ -64,13 +64,20 @@ C embed (no Janet VM):
 #+begin_src c
 #include <capnp-janet/capnp_message.h>
 
-capnp_message_t msg;
+capnp_message_t msg = {0};
 capnp_message_view_flat(&msg, bytes, len);
 capnp_ptr_t root;
 capnp_root(&msg, &root);
 const char *s; size_t n;
 capnp_get_text(&root, 0, &s, &n);
 #+end_src
+
+Zero the message, or call =capnp_message_init=, before parsing or
+freeing it. A second parse releases the previous buffer.
+
+JSON text is UTF-8. A =\u= surrogate pair is one scalar. A lone
+surrogate is an error (=lone surrogate=). C++ 1.4.0 stores each =\u=
+unit as CESU-8 and accepts a lone surrogate.
 
 The [[file:tutorial.org][tutorial]] walks AddressBook encode and the
 embed register path.

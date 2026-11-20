@@ -50,6 +50,11 @@ option(CAPNP_JANET_INSTALL "Install targets and package config" ${_capnp_janet_i
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# pthread_sigmask lives in libpthread on glibc before 2.34. Meson links
+# dependency('threads'); the same edge belongs on this target so a static
+# archive and an old shared library both pull it in.
+find_package(Threads REQUIRED)
+
 # Same source set as meson.build lib_sources.
 add_library(capnp_janet
   src/capnp_message.c
@@ -57,6 +62,8 @@ add_library(capnp_janet
   src/capnp_packed.c
   src/capnp_canonical.c
   src/capnp_rpc.c
+  src/capnp_transport.c
+  src/capnp_dyn.c
 )
 add_library(capnp_janet::capnp_janet ALIAS capnp_janet)
 
@@ -83,6 +90,8 @@ target_include_directories(capnp_janet
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
 )
+
+target_link_libraries(capnp_janet PUBLIC Threads::Threads)
 
 if(CAPNP_JANET_BUILD_PLUGIN)
   add_executable(capnpc-janet app/capnpc_janet.c)
@@ -114,6 +123,8 @@ if(CAPNP_JANET_INSTALL)
     include/capnp-janet/capnp_copy.h
     include/capnp-janet/capnp_janet.h
     include/capnp-janet/capnp_rpc.h
+    include/capnp-janet/capnp_transport.h
+    include/capnp-janet/capnp_dyn.h
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/capnp-janet
   )
   install(FILES janet/policy.janet

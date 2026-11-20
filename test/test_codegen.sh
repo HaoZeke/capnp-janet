@@ -6,11 +6,11 @@ BUILD="${POLICYD_BUILD_DIR:-${CAPNP_JANET_BUILD:-$ROOT/build}}"
 PLUGIN="$BUILD/capnpc-janet"
 if [[ ! -x "$PLUGIN" ]]; then
   echo "SKIP: no $PLUGIN" >&2
-  exit 0
+  exit 77
 fi
 if ! command -v capnp >/dev/null 2>&1; then
   echo "SKIP: no capnp CLI" >&2
-  exit 0
+  exit 77
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
@@ -120,6 +120,56 @@ grep -q '(defn CodegenFeatures-get-samples-at \[list index\]' codegen-features.j
 grep -q '(defn CodegenFeatures-get-names-at \[list index\]' codegen-features.janet
 grep -q '(defn CodegenFeatures-get-big-values-at \[list index\]' codegen-features.janet
 grep -q '(defn CodegenFeatures-get-tones-at \[list index\]' codegen-features.janet
+grep -q '(def answer 42)' codegen-features.janet
+grep -q '(def greeting "hello")' codegen-features.janet
+grep -q '(defn CodegenFeatures-init-matrix \[ptr count\]' codegen-features.janet
+grep -q 'capnp/init-ptr-list ptr' codegen-features.janet
+grep -q '(defn CodegenFeatures-get-anything \[ptr\]' codegen-features.janet
+grep -q 'capnp/getp ptr' codegen-features.janet
+
+cp "$ROOT/schema/generic.capnp" "$TMP/"
+capnp compile "-o$PLUGIN" generic.capnp
+test -f generic.janet
+grep -q '(def Box-generic true)' generic.janet
+grep -Eq 'Box-parameters @\[ "T"\]' generic.janet
+grep -Eq 'Pair-parameters @\[ "T" "U"\]' generic.janet
+grep -q ':type :parameter' generic.janet
+grep -q ':parameter "T"' generic.janet
+grep -F -q ':brand @[' generic.janet
+grep -q '(defn Holder-text-box-get-value \[ptr\]' generic.janet
+grep -q 'capnp/get-text ptr 0' generic.janet
+grep -q '(defn Holder-data-box-get-value \[ptr\]' generic.janet
+grep -q 'capnp/get-data ptr 0' generic.janet
+grep -q '(defn Holder-pair-get-left \[ptr\]' generic.janet
+grep -q '(defn Holder-pair-get-right \[ptr\]' generic.janet
+grep -F -q '(def Holder-annotations @[' generic.janet
+grep -F -q ':value 7' generic.janet
+grep -F -q '(def Holder-text-box-annotations @[' generic.janet
+grep -F -q ':value 3' generic.janet
+
+cp "$ROOT/schema/defaults.capnp" "$TMP/"
+capnp compile "-o$PLUGIN" defaults.capnp
+test -f defaults.janet
+grep -q '(def Wrap-origin-default "' defaults.janet
+grep -q '(def Wrap-labels-default "' defaults.janet
+grep -q '(defn Wrap-get-origin \[ptr\]' defaults.janet
+grep -q '(defn Wrap-get-labels \[ptr\]' defaults.janet
+grep -q '(v :kind) :null' defaults.janet
+python3 - "$TMP/defaults.janet" "$TMP/origin.bin" "$TMP/labels.bin" <<'PY'
+import re, pathlib, sys
+text = pathlib.Path(sys.argv[1]).read_text()
+def grab(name, dest):
+    m = re.search(r'\(def %s "((?:\\x[0-9a-fA-F]{2})+)"' % name, text)
+    if not m:
+        raise SystemExit("missing " + name)
+    raw = bytes(int(h, 16) for h in re.findall(r'\\x([0-9a-fA-F]{2})', m.group(1)))
+    pathlib.Path(dest).write_bytes(raw)
+grab("Wrap-origin-default", sys.argv[2])
+grab("Wrap-labels-default", sys.argv[3])
+PY
+capnp decode "$ROOT/schema/defaults.capnp" Point <"$TMP/origin.bin" >"$TMP/origin.txt"
+grep -q 'x = 4' "$TMP/origin.txt"
+grep -q 'y = 5' "$TMP/origin.txt"
 
 MODULE=${CAPNP_JANET_MODULE:-$BUILD/capnp.so}
 if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then

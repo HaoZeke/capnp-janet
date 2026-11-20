@@ -85,11 +85,14 @@ static int marked_dispatch(void *server, uint64_t iface, uint16_t method,
                            const capnp_bptr_t *results)
 {
   marked_t *m = (marked_t *)server;
+  capnp_bptr_t body;
   (void)iface;
   (void)method;
   (void)params;
   m->calls++;
-  return capnp_builder_set_u32(results, 0, m->mark);
+  if (capnp_builder_struct(results, 1, 0, &body))
+    return CAPNP_ERR_ALLOC;
+  return capnp_builder_set_u32(&body, 0, m->mark);
 }
 
 /* Alice -> Carol: a call whose params name the capability Bob hosts.
@@ -132,7 +135,7 @@ static void tell_where_to_go(capnp_rpc_conn_t *writer, capnp_rpc_conn_t *reader,
 /* Whether the answer to `qid` arrived carrying a capability. */
 static int answered_with_cap(capnp_rpc_conn_t *c, uint32_t qid)
 {
-  capnp_message_t held;
+  capnp_message_t held = {0};
   capnp_ptr_t content;
   int ok;
   if (!capnp_rpc_is_answered(c, qid) || capnp_rpc_is_failed(c, qid))

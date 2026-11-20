@@ -77,6 +77,8 @@ With =build= on =JANET_PATH=:
 
 =test/test_addressbook.c= sets fields in schema order and =memcmp=s
 =test/fixtures/addressbook_alice_bob.bin= from official =capnp encode=.
+That comparison is about allocation order. Canonical bytes are checked
+by =test/test_differential.sh= and do not depend on it.
 Regenerate goldens with =./scripts/gen-sample-fixtures.sh= (needs
 =capnp= on =PATH=).
 
@@ -92,7 +94,7 @@ union). Packed and canonical goldens sit next to the unpacked =.bin=.
 /* after janet_init(env): */
 capnp_janet_register(env);
 
-capnp_message_t msg;
+capnp_message_t msg = {0};
 capnp_message_view_flat(&msg, bytes, len);
 capnp_ptr_t root;
 capnp_root(&msg, &root);

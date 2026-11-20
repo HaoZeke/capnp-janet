@@ -16,8 +16,11 @@ Empty struct writes B=-1 (=0xFFFFFFFC=), same as
 
 * Schema-order encode
 
-=test/test_addressbook.c= sets fields in schema order and =memcmp=s
-=addressbook_alice_bob.bin= from official =capnp encode=.
+Non-canonical bytes follow allocation order. =test/test_addressbook.c=
+sets fields in schema order and =memcmp=s =addressbook_alice_bob.bin=
+from official =capnp encode=. Canonical form does not depend on that
+order: =test/test_differential.sh= checks unions, groups, defaults,
+=List(List(Text))=, and far pointers against =capnp convert=.
 
 * List evolution
 

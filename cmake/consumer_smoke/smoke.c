@@ -6,13 +6,14 @@
 
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_message.h>
+#include <capnp-janet/capnp_transport.h>
 
 int main(void) {
 	capnp_builder_t b;
 	capnp_bptr_t root, body;
 	uint8_t *flat = NULL;
 	size_t flat_len = 0;
-	capnp_message_t msg;
+	capnp_message_t msg = {0};
 	capnp_ptr_t r;
 	const char *s = NULL;
 	size_t sl = 0;
@@ -52,6 +53,10 @@ int main(void) {
 	}
 	capnp_message_free(&msg);
 	free(flat);
+	if (capnp_read_frame(-1, NULL, 0, NULL) != CAPNP_ERR_ARG) {
+		fprintf(stderr, "transport symbol missing\n");
+		return 1;
+	}
 	printf("capnp-janet consumer smoke ok\n");
 	return 0;
 }

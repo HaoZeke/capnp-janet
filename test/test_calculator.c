@@ -143,7 +143,7 @@ static void test_builder_add_2_3(void) {
   capnp_bptr_t params0;
   uint8_t *flat = NULL;
   size_t flat_len = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t req, expr;
   double v = 0.0;
 
@@ -184,7 +184,7 @@ static void test_builder_mul_add(void) {
   capnp_bptr_t outer_params, inner_params;
   uint8_t *flat = NULL;
   size_t flat_len = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t req, expr;
   double v = 0.0;
 
@@ -226,7 +226,7 @@ static void test_response_value(void) {
   capnp_bptr_t root, body;
   uint8_t *flat = NULL;
   size_t flat_len = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t resp;
 
   capnp_builder_init(&b);
@@ -248,7 +248,7 @@ static void test_golden(const char *rel, double expect) {
   char path[1024];
   uint8_t *flat = NULL;
   size_t flat_len = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t req, expr;
   double v = 0.0;
 
@@ -273,7 +273,7 @@ static void test_golden_response(void) {
   char path[1024];
   uint8_t *flat = NULL;
   size_t flat_len = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t resp;
 
   if (!src || !src[0])
@@ -295,7 +295,7 @@ static void test_literal_only_request(void) {
   capnp_bptr_t root, body, expr_slot, expr_body;
   uint8_t *flat = NULL;
   size_t flat_len = 0;
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t req, expr;
   double v = 0.0;
 

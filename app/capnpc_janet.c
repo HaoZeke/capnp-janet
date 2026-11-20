@@ -13,10 +13,13 @@
  * Node / Field layouts match /usr/include/capnp/schema.capnp
  * (capnp compile -ocapnp).
  */
+#include <capnp-janet/capnp_builder.h>
+#include <capnp-janet/capnp_canonical.h>
 #include <capnp-janet/capnp_message.h>
 
 #include <ctype.h>
 #include <errno.h>
+#include <math.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -277,7 +280,11 @@ static void scalar_default_literal(const capnp_ptr_t *field, uint16_t type,
   case TYPE_FLOAT32:
     bits32 = capnp_get_u32(&value, 4, 0);
     memcpy(&f32, &bits32, sizeof(f32));
-    if (bits32 == UINT32_C(0x80000000))
+    if (isnan(f32))
+      snprintf(out, outn, "math/nan");
+    else if (isinf(f32))
+      snprintf(out, outn, f32 < 0 ? "(- math/inf)" : "math/inf");
+    else if (bits32 == UINT32_C(0x80000000))
       snprintf(out, outn, "-0.0");
     else
       snprintf(out, outn, "%.9g", (double)f32);
@@ -285,7 +292,11 @@ static void scalar_default_literal(const capnp_ptr_t *field, uint16_t type,
   case TYPE_FLOAT64:
     bits64 = capnp_get_u64(&value, 8, 0);
     memcpy(&f64, &bits64, sizeof(f64));
-    if (bits64 == UINT64_C(0x8000000000000000))
+    if (isnan(f64))
+      snprintf(out, outn, "math/nan");
+    else if (isinf(f64))
+      snprintf(out, outn, f64 < 0 ? "(- math/inf)" : "math/inf");
+    else if (bits64 == UINT64_C(0x8000000000000000))
       snprintf(out, outn, "-0.0");
     else
       snprintf(out, outn, "%.17g", f64);
@@ -545,6 +556,388 @@ static void emit_interface(FILE *out, const capnp_ptr_t *node,
   fprintf(out, "})\n");
 }
 
+static int type_is_parameter(const capnp_ptr_t *typ, uint64_t *scope,
+                             uint16_t *index) {
+  if (capnp_get_u16(typ, 0, 0xffff) != TYPE_ANY_POINTER)
+    return 0;
+  /* AnyPointer.which: 0 unconstrained, 1 parameter, 2 implicit method. */
+  if (capnp_get_u16(typ, 8, 0xffff) != 1)
+    return 0;
+  if (scope)
+    *scope = capnp_get_u64(typ, 16, 0);
+  if (index)
+    *index = capnp_get_u16(typ, 10, 0);
+  return 1;
+}
+
+static int parameter_name(const capnp_ptr_t *nodes, uint64_t scope,
+                          uint16_t index, char *out, size_t outn) {
+  capnp_ptr_t node, params, param;
+  if (!node_by_id(nodes, scope, &node))
+    return 0;
+  if (capnp_getp(&node, 5, &params) != CAPNP_OK || params.kind != CAPNP_PK_LIST)
+    return 0;
+  if (capnp_list_getp(&params, index, &param) != CAPNP_OK)
+    return 0;
+  janet_ident(get_text(&param, 0), out, outn);
+  return 1;
+}
+
+static void janet_quote(FILE *out, const char *s, size_t n);
+
+static void emit_value_expr(FILE *out, const capnp_ptr_t *value) {
+  uint16_t which;
+  const char *text;
+  size_t text_len;
+  if (!value || value->kind != CAPNP_PK_STRUCT) {
+    fputs("nil", out);
+    return;
+  }
+  which = capnp_get_u16(value, 0, 0xffff);
+  switch (which) {
+  case TYPE_BOOL:
+    fputs(capnp_get_bool(value, 16, 0) ? "true" : "false", out);
+    break;
+  case TYPE_INT8:
+    fprintf(out, "%d", (int)(int8_t)capnp_get_u8(value, 2, 0));
+    break;
+  case TYPE_UINT8:
+    fprintf(out, "%u", (unsigned)capnp_get_u8(value, 2, 0));
+    break;
+  case TYPE_INT16:
+    fprintf(out, "%d", (int)(int16_t)capnp_get_u16(value, 2, 0));
+    break;
+  case TYPE_UINT16:
+  case TYPE_ENUM:
+    fprintf(out, "%u", (unsigned)capnp_get_u16(value, 2, 0));
+    break;
+  case TYPE_INT32:
+    fprintf(out, "%d", (int)(int32_t)capnp_get_u32(value, 4, 0));
+    break;
+  case TYPE_UINT32:
+    fprintf(out, "%u", (unsigned)capnp_get_u32(value, 4, 0));
+    break;
+  case TYPE_INT64: {
+    int64_t i64;
+    uint64_t bits = capnp_get_u64(value, 8, 0);
+    memcpy(&i64, &bits, sizeof(i64));
+    fprintf(out, "%lld", (long long)i64);
+    break;
+  }
+  case TYPE_UINT64:
+    fprintf(out, "%llu", (unsigned long long)capnp_get_u64(value, 8, 0));
+    break;
+  case TYPE_TEXT:
+    if (capnp_get_text(value, 0, &text, &text_len) != CAPNP_OK)
+      fputs("\"\"", out);
+    else
+      janet_quote(out, text, text_len);
+    break;
+  default:
+    fputs("nil", out);
+    break;
+  }
+}
+
+static void emit_annotation_list(FILE *out, const char *title,
+                                 const capnp_ptr_t *list) {
+  uint32_t i, n;
+  if (!list || list->kind != CAPNP_PK_LIST)
+    return;
+  n = capnp_list_len(list);
+  if (n == 0)
+    return;
+  fprintf(out, "(def %s @[\n", title);
+  for (i = 0; i < n; i++) {
+    capnp_ptr_t ann, val;
+    if (capnp_list_getp(list, i, &ann) != CAPNP_OK)
+      continue;
+    fprintf(out, "  {:id (int/u64 \"0x%016llx\") :value ",
+            (unsigned long long)capnp_get_u64(&ann, 0, 0));
+    if (capnp_getp(&ann, 0, &val) == CAPNP_OK)
+      emit_value_expr(out, &val);
+    else
+      fputs("nil", out);
+    fprintf(out, "}\n");
+  }
+  fprintf(out, "])\n");
+}
+
+static void emit_parameters(FILE *out, const capnp_ptr_t *node,
+                            const char *sname) {
+  capnp_ptr_t params;
+  uint32_t i, n;
+  if (!capnp_get_bool(node, 288, 0))
+    return;
+  if (capnp_getp(node, 5, &params) != CAPNP_OK || params.kind != CAPNP_PK_LIST)
+    return;
+  n = capnp_list_len(&params);
+  fprintf(out, "(def %s-generic true)\n", sname);
+  fprintf(out, "(def %s-parameters @[", sname);
+  for (i = 0; i < n; i++) {
+    capnp_ptr_t param;
+    char name[128];
+    if (capnp_list_getp(&params, i, &param) != CAPNP_OK)
+      continue;
+    janet_ident(get_text(&param, 0), name, sizeof(name));
+    fprintf(out, " \"%s\"", name);
+  }
+  fprintf(out, "])\n");
+}
+
+static void emit_type_token(FILE *out, const capnp_ptr_t *typ,
+                            const capnp_ptr_t *nodes) {
+  uint64_t scope = 0;
+  uint16_t index = 0;
+  char pname[128];
+  if (type_is_parameter(typ, &scope, &index) &&
+      parameter_name(nodes, scope, index, pname, sizeof(pname))) {
+    fprintf(out, "\"%s\"", pname);
+    return;
+  }
+  fprintf(out, ":%s", type_kw(capnp_get_u16(typ, 0, 0xffff)));
+}
+
+/* Brand.scopes is pointer 0. A scope's which is at byte 8: 0 bind, 1 inherit.
+ * Bindings are pointer 0; a binding's which is at byte 0: 0 unbound, 1 type. */
+static void emit_brand(FILE *out, const capnp_ptr_t *typ,
+                       const capnp_ptr_t *nodes) {
+  capnp_ptr_t brand, scopes;
+  uint16_t tw;
+  uint32_t i, n;
+  tw = capnp_get_u16(typ, 0, 0xffff);
+  if (tw != TYPE_STRUCT && tw != TYPE_ENUM && tw != TYPE_INTERFACE)
+    return;
+  if (capnp_getp(typ, 0, &brand) != CAPNP_OK || brand.kind != CAPNP_PK_STRUCT)
+    return;
+  if (capnp_getp(&brand, 0, &scopes) != CAPNP_OK || scopes.kind != CAPNP_PK_LIST)
+    return;
+  n = capnp_list_len(&scopes);
+  if (n == 0)
+    return;
+  fprintf(out, " :brand @[");
+  for (i = 0; i < n; i++) {
+    capnp_ptr_t scope, binds;
+    uint16_t which;
+    uint32_t j, nb;
+    if (capnp_list_getp(&scopes, i, &scope) != CAPNP_OK)
+      continue;
+    which = capnp_get_u16(&scope, 8, 0xffff);
+    fprintf(out, "{:scope (int/u64 \"0x%016llx\")",
+            (unsigned long long)capnp_get_u64(&scope, 0, 0));
+    if (which == 1) {
+      fprintf(out, " :inherit true}");
+      continue;
+    }
+    fprintf(out, " :bind @[");
+    if (capnp_getp(&scope, 0, &binds) == CAPNP_OK &&
+        binds.kind == CAPNP_PK_LIST) {
+      nb = capnp_list_len(&binds);
+      for (j = 0; j < nb; j++) {
+        capnp_ptr_t binding, btype;
+        fprintf(out, " ");
+        if (capnp_list_getp(&binds, j, &binding) != CAPNP_OK) {
+          fprintf(out, ":unbound");
+          continue;
+        }
+        if (capnp_get_u16(&binding, 0, 0xffff) == 0 ||
+            capnp_getp(&binding, 0, &btype) != CAPNP_OK ||
+            btype.kind != CAPNP_PK_STRUCT) {
+          fprintf(out, ":unbound");
+          continue;
+        }
+        emit_type_token(out, &btype, nodes);
+      }
+    }
+    fprintf(out, "]}");
+  }
+  fprintf(out, "]");
+}
+
+static const char *bound_getter(uint16_t which) {
+  switch (which) {
+  case TYPE_BOOL:
+    return "get-bool";
+  case TYPE_INT8:
+    return "get-i8";
+  case TYPE_UINT8:
+    return "get-u8";
+  case TYPE_INT16:
+    return "get-i16";
+  case TYPE_UINT16:
+  case TYPE_ENUM:
+    return "get-u16";
+  case TYPE_INT32:
+    return "get-i32";
+  case TYPE_UINT32:
+    return "get-u32";
+  case TYPE_INT64:
+    return "get-i64";
+  case TYPE_UINT64:
+    return "get-u64";
+  case TYPE_FLOAT32:
+    return "get-f32";
+  case TYPE_FLOAT64:
+    return "get-f64";
+  case TYPE_TEXT:
+    return "get-text";
+  case TYPE_DATA:
+    return "get-data";
+  default:
+    return NULL;
+  }
+}
+
+/* A use site Box(Text) binds Box.T. Emit a getter for each parameter field
+ * using the bound type, so the caller does not re-decode the brand. */
+static void emit_brand_accessors(FILE *out, const char *parent,
+                                 const char *field, const capnp_ptr_t *typ,
+                                 const capnp_ptr_t *nodes) {
+  capnp_ptr_t target, params, fields, brand, scopes;
+  uint64_t type_id;
+  uint32_t i, nf, nbind = 0;
+  capnp_ptr_t binds;
+  int have_binds = 0;
+  if (capnp_get_u16(typ, 0, 0xffff) != TYPE_STRUCT)
+    return;
+  type_id = capnp_get_u64(typ, 8, 0);
+  if (!node_by_id(nodes, type_id, &target))
+    return;
+  if (!capnp_get_bool(&target, 288, 0))
+    return;
+  if (capnp_getp(typ, 0, &brand) != CAPNP_OK || brand.kind != CAPNP_PK_STRUCT)
+    return;
+  if (capnp_getp(&brand, 0, &scopes) != CAPNP_OK || scopes.kind != CAPNP_PK_LIST)
+    return;
+  for (i = 0; i < capnp_list_len(&scopes); i++) {
+    capnp_ptr_t scope;
+    if (capnp_list_getp(&scopes, i, &scope) != CAPNP_OK)
+      continue;
+    if (capnp_get_u64(&scope, 0, 0) != type_id)
+      continue;
+    if (capnp_get_u16(&scope, 8, 0xffff) != 0)
+      continue;
+    if (capnp_getp(&scope, 0, &binds) == CAPNP_OK && binds.kind == CAPNP_PK_LIST) {
+      have_binds = 1;
+      nbind = capnp_list_len(&binds);
+    }
+  }
+  if (!have_binds)
+    return;
+  if (capnp_getp(&target, 5, &params) != CAPNP_OK || params.kind != CAPNP_PK_LIST)
+    return;
+  if (capnp_getp(&target, 3, &fields) != CAPNP_OK || fields.kind != CAPNP_PK_LIST)
+    return;
+  nf = capnp_list_len(&fields);
+  for (i = 0; i < nf; i++) {
+    capnp_ptr_t f, ftype;
+    uint64_t scope = 0;
+    uint16_t pindex = 0;
+    uint32_t offset;
+    capnp_ptr_t binding, btype;
+    uint16_t bwhich;
+    const char *getter;
+    char fname[128];
+    if (capnp_list_getp(&fields, i, &f) != CAPNP_OK)
+      continue;
+    if (capnp_get_u16(&f, 8, 0xffff) != FIELD_SLOT)
+      continue;
+    if (capnp_getp(&f, 2, &ftype) != CAPNP_OK || ftype.kind != CAPNP_PK_STRUCT)
+      continue;
+    if (!type_is_parameter(&ftype, &scope, &pindex) || scope != type_id)
+      continue;
+    if (pindex >= nbind || capnp_list_getp(&binds, pindex, &binding) != CAPNP_OK)
+      continue;
+    if (capnp_get_u16(&binding, 0, 0xffff) != 1)
+      continue;
+    if (capnp_getp(&binding, 0, &btype) != CAPNP_OK ||
+        btype.kind != CAPNP_PK_STRUCT)
+      continue;
+    bwhich = capnp_get_u16(&btype, 0, 0xffff);
+    getter = bound_getter(bwhich);
+    if (!getter)
+      continue;
+    janet_field_ident(get_text(&f, 0), fname, sizeof(fname));
+    offset = capnp_get_u32(&f, 4, 0);
+    if (bwhich == TYPE_TEXT || bwhich == TYPE_DATA) {
+      fprintf(out, "(defn %s-%s-get-%s [ptr]\n  (capnp/%s ptr %u))\n", parent,
+              field, fname, getter, (unsigned)offset);
+    } else if (bwhich == TYPE_BOOL) {
+      fprintf(out, "(defn %s-%s-get-%s [ptr]\n  (capnp/%s ptr %u false))\n",
+              parent, field, fname, getter, (unsigned)offset);
+    } else {
+      uint32_t byte = scalar_byte_offset(bwhich, offset);
+      fprintf(out, "(defn %s-%s-get-%s [ptr]\n  (capnp/%s ptr %u 0))\n", parent,
+              field, fname, getter, (unsigned)byte);
+    }
+  }
+  (void)params;
+}
+
+static void emit_hex_string(FILE *out, const uint8_t *p, size_t n) {
+  size_t i;
+  fputc('"', out);
+  for (i = 0; i < n; i++)
+    fprintf(out, "\\x%02x", p[i]);
+  fputc('"', out);
+}
+
+/* 1 when a struct or list default was emitted, 0 when there is none, -1
+ * on failure. The bytes are a framed canonical message whose root is the
+ * default value. */
+static int emit_pointer_default(FILE *out, const char *sname, const char *fname,
+                                uint32_t offset, const capnp_ptr_t *field) {
+  capnp_ptr_t value, child;
+  capnp_builder_t b;
+  capnp_bptr_t root;
+  capnp_message_t msg = {0};
+  uint8_t *flat = NULL, *canon = NULL;
+  size_t flen = 0, clen = 0;
+  uint16_t which;
+  int rc;
+  if (capnp_getp(field, 3, &value) != CAPNP_OK || value.kind != CAPNP_PK_STRUCT)
+    return 0;
+  which = capnp_get_u16(&value, 0, 0xffff);
+  if (which != TYPE_STRUCT && which != TYPE_LIST)
+    return 0;
+  if (capnp_getp(&value, 0, &child) != CAPNP_OK || child.kind == CAPNP_PK_NULL)
+    return 0;
+  capnp_builder_init(&b);
+  if (capnp_builder_root(&b, &root) || capnp_builder_copy_ptr(&root, &child)) {
+    capnp_builder_free(&b);
+    return -1;
+  }
+  rc = capnp_builder_serialize(&b, &flat, &flen);
+  capnp_builder_free(&b);
+  if (rc) {
+    free(flat);
+    return -1;
+  }
+  if (capnp_message_from_flat(&msg, flat, flen) != CAPNP_OK) {
+    free(flat);
+    return -1;
+  }
+  free(flat);
+  rc = capnp_canonicalize_framed(&msg, &canon, &clen);
+  capnp_message_free(&msg);
+  if (rc != CAPNP_OK) {
+    free(canon);
+    return -1;
+  }
+  fprintf(out, "(def %s-%s-default ", sname, fname);
+  emit_hex_string(out, canon, clen);
+  fprintf(out, ")\n");
+  fprintf(out,
+          "(defn %s-get-%s [ptr]\n"
+          "  (def v (capnp/getp ptr %u))\n"
+          "  (if (= (v :kind) :null)\n"
+          "    (:root (capnp/message-from-buffer %s-%s-default))\n"
+          "    v))\n",
+          sname, fname, (unsigned)offset, sname, fname);
+  free(canon);
+  return 1;
+}
+
 static void emit_struct(FILE *out, const capnp_ptr_t *node,
                         const capnp_ptr_t *nodes) {
   /* Node struct group: dataWordCount @bits 112-128 = byte 14 as u16?
@@ -563,18 +956,31 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
   uint16_t dwords = capnp_get_u16(node, 14, 0);
   uint16_t pwords = capnp_get_u16(node, 24, 0); /* bits 192 = byte 24 */
   uint16_t discriminant_count = capnp_get_u16(node, 30, 0);
-  uint32_t discriminant_byte = capnp_get_u32(node, 32, 0) * 2u;
+  uint32_t disc_off = capnp_get_u32(node, 32, 0);
+  uint64_t disc_bytes = (uint64_t)disc_off * 2u;
+  int disc_ok = discriminant_count > 0 && disc_bytes <= UINT32_MAX &&
+                disc_bytes + 2u <= (uint64_t)dwords * 8u;
+  uint32_t discriminant_byte = disc_ok ? (uint32_t)disc_bytes : 0u;
 
   fprintf(out, "\n# struct %s\n", sname);
   fprintf(out, "(def %s-data-words %u)\n", sname, (unsigned)dwords);
   fprintf(out, "(def %s-pointer-words %u)\n", sname, (unsigned)pwords);
+  emit_parameters(out, node, sname);
+  {
+    capnp_ptr_t anns;
+    char title[320];
+    if (capnp_getp(node, 2, &anns) == CAPNP_OK) {
+      snprintf(title, sizeof(title), "%s-annotations", sname);
+      emit_annotation_list(out, title, &anns);
+    }
+  }
 
   capnp_ptr_t fields;
   if (capnp_getp(node, 3, &fields) != CAPNP_OK || fields.kind != CAPNP_PK_LIST)
     return;
 
   uint32_t nf = capnp_list_len(&fields);
-  if (discriminant_count > 0) {
+  if (disc_ok) {
     fprintf(out, "(def %s-discriminant-byte %u)\n", sname,
             (unsigned)discriminant_byte);
     fprintf(out,
@@ -618,10 +1024,38 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
     /* Slot offset meaning depends on type: data bit offset or pointer index.
      * Cap'n: for data fields offset is in units of the type size; for
      * pointers it is the pointer index. Emit raw offset + type keyword. */
-    fprintf(out, "\n    :%s @{:offset %u :type :%s}", fname, (unsigned)offset,
-            type_kw(tw));
+    if (type_is_parameter(&typ, NULL, NULL))
+      fprintf(out, "\n    :%s @{:offset %u :type :parameter", fname,
+              (unsigned)offset);
+    else
+      fprintf(out, "\n    :%s @{:offset %u :type :%s", fname, (unsigned)offset,
+              type_kw(tw));
+    {
+      uint64_t pscope = 0;
+      uint16_t pindex = 0;
+      char pname[128];
+      if (type_is_parameter(&typ, &pscope, &pindex)) {
+        fprintf(out, " :parameter-index %u", (unsigned)pindex);
+        if (parameter_name(nodes, pscope, pindex, pname, sizeof(pname)))
+          fprintf(out, " :parameter \"%s\"", pname);
+      }
+    }
+    emit_brand(out, &typ, nodes);
+    fprintf(out, "}");
   }
   fprintf(out, "})\n");
+  for (uint32_t ai = 0; ai < nf; ai++) {
+    capnp_ptr_t f, anns;
+    char fname[128];
+    char title[512];
+    if (capnp_list_getp(&fields, ai, &f) != CAPNP_OK)
+      continue;
+    if (capnp_getp(&f, 1, &anns) != CAPNP_OK || anns.kind != CAPNP_PK_LIST)
+      continue;
+    janet_field_ident(get_text(&f, 0), fname, sizeof(fname));
+    snprintf(title, sizeof(title), "%s-%s-annotations", sname, fname);
+    emit_annotation_list(out, title, &anns);
+  }
 
   if (!capnp_get_bool(node, 224, 0)) {
     fprintf(out,
@@ -741,6 +1175,7 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       emit_union_select(out, sname, fname, is_union_member);
       fprintf(out, "  (capnp/init-struct ptr %u %d %d))\n",
               (unsigned)offset, child_dwords, child_pwords);
+      emit_brand_accessors(out, sname, fname, &typ, nodes);
       break;
     }
     case TYPE_LIST: {
@@ -750,6 +1185,13 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       if (capnp_getp(&typ, 0, &element_type) == CAPNP_OK &&
           element_type.kind == CAPNP_PK_STRUCT)
         element_which = capnp_get_u16(&element_type, 0, 0xffff);
+      if (element_which == TYPE_LIST) {
+        fprintf(out, "(defn %s-init-%s [ptr count]\n", sname, fname);
+        emit_union_select(out, sname, fname, is_union_member);
+        fprintf(out, "  (capnp/init-ptr-list ptr %u count))\n",
+                (unsigned)offset);
+        break;
+      }
       if (element_which == TYPE_STRUCT) {
         int child_dwords, child_pwords;
         struct_shape(nodes, capnp_get_u64(&element_type, 8, 0),
@@ -878,9 +1320,10 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       capnp_ptr_t element_type;
       uint16_t element_which = 0xffff;
       const char *list_suffix;
-      fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/getp ptr %u))\n", sname, fname,
-              (unsigned)offset);
+      if (emit_pointer_default(out, sname, fname, offset, &f) <= 0)
+        fprintf(out,
+                "(defn %s-get-%s [ptr]\n  (capnp/getp ptr %u))\n", sname, fname,
+                (unsigned)offset);
       if (capnp_getp(&typ, 0, &element_type) == CAPNP_OK &&
           element_type.kind == CAPNP_PK_STRUCT)
         element_which = capnp_get_u16(&element_type, 0, 0xffff);
@@ -893,6 +1336,13 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       break;
     }
     case TYPE_STRUCT:
+      if (emit_pointer_default(out, sname, fname, offset, &f) > 0)
+        break;
+      /* fall through */
+    case TYPE_ANY_POINTER:
+    case 25: /* AnyStruct */
+    case 26: /* AnyList */
+    case 27: /* Capability */
       fprintf(out,
               "(defn %s-get-%s [ptr]\n  (capnp/getp ptr %u))\n", sname, fname,
               (unsigned)offset);
@@ -901,6 +1351,134 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
       break;
     }
   }
+}
+
+static void janet_quote(FILE *out, const char *s, size_t n) {
+  size_t i;
+  fputc('"', out);
+  for (i = 0; i < n; i++) {
+    unsigned char c = (unsigned char)s[i];
+    if (c == '"' || c == '\\') {
+      fputc('\\', out);
+      fputc((char)c, out);
+    } else if (c == '\n') {
+      fputs("\\n", out);
+    } else if (c == '\t') {
+      fputs("\\t", out);
+    } else if (c < 0x20 || c == 0x7f) {
+      fprintf(out, "\\x%02x", c);
+    } else {
+      fputc((char)c, out);
+    }
+  }
+  fputc('"', out);
+}
+
+static void emit_const(FILE *out, const capnp_ptr_t *node) {
+  capnp_ptr_t value;
+  char name[256];
+  uint16_t which;
+  const char *text;
+  size_t text_len;
+  if (capnp_get_u16(node, 12, 0xffff) != NODE_CONST)
+    return;
+  type_short_name(get_text(node, 0), name, sizeof(name));
+  if (capnp_getp(node, 4, &value) != CAPNP_OK || value.kind != CAPNP_PK_STRUCT)
+    return;
+  which = capnp_get_u16(&value, 0, 0xffff);
+  fprintf(out, "(def %s ", name);
+  switch (which) {
+  case TYPE_VOID:
+    fputs("nil", out);
+    break;
+  case TYPE_BOOL:
+    fputs(capnp_get_bool(&value, 16, 0) ? "true" : "false", out);
+    break;
+  case TYPE_INT8:
+    fprintf(out, "%d", (int)(int8_t)capnp_get_u8(&value, 2, 0));
+    break;
+  case TYPE_UINT8:
+    fprintf(out, "%u", (unsigned)capnp_get_u8(&value, 2, 0));
+    break;
+  case TYPE_INT16:
+    fprintf(out, "%d", (int)(int16_t)capnp_get_u16(&value, 2, 0));
+    break;
+  case TYPE_UINT16:
+  case TYPE_ENUM:
+    fprintf(out, "%u", (unsigned)capnp_get_u16(&value, 2, 0));
+    break;
+  case TYPE_INT32:
+    fprintf(out, "%d", (int)(int32_t)capnp_get_u32(&value, 4, 0));
+    break;
+  case TYPE_UINT32:
+    fprintf(out, "%u", (unsigned)capnp_get_u32(&value, 4, 0));
+    break;
+  case TYPE_INT64: {
+    int64_t i64;
+    uint64_t bits = capnp_get_u64(&value, 8, 0);
+    memcpy(&i64, &bits, sizeof(i64));
+    if (i64 < INT64_C(-9007199254740992) || i64 > INT64_C(9007199254740992))
+      fprintf(out, "(int/s64 \"%lld\")", (long long)i64);
+    else
+      fprintf(out, "%lld", (long long)i64);
+    break;
+  }
+  case TYPE_UINT64: {
+    uint64_t u64 = capnp_get_u64(&value, 8, 0);
+    if (u64 > UINT64_C(9007199254740992))
+      fprintf(out, "(int/u64 \"%llu\")", (unsigned long long)u64);
+    else
+      fprintf(out, "%llu", (unsigned long long)u64);
+    break;
+  }
+  case TYPE_FLOAT32: {
+    uint32_t bits = capnp_get_u32(&value, 4, 0);
+    float f32;
+    memcpy(&f32, &bits, sizeof(f32));
+    if (isnan(f32))
+      fputs("math/nan", out);
+    else if (isinf(f32))
+      fputs(f32 < 0 ? "(- math/inf)" : "math/inf", out);
+    else if (bits == UINT32_C(0x80000000))
+      fputs("-0.0", out);
+    else
+      fprintf(out, "%.9g", (double)f32);
+    break;
+  }
+  case TYPE_FLOAT64: {
+    uint64_t bits = capnp_get_u64(&value, 8, 0);
+    double f64;
+    memcpy(&f64, &bits, sizeof(f64));
+    if (isnan(f64))
+      fputs("math/nan", out);
+    else if (isinf(f64))
+      fputs(f64 < 0 ? "(- math/inf)" : "math/inf", out);
+    else if (bits == UINT64_C(0x8000000000000000))
+      fputs("-0.0", out);
+    else
+      fprintf(out, "%.17g", f64);
+    break;
+  }
+  case TYPE_TEXT:
+    if (capnp_get_text(&value, 0, &text, &text_len) != CAPNP_OK)
+      fputs("\"\"", out);
+    else
+      janet_quote(out, text, text_len);
+    break;
+  case TYPE_DATA: {
+    const uint8_t *data = NULL;
+    size_t n = 0;
+    if (capnp_get_data(&value, 0, &data, &n) != CAPNP_OK || !data)
+      fputs("\"\"", out);
+    else
+      janet_quote(out, (const char *)data, n);
+    break;
+  }
+  default:
+    fputs("(error \"unsupported Cap'n Proto pointer constant\")", out);
+    break;
+  }
+  fputs(")\n", out);
 }
 
 static void emit_enum(FILE *out, const capnp_ptr_t *node) {
@@ -970,6 +1548,8 @@ static int write_module(const char *filename, const capnp_ptr_t *nodes,
       emit_enum(out, &node);
     else if (which == NODE_IFACE)
       emit_interface(out, &node, nodes);
+    else if (which == NODE_CONST)
+      emit_const(out, &node);
   }
 
   fclose(out);
@@ -988,7 +1568,7 @@ static int write_module(const char *filename, const capnp_ptr_t *nodes,
 int main(void) {
   size_t len = 0;
   char *buf = read_all_stdin(&len);
-  capnp_message_t m;
+  capnp_message_t m = {0};
   capnp_ptr_t root, nodes, req_files;
 
   if (!buf || len == 0) {

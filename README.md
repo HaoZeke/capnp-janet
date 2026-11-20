@@ -10,8 +10,10 @@ zero-copy segment views, schema evolution defaults, and the `capnpc-janet`
 schema compiler plugin.
 
 **Status:** `0.2.5`. Reader, multi-segment builder, packed and canonical
-codecs, and typed `capnpc-janet` readers/builders. Wire encode of AddressBook
-matches official `capnp encode` when fields are set in schema order.
+codecs, and typed `capnpc-janet` readers/builders. Non-canonical bytes
+follow allocation order, so an AddressBook matches official `capnp encode`
+when nested objects are allocated in schema order. Canonical bytes match
+`capnp convert binary:canonical` regardless of that order.
 
 ## Why this exists
 
@@ -41,6 +43,7 @@ packs import.
 - Generated scalar-default, union, group, struct, and list reader/builder helpers
 - `capnp_janet_lookup_into` + `janet/policy.janet` for compiled `.jimage` packs
 - Traversal word budget and depth limit (C++ defaults)
+- Dynamic field access over a `CodeGeneratorRequest`, plus text and JSON codecs (`capnp_dyn.h`)
 
 ## Parity
 
@@ -117,7 +120,7 @@ $ pixi run build
 $ pixi run test
 ```
 
-Or bare Meson:
+Or bare Meson 1.2 or newer (Debian bookworm's apt package is 1.0.1 and cannot configure this tree):
 
 ```console
 $ meson setup build
@@ -133,7 +136,7 @@ or `-Djanet=enabled`.
 ```c
 #include <capnp-janet/capnp_message.h>
 
-capnp_message_t msg;
+capnp_message_t msg = {0};
 capnp_message_view_flat(&msg, bytes, len);
 capnp_ptr_t root;
 capnp_root(&msg, &root);
@@ -142,6 +145,17 @@ capnp_get_text(&root, /*ptr*/0, &s, &n);
 ```
 
 Link `libcapnp_janet` (pkg-config: `capnp-janet`).
+
+A `capnp_message_t` has to be zero-initialized, as above, or passed to
+`capnp_message_init` before `from_flat`, `view_flat`, `from_segments`,
+or `capnp_message_free`. Those calls free the previous buffer when the
+message is already live, so parsing into the same struct again does not
+leak. A zero `ready` field means the struct owns nothing.
+
+JSON text is UTF-8. A `\u` surrogate pair (`\uD83D\uDE00`) is one scalar
+and is stored as UTF-8. A lone surrogate is rejected with the error
+`lone surrogate`. Cap'n Proto C++ 1.4.0 encodes each `\u` unit on its
+own as CESU-8 and accepts a lone surrogate; this library does not.
 
 ### Janet
 
@@ -233,10 +247,21 @@ docs/orgmode/  architecture notes
 ## Compatibility boundaries
 
 The supported surface includes readers, arena builders, packed and canonical
-codecs, generated typed helpers, and the C RPC vat through level 4. It does not
-expose C++ orphan ownership, generated pointer-default constants, a dynamic
-schema API, or Janet wrappers for the C RPC vat. Calls outside the documented
-list-evolution matrix return a kind error or the supplied default.
+codecs, generated typed helpers (including struct and list pointer
+defaults), the C dynamic API in `capnp_dyn.h` (text and JSON over a compiled
+`CodeGeneratorRequest`), and the C RPC vat through level 4. Janet code can drive that vat with `capnp/rpc-connect` and the
+`rpc-*` calls, including host dispatch, level-3 handoff, and streams.
+Orphans can be allocated, adopted, and disowned, including composite
+lists. Calls
+outside the documented list-evolution matrix return a kind error or the
+supplied default.
+
+Schema source is parsed by the official compiler, not a second implementation
+of the language. `capnp compile -o- schema.capnp` writes a
+`CodeGeneratorRequest` to stdout (`-o-` is the compiler's dump of the request
+it would hand a plugin). `capnp_dyn_init` reads those bytes. Imports,
+generics, and annotations stay in lockstep with the compiler that produced
+them.
 
 ## Related
 
