@@ -889,16 +889,16 @@ static int list_nwords(int esize, uint32_t count, size_t *out) {
     n = 0;
     break;
   case CAPNP_SZ_BIT:
-    n = ((size_t)count + 63u) / 64u;
+    n = (size_t)(count / 64u) + (count % 64u != 0);
     break;
   case CAPNP_SZ_BYTE:
-    n = ((size_t)count + 7u) / 8u;
+    n = (size_t)(count / 8u) + (count % 8u != 0);
     break;
   case CAPNP_SZ_TWO:
-    n = ((size_t)count + 3u) / 4u;
+    n = (size_t)(count / 4u) + (count % 4u != 0);
     break;
   case CAPNP_SZ_FOUR:
-    n = ((size_t)count + 1u) / 2u;
+    n = (size_t)(count / 2u) + (count % 2u != 0);
     break;
   case CAPNP_SZ_EIGHT:
   case CAPNP_SZ_PTR:
@@ -1538,6 +1538,8 @@ int capnp_builder_new_orphan_struct_list(capnp_builder_t *b, uint32_t count,
   if (!b || !o)
     return CAPNP_ERR_ARG;
   if (count && content / count != step)
+    return CAPNP_ERR_BOUNDS;
+  if (content == SIZE_MAX)
     return CAPNP_ERR_BOUNDS;
   memset(o, 0, sizeof(*o));
   if (alloc_words(b, need, &seg, &word))

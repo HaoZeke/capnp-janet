@@ -674,6 +674,28 @@ static void test_stale_copy_after_adopt_clear_realloc(void) {
   capnp_builder_free(&b);
 }
 
+/* Counts that wrap size_t on ILP32 must fail instead of allocating zero
+ * words for an object that claims billions of them. */
+static void test_huge_counts_rejected(void) {
+  capnp_builder_t b = {0};
+  capnp_orphan_t o = {0}, fill = {0};
+  capnp_bptr_t first;
+
+  capnp_builder_init_sized(&b, 1);
+  check(capnp_builder_new_orphan_list(&b, CAPNP_SZ_EIGHT, 1, &fill, &first) ==
+            CAPNP_OK,
+        "hc fill");
+  check(capnp_builder_new_orphan_struct_list(&b, 0xFFFFFFFFu, 1, 0, &o,
+                                             &first) != CAPNP_OK,
+        "hc struct list");
+  check(o.live == 0, "hc struct list dead");
+  check(capnp_builder_new_orphan_list(&b, CAPNP_SZ_BYTE, 0xFFFFFFFFu, &o,
+                                      &first) != CAPNP_OK,
+        "hc byte list");
+  check(o.live == 0, "hc byte list dead");
+  capnp_builder_free(&b);
+}
+
 /* A stale orphan referencing a freed builder must fail cleanly. */
 static void test_stale_orphan_after_builder_free(void) {
   capnp_builder_t b = {0};
@@ -810,6 +832,7 @@ int main(void) {
   test_orphan_copy_without_padding();
   test_stale_copy_after_free_and_realloc();
   test_stale_copy_after_adopt_clear_realloc();
+  test_huge_counts_rejected();
   test_stale_orphan_after_builder_free();
   test_orphan_adopt_zero_list_over_tail();
   test_concurrent_zero_size_orphans();
