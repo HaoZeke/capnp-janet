@@ -1505,6 +1505,12 @@ int capnp_builder_new_orphan_struct_list(capnp_builder_t *b, uint32_t count,
   size_t word = 0;
   if (!b || !o)
     return CAPNP_ERR_ARG;
+  /* The tag stores the element count in a 30-bit field, and
+   * capnp_wp_make_struct keeps only those bits. C++ 1.4.0 rejects an
+   * element count above 2^29-1 before writing the tag. A larger count
+   * would be truncated (2^30 becomes zero) and still adopt. */
+  if (count > CAPNP_BUILDER_MAX_SEGMENT_WORDS)
+    return CAPNP_ERR_BOUNDS;
   if (count && content / count != step)
     return CAPNP_ERR_BOUNDS;
   if (content == SIZE_MAX)

@@ -765,6 +765,32 @@ static void test_wire_list_count_rejected(void) {
         "wc orphan");
   check(capnp_builder_adopt(&slot, &o) == CAPNP_ERR_BOUNDS, "wc adopt");
   check(capnp_builder_orphan_free(&o) == CAPNP_OK, "wc free");
+  /* The composite tag holds the element count. 2^30 is masked to zero
+   * by the 30-bit offset field, so creation itself has to fail. */
+  check(capnp_builder_new_orphan_struct_list(
+            &b, CAPNP_BUILDER_MAX_SEGMENT_WORDS + 1u, 0, 0, &o, NULL) ==
+            CAPNP_ERR_BOUNDS,
+        "wc struct over");
+  check(o.live == 0, "wc struct over dead");
+  check(capnp_builder_new_orphan_struct_list(&b, 1u << 30, 0, 0, &o, NULL) ==
+            CAPNP_ERR_BOUNDS,
+        "wc struct mask");
+  check(o.live == 0, "wc struct mask dead");
+  check(capnp_builder_new_orphan_struct_list(
+            &b, CAPNP_BUILDER_MAX_SEGMENT_WORDS, 0, 0, &o, NULL) == CAPNP_OK,
+        "wc struct max");
+  check(capnp_builder_adopt(&slot, &o) == CAPNP_OK, "wc struct adopt");
+  {
+    const uint8_t *data = capnp_builder_seg_data(&b, slot.seg);
+    uint64_t lw = capnp_load_le64(data + slot.word * CAPNP_WORD_BYTES);
+    int64_t at = (int64_t)slot.word + 1 + capnp_wp_offset(lw);
+    uint64_t tag;
+    check(at >= 0 && (size_t)at < capnp_builder_seg_words(&b, slot.seg),
+          "wc tag in seg");
+    tag = capnp_load_le64(data + (size_t)at * CAPNP_WORD_BYTES);
+    check(capnp_wp_offset(tag) == (int32_t)CAPNP_BUILDER_MAX_SEGMENT_WORDS,
+          "wc tag count");
+  }
   capnp_builder_free(&b);
 }
 
