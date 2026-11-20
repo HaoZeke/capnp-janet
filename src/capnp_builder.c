@@ -42,6 +42,7 @@ struct capnp_oref {
   uintptr_t owner_id;
   uint32_t seg;
   size_t word;
+  size_t end; /* first word past the object; 0 for a zero-word object */
   int kind;
   uint16_t dwords;
   uint16_t pwords;
@@ -49,16 +50,13 @@ struct capnp_oref {
   uint32_t count;
 };
 
-/* Orphan records and per-segment reclaim pins sit in front of the
- * segment table. Callers allocate capnp_builder_t themselves, so those
- * fields stay outside the public struct. */
+/* Records of the live orphans sit in front of the segment table.
+ * Callers allocate capnp_builder_t themselves, so these fields stay
+ * outside the public struct. */
 struct capnp_builder_priv {
   struct capnp_oref *orefs;
-  size_t *seg_pins;
   uint32_t norefs;
   uint32_t orefs_cap;
-  uint32_t seg_pins_cap;
-  uint32_t reserved;
 };
 
 _Static_assert(sizeof(struct capnp_builder_priv) % _Alignof(capnp_bseg_t) == 0,
@@ -79,7 +77,6 @@ static void builder_release_table(capnp_builder_t *b) {
   if (!b || !b->segs)
     return;
   priv = builder_priv(b);
-  free(priv->seg_pins);
   free(priv->orefs);
   free(priv);
   b->segs = NULL;
@@ -1085,29 +1082,32 @@ static size_t empty_list_pin(capnp_builder_t *b, uint32_t seg) {
   return pin;
 }
 
-static size_t orphan_seg_pin(capnp_builder_t *b, uint32_t seg) {
-  struct capnp_builder_priv *priv = builder_priv(b);
-  if (!priv || seg >= priv->seg_pins_cap)
-    return 0;
-  return priv->seg_pins[seg];
-}
-
-static int orphan_seg_has_live(capnp_builder_t *b, uint32_t seg) {
+/* Highest word a live orphan occupies in `seg`, and whether any live
+ * orphan names the segment. Retired orphans leave nothing behind, so a
+ * disown/adopt loop does not stop later reclaims. */
+static int orphan_seg_scan(capnp_builder_t *b, uint32_t seg, size_t *pin) {
   struct capnp_builder_priv *priv = builder_priv(b);
   uint32_t i;
+  int live = 0;
+  *pin = 0;
   if (!priv)
     return 0;
   for (i = 0; i < priv->norefs; i++) {
-    if (priv->orefs[i].seg == seg)
-      return 1;
+    const struct capnp_oref *rec = &priv->orefs[i];
+    if (rec->seg != seg)
+      continue;
+    live = 1;
+    if (rec->end > *pin)
+      *pin = rec->end;
   }
-  return 0;
+  return live;
 }
 
 static void reclaim_tail(capnp_builder_t *b, uint32_t seg, size_t start,
                          size_t n) {
   capnp_bseg_t *s;
   size_t pin, opin, keep;
+  int has_live;
   if (!b || n == 0 || seg >= b->nsegs)
     return;
   s = &b->segs[seg];
@@ -1115,7 +1115,7 @@ static void reclaim_tail(capnp_builder_t *b, uint32_t seg, size_t start,
     return;
   zero_words(b, seg, start, n);
   pin = empty_list_pin(b, seg);
-  opin = orphan_seg_pin(b, seg);
+  has_live = orphan_seg_scan(b, seg, &opin);
   if (opin > pin)
     pin = opin;
   /* A target equal to the word count is the segment end, which a
@@ -1126,8 +1126,7 @@ static void reclaim_tail(capnp_builder_t *b, uint32_t seg, size_t start,
   s->words = keep;
   /* Segment 0 holds the root. An emptied later segment is a malloc
    * the message no longer needs unless a live orphan still names it. */
-  if (s->words == 0 && seg > 0 && seg + 1u == b->nsegs &&
-      !orphan_seg_has_live(b, seg)) {
+  if (s->words == 0 && seg > 0 && seg + 1u == b->nsegs && !has_live) {
     free(s->data);
     memset(s, 0, sizeof(*s));
     b->nsegs--;
@@ -1331,33 +1330,6 @@ static int orphan_grow(struct capnp_builder_priv *priv) {
   return CAPNP_OK;
 }
 
-static int orphan_pins_ensure(struct capnp_builder_priv *priv, uint32_t seg) {
-  uint32_t cap;
-  size_t *grown;
-  if (seg < priv->seg_pins_cap)
-    return CAPNP_OK;
-  cap = priv->seg_pins_cap ? priv->seg_pins_cap * 2u : 4u;
-  while (cap <= seg) {
-    if (cap > UINT32_MAX / 2u) {
-      cap = seg + 1u;
-      break;
-    }
-    cap *= 2u;
-  }
-#if SIZE_MAX <= UINT32_MAX
-  if ((size_t)cap > SIZE_MAX / sizeof(*grown))
-    return CAPNP_ERR_ALLOC;
-#endif
-  grown = (size_t *)realloc(priv->seg_pins, (size_t)cap * sizeof(*grown));
-  if (!grown)
-    return CAPNP_ERR_ALLOC;
-  memset(grown + priv->seg_pins_cap, 0,
-         (size_t)(cap - priv->seg_pins_cap) * sizeof(*grown));
-  priv->seg_pins = grown;
-  priv->seg_pins_cap = cap;
-  return CAPNP_OK;
-}
-
 static int orphan_matches(const struct capnp_oref *rec,
                           const capnp_orphan_t *o) {
   return rec->seg == o->seg && rec->word == o->word &&
@@ -1417,17 +1389,11 @@ static int orphan_register(capnp_builder_t *b, capnp_orphan_t *o, size_t nwords)
     return CAPNP_ERR_BOUNDS;
   if (orphan_grow(priv))
     return CAPNP_ERR_ALLOC;
-  if (nwords > 0 && orphan_pins_ensure(priv, o->seg))
-    return CAPNP_ERR_ALLOC;
-  if (nwords > 0) {
-    size_t end_word = o->word + nwords;
-    if (end_word > priv->seg_pins[o->seg])
-      priv->seg_pins[o->seg] = end_word;
-  }
   rec = &priv->orefs[priv->norefs++];
   rec->owner_id = (uintptr_t)o;
   rec->seg = o->seg;
   rec->word = o->word;
+  rec->end = nwords > 0 ? o->word + nwords : 0;
   rec->kind = o->kind;
   rec->dwords = o->dwords;
   rec->pwords = o->pwords;

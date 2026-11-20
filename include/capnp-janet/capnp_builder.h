@@ -148,7 +148,14 @@ CAPNP_JANET_EXPORT int capnp_builder_copy_ptr(capnp_bptr_t *slot, const capnp_pt
 
 /* An object allocated in the arena and not yet attached to a pointer
  * slot, the same relationship as a C++ Orphan. adopt writes the pointer
- * and clears `live`. disown nulls the slot and returns the object. */
+ * and clears `live`. disown nulls the slot and returns the object.
+ *
+ * Identity lives in a table the arena owns, keyed by the public fields
+ * below. C++ Orphan is move-only, so a by-value copy is not a handle
+ * C++ allows. A copy made before adopt or free is rejected afterwards
+ * unless a later orphan occupies the same words with the same shape.
+ * Then the copy and that orphan share one record and only one of them
+ * succeeds. Keep one handle per orphan. */
 typedef struct capnp_orphan {
   capnp_builder_t *b;
   uint32_t seg;
@@ -179,7 +186,8 @@ CAPNP_JANET_EXPORT int capnp_builder_new_orphan_struct_list(
 CAPNP_JANET_EXPORT int capnp_builder_adopt(const capnp_bptr_t *slot,
                                            capnp_orphan_t *o);
 /* Zero the orphan's words and drop its pointer children. The orphan
- * is not live afterwards, and adopt of it fails. */
+ * is not live afterwards, and adopt of it fails. Like C++
+ * OrphanBuilder::euthanize this leaves the segment tail where it is. */
 CAPNP_JANET_EXPORT int capnp_builder_orphan_free(capnp_orphan_t *o);
 CAPNP_JANET_EXPORT int capnp_builder_disown(const capnp_bptr_t *slot,
                                             capnp_orphan_t *o);

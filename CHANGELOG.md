@@ -45,6 +45,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Changed
 
+- `capnp_builder_orphan_free` leaves the segment tail where it is, as
+  C++ `OrphanBuilder::euthanize` does. `capnp_orphan_t` identity lives in
+  an arena-owned table, so the public struct keeps its released layout.
+  C++ `Orphan` is move-only; keep one handle per orphan.
 - `capnp_rpc_fill_fn` returns `int`. A callback that returns `void` is
   an incompatible pointer type. Return nonzero when the callback fails
   so the call is not sent.

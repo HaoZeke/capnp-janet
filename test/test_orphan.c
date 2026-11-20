@@ -646,18 +646,24 @@ static void test_stale_copy_after_free_and_realloc(void) {
   capnp_builder_free(&b);
 }
 
-/* Adopting an orphan, clearing its tail slot, and allocating a fresh
- * orphan must still keep a stale copy of the first orphan inert. */
+/* A by-value copy of an adopted orphan is not a handle C++ allows: its
+ * Orphan is move-only. When the clear rewinds the tail and a later orphan
+ * lands on the same words, the copy and the new orphan name one record. At
+ * most one of them may succeed, and nothing outside that object is
+ * touched. */
 static void test_stale_copy_after_adopt_clear_realloc(void) {
   capnp_builder_t b = {0};
-  capnp_bptr_t root, body, slot, b1, b2;
+  capnp_bptr_t root, body, slot, b1, b2, other;
   capnp_orphan_t o1 = {0}, copy = {0}, o2 = {0};
+  int rc_copy, rc_o2;
   uint64_t got;
 
   capnp_builder_init(&b);
   check(capnp_builder_root(&b, &root) == CAPNP_OK, "ac root");
-  check(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "ac body");
+  check(capnp_builder_struct(&root, 0, 2, &body) == CAPNP_OK, "ac body");
   check(capnp_builder_slot(&body, 0, 0, &slot) == CAPNP_OK, "ac slot");
+  check(capnp_builder_slot(&body, 0, 1, &other) == CAPNP_OK, "ac other");
+  check(capnp_builder_set_text(&body, 0, 1, "keep", 4) == CAPNP_OK, "ac text");
   check(capnp_builder_new_orphan_struct(&b, 1, 0, &o1, &b1) == CAPNP_OK,
         "ac o1");
   copy = o1;
@@ -667,10 +673,57 @@ static void test_stale_copy_after_adopt_clear_realloc(void) {
         "ac o2");
   check(capnp_builder_set_u64(&b2, 0, 0x13572468ACE0BDF1ULL) == CAPNP_OK,
         "ac set o2");
-  check(capnp_builder_orphan_free(&copy) == CAPNP_ERR_ARG, "ac stale copy");
+  rc_copy = capnp_builder_orphan_free(&copy);
   got = capnp_load_le64(b.segs[b2.seg].data + b2.word * 8);
-  check(got == 0x13572468ACE0BDF1ULL, "ac o2 kept");
-  check(capnp_builder_adopt(&slot, &o2) == CAPNP_OK, "ac adopt o2");
+  if (rc_copy == CAPNP_OK)
+    check(got == 0, "ac aliased free zeroes only the new orphan");
+  else
+    check(rc_copy == CAPNP_ERR_ARG && got == 0x13572468ACE0BDF1ULL,
+          "ac inert copy leaves o2");
+  rc_o2 = capnp_builder_orphan_free(&o2);
+  check((rc_copy == CAPNP_OK) != (rc_o2 == CAPNP_OK), "ac exactly one frees");
+  check(capnp_builder_slot(&body, 0, 1, &other) == CAPNP_OK, "ac other again");
+  capnp_builder_free(&b);
+}
+
+/* Orphan records that are gone do not keep a reclaim pin. A loop that
+ * disowns, adopts and clears the same slot must not grow the arena. */
+static size_t total_words(capnp_builder_t *b) {
+  size_t t = 0;
+  uint32_t i;
+  for (i = 0; i < capnp_builder_nsegs(b); i++)
+    t += capnp_builder_seg_words(b, i);
+  return t;
+}
+
+static void test_retired_orphan_keeps_no_pin(void) {
+  capnp_builder_t b = {0};
+  capnp_bptr_t root, body, slot, child;
+  capnp_orphan_t o = {0};
+  size_t base;
+  int i;
+
+  capnp_builder_init(&b);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "pn root");
+  check(capnp_builder_struct(&root, 0, 1, &body) == CAPNP_OK, "pn body");
+  check(capnp_builder_slot(&body, 0, 0, &slot) == CAPNP_OK, "pn slot");
+  check(capnp_builder_struct(&slot, 2, 2, &child) == CAPNP_OK, "pn child");
+  check(capnp_builder_disown(&slot, &o) == CAPNP_OK, "pn warm disown");
+  check(capnp_builder_adopt(&slot, &o) == CAPNP_OK, "pn warm adopt");
+  check(capnp_builder_clear_ptr(&body, 0, 0) == CAPNP_OK, "pn warm clear");
+  base = total_words(&b);
+  for (i = 0; i < 2000; i++) {
+    check(capnp_builder_struct(&slot, 2, 2, &child) == CAPNP_OK, "pn init");
+    check(capnp_builder_disown(&slot, &o) == CAPNP_OK, "pn disown");
+    check(capnp_builder_adopt(&slot, &o) == CAPNP_OK, "pn adopt");
+    check(capnp_builder_clear_ptr(&body, 0, 0) == CAPNP_OK, "pn clear");
+    check(capnp_builder_new_orphan_struct(&b, 2, 2, &o, NULL) == CAPNP_OK,
+          "pn new");
+    check(capnp_builder_adopt(&slot, &o) == CAPNP_OK, "pn new adopt");
+    check(capnp_builder_clear_ptr(&body, 0, 0) == CAPNP_OK, "pn new clear");
+  }
+  check(total_words(&b) <= base, "pn arena did not grow");
+  check(capnp_builder_nsegs(&b) == 1, "pn one segment");
   capnp_builder_free(&b);
 }
 
@@ -778,6 +831,38 @@ static void test_zero_orphan_on_second_segment(void) {
   capnp_builder_free(&b);
 }
 
+/* The pin keeps an emptied later segment while a live orphan names it, so
+ * free and adopt still find the segment after the clear. */
+static void test_live_orphan_keeps_emptied_segment(void) {
+  capnp_builder_t b = {0};
+  capnp_bptr_t root, body, slot;
+  capnp_orphan_t o = {0}, l = {0};
+  uint64_t lw;
+  int64_t at;
+
+  capnp_builder_init_sized(&b, 2);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "ks root");
+  check(capnp_builder_struct(&root, 0, 2, &body) == CAPNP_OK, "ks body");
+  check(capnp_builder_set_text(&body, 0, 0, "spill_to_second_segment", 23) ==
+            CAPNP_OK,
+        "ks spill");
+  check(capnp_builder_nsegs(&b) >= 2, "ks multi seg");
+  check(capnp_builder_new_orphan_struct(&b, 0, 0, &o, NULL) == CAPNP_OK,
+        "ks struct orphan");
+  check(capnp_builder_new_orphan_list(&b, CAPNP_SZ_FOUR, 0, &l, NULL) ==
+            CAPNP_OK,
+        "ks list orphan");
+  check(capnp_builder_clear_ptr(&body, 0, 0) == CAPNP_OK, "ks clear");
+  check(capnp_builder_orphan_free(&o) == CAPNP_OK, "ks free struct orphan");
+  check(capnp_builder_slot(&body, 0, 1, &slot) == CAPNP_OK, "ks slot");
+  check(capnp_builder_adopt(&slot, &l) == CAPNP_OK, "ks adopt list orphan");
+  lw = capnp_load_le64(capnp_builder_seg_data(&b, slot.seg) + slot.word * 8);
+  at = (int64_t)slot.word + 1 + capnp_wp_offset(lw);
+  check(at >= 0 && (size_t)at <= capnp_builder_seg_words(&b, slot.seg),
+        "ks list within segment");
+  capnp_builder_free(&b);
+}
+
 /* Grow the side table past its initial capacity, churn orphans across
  * multiple segments, and free cleanly with zero leaks. */
 static void test_orphan_side_table_churn(void) {
@@ -832,11 +917,13 @@ int main(void) {
   test_orphan_copy_without_padding();
   test_stale_copy_after_free_and_realloc();
   test_stale_copy_after_adopt_clear_realloc();
+  test_retired_orphan_keeps_no_pin();
   test_huge_counts_rejected();
   test_stale_orphan_after_builder_free();
   test_orphan_adopt_zero_list_over_tail();
   test_concurrent_zero_size_orphans();
   test_zero_orphan_on_second_segment();
+  test_live_orphan_keeps_emptied_segment();
   test_orphan_side_table_churn();
   if (g_fail) {
     fprintf(stderr, "%d orphan checks failed\n", g_fail);
