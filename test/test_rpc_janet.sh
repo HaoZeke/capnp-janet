@@ -13,12 +13,20 @@ if [[ ! -x "$SERVER" || ! -f "$MODULE" ]]; then
   echo "SKIP: need rpc_peer_server and capnp.so" >&2
   exit 77
 fi
+# Janet loads an instrumented capnp.so, so that process needs the
+# sanitizer runtime first. Host tools and the C++ peer keep their own
+# linkage.
+ASAN_RUNTIME=""
 if command -v ldd >/dev/null 2>&1; then
   ASAN_RUNTIME=$(ldd "$MODULE" 2>/dev/null | awk '$1 ~ /^libasan/ {print $3; exit}') || true
-  if [[ -n "$ASAN_RUNTIME" ]]; then
-    export LD_PRELOAD="$ASAN_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}"
-  fi
 fi
+run_janet() {
+  if [[ -n "$ASAN_RUNTIME" ]]; then
+    LD_PRELOAD="$ASAN_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}" janet "$@"
+  else
+    janet "$@"
+  fi
+}
 PORTFILE=$(mktemp)
 "$SERVER" 0 >"$PORTFILE" &
 SPID=$!
@@ -35,4 +43,4 @@ done
 MODDIR=$(cd "$(dirname "$MODULE")" && pwd)
 export JANET_PATH="$MODDIR"
 export LD_LIBRARY_PATH="$MODDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-janet "$ROOT/test/rpc_client.janet" "$PORT"
+run_janet "$ROOT/test/rpc_client.janet" "$PORT"
