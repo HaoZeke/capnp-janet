@@ -27,6 +27,9 @@ Pre-1.0 minor releases may include breaking API changes.
 - `capnp_builder_new_orphan_struct_list` rejects an element count above
   `2^29 - 1`. The tag stores that count, and a larger value is truncated
   by the 30-bit offset mask. C++ 1.4.0 rejects the same counts.
+- `capnp_builder_set_text` rejects a length of `2^29 - 1` or more before
+  allocating. The NUL makes the list one byte longer than the text, and
+  that byte count has to fit in 29 bits.
 - An empty list is not left pointing past the segment after a tail
   reclaim, and a zero-word list or struct aimed past the segment end
   reads as empty.

@@ -559,7 +559,11 @@ static int write_text_at(capnp_builder_t *b, uint32_t slot_seg, size_t slot_word
   size_t nwords;
   uint32_t start_seg;
   size_t start_word;
-  if (text_len >= (1u << 29))
+  /* The terminating NUL is a list element. C++ MAX_TEXT_SIZE is
+   * (1<<29)-2 so the byte count, text_len + 1, fits in 29 bits.
+   * Reject that length before allocating; write_list_ptr would refuse
+   * the count only after the words were already reserved. */
+  if (text_len >= (1u << 29) - 1u)
     return CAPNP_ERR_BOUNDS;
   nbytes = text_len + 1;
   nwords = (nbytes + 7) / 8;

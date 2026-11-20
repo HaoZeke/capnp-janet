@@ -791,6 +791,13 @@ static void test_wire_list_count_rejected(void) {
     check(capnp_wp_offset(tag) == (int32_t)CAPNP_BUILDER_MAX_SEGMENT_WORDS,
           "wc tag count");
   }
+  /* text_len + NUL is the list count. 2^29-1 bytes of text do not fit,
+   * and the refusal must not open another segment. */
+  check(capnp_builder_set_text(&body, 0, 0, "",
+                               (size_t)CAPNP_BUILDER_MAX_SEGMENT_WORDS) ==
+            CAPNP_ERR_BOUNDS,
+        "wc text");
+  check(capnp_builder_nsegs(&b) == 1, "wc text one seg");
   capnp_builder_free(&b);
 }
 
