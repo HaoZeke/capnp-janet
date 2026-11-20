@@ -12,7 +12,7 @@
 #include <janet.h>
 CAPNP_JANET_EXPORT void capnp_janet_register(JanetTable *env);
 CAPNP_JANET_EXPORT void capnp_janet_env(JanetTable *env);
-/* Fill an unmarshal registry so make-image / .jimage packs resolve capnp/*. */
+/* Fill an unmarshal registry so module images resolve capnp paths. */
 CAPNP_JANET_EXPORT void capnp_janet_lookup_into(JanetTable *lookup);
 #endif
 
