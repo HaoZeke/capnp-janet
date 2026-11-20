@@ -1469,6 +1469,10 @@ int capnp_builder_new_orphan_list(capnp_builder_t *b, int esize, uint32_t count,
     return CAPNP_ERR_ARG;
   if (list_nwords(esize, count, &n))
     return CAPNP_ERR_KIND;
+  /* C++ 1.4.0 rejects an element count above 2^29-1 when the orphan is
+   * created, for every element size, not when it is adopted. */
+  if (count > CAPNP_BUILDER_MAX_SEGMENT_WORDS)
+    return CAPNP_ERR_BOUNDS;
   memset(o, 0, sizeof(*o));
   if (n) {
     if (alloc_words(b, n, &seg, &word))

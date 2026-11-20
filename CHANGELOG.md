@@ -24,6 +24,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp_builder_new_orphan_list` rejects an element count above `2^29 - 1`
+  when the orphan is created. It used to accept a larger count for void,
+  bit, byte, two-byte and four-byte elements and fail only at adopt. C++
+  1.4.0 rejects the same counts at creation.
 - `capnp_builder_new_orphan_struct_list` rejects an element count above
   `2^29 - 1`. The tag stores that count, and a larger value is truncated
   by the 30-bit offset mask. C++ 1.4.0 rejects the same counts.

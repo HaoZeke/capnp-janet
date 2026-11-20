@@ -761,10 +761,20 @@ static void test_wire_list_count_rejected(void) {
   check(capnp_builder_slot(&body, 0, 0, &slot) == CAPNP_OK, "wc slot");
   check(capnp_builder_new_orphan_list(
             &b, CAPNP_SZ_VOID, CAPNP_BUILDER_MAX_SEGMENT_WORDS + 1u, &o,
-            NULL) == CAPNP_OK,
+            NULL) == CAPNP_ERR_BOUNDS,
         "wc orphan");
-  check(capnp_builder_adopt(&slot, &o) == CAPNP_ERR_BOUNDS, "wc adopt");
-  check(capnp_builder_orphan_free(&o) == CAPNP_OK, "wc free");
+  check(capnp_builder_new_orphan_list(&b, CAPNP_SZ_BIT, 1u << 29, &o, NULL) ==
+            CAPNP_ERR_BOUNDS,
+        "wc bit over");
+  check(capnp_builder_new_orphan_list(&b, CAPNP_SZ_VOID, 0xFFFFFFFFu, &o,
+                                      NULL) == CAPNP_ERR_BOUNDS,
+        "wc void wide");
+  check(capnp_builder_nsegs(&b) == 1, "wc list one seg");
+  check(capnp_builder_new_orphan_list(&b, CAPNP_SZ_VOID,
+                                      CAPNP_BUILDER_MAX_SEGMENT_WORDS, &o,
+                                      NULL) == CAPNP_OK,
+        "wc void max");
+  check(capnp_builder_adopt(&slot, &o) == CAPNP_OK, "wc adopt");
   /* The composite tag holds the element count. 2^30 is masked to zero
    * by the 30-bit offset field, so creation itself has to fail. */
   check(capnp_builder_new_orphan_struct_list(
