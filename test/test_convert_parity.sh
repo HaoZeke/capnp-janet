@@ -156,6 +156,17 @@ for v in '"0aF"' '"zz41"' '"4g"' '"g1"'; do
   printf '{"hexData": %s}' "$v" >"$TMP/in.bin"
   compare "json-hex-$((i++))" "$PARITY" Parity "text binary"
 done
+
+# The C++ lexer joins adjacent operator characters into one token, so `=-5`
+# is a parse error while `= -5` and `= - 5` are fine.
+in_fmt=text
+i=0
+for v in '(vI32 =-5)' '(vI32 =- 5)' '(vF64 =-inf)' '(vF64 =.5)' '(vI32 =+5)' \
+  '(vF64 = -.5)' '(vI32 = - 5)' '(vI32=#c
+-5)' '(lI32=[1, - 2])' '(vF64 = -inf)'; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-operator-$((i++))" "$PARITY" Parity "text binary"
+done
 in_fmt=binary
 
 # `capnp convert` lifts the nesting and traversal limits. A chain of 200

@@ -3827,6 +3827,13 @@ static int tpeek(scan_t *sc) {
   return (unsigned char)sc->s[sc->i];
 }
 
+/* The C++ lexer reads a run of operator characters as one token, so `=-5`
+ * contains the operator `=-` and is a parse error. */
+static int op_ends(const scan_t *sc) {
+  return sc->i >= sc->n || sc->s[sc->i] == '\0' ||
+         strchr("!$%&*+-./:<=>?@^|~", sc->s[sc->i]) == NULL;
+}
+
 static int parse_text_quoted_one(scan_t *sc, buf_t *b) {
   char q;
   tskip(sc);
@@ -4016,7 +4023,7 @@ static vnode_t *parse_text_tuple(scan_t *sc) {
       return NULL;
     }
     sc->i++; /* consume '=' */
-    val = parse_text_expr(sc);
+    val = op_ends(sc) ? parse_text_expr(sc) : NULL;
     if (!val) {
       free_vnode(obj);
       return NULL;
@@ -4225,6 +4232,8 @@ static vnode_t *parse_text_expr(scan_t *sc) {
   }
   if (c == '-') {
     sc->i++;
+    if (!op_ends(sc))
+      return NULL;
     tskip(sc);
     if (sc->i + 3 <= sc->n && memcmp(sc->s + sc->i, "inf", 3) == 0 &&
         (sc->i + 3 == sc->n ||

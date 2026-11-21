@@ -27,6 +27,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- The text parser rejects runs of operator characters such as `=-5` or
+  `=.5`, which the C++ lexer reads as one unknown operator.
 - `capnp-eval` rejects `-q` everywhere and `--quiet` outside `convert` and
   `decode`, matching the option sets of the C++ `capnp` subcommands.
 - The traversal budget is spent the way C++ spends it: two words for the
