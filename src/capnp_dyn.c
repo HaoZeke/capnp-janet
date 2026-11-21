@@ -3550,8 +3550,6 @@ typedef struct {
   size_t n;
   size_t i;
   int depth;
-  /* Set when a \u escape is a surrogate that does not form a pair. */
-  const char *err;
 } scan_t;
 
 static int hex_nibble(unsigned char c) {
@@ -3683,23 +3681,18 @@ static int parse_json_str_raw(scan_t *sc, char **out, size_t *len) {
         }
         sc->i += 4;
         cp = (uint32_t)((d0 << 12) | (d1 << 8) | (d2 << 4) | d3);
-        if (cp >= 0xd800 && cp <= 0xdbff && sc->i + 6 <= sc->n &&
-            sc->s[sc->i] == '\\' && sc->s[sc->i + 1] == 'u') {
-          int l0 = hex_nibble((unsigned char)sc->s[sc->i + 2]);
-          int l1 = hex_nibble((unsigned char)sc->s[sc->i + 3]);
-          int l2 = hex_nibble((unsigned char)sc->s[sc->i + 4]);
-          int l3 = hex_nibble((unsigned char)sc->s[sc->i + 5]);
-          if (l0 >= 0 && l1 >= 0 && l2 >= 0 && l3 >= 0) {
-            uint32_t low = (uint32_t)((l0 << 12) | (l1 << 8) | (l2 << 4) | l3);
-            if (low >= 0xdc00 && low <= 0xdfff) {
-              sc->i += 6;
-              cp = 0x10000u + (((cp - 0xd800u) << 10) | (low - 0xdc00u));
-            }
+        /* JsonCodec decodes each escape alone with kj::decodeUtf16, so a
+         * surrogate becomes its own three-byte sequence (CESU-8). */
+        if (cp >= 0xd800 && cp <= 0xdfff) {
+          char sur[3];
+          sur[0] = (char)(0xe0 | (cp >> 12));
+          sur[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
+          sur[2] = (char)(0x80 | (cp & 0x3f));
+          if (buf_add(&b, sur, 3)) {
+            free(b.data);
+            return -1;
           }
-        }
-        if (buf_add_utf8(&b, cp)) {
-          if (cp >= 0xd800 && cp <= 0xdfff)
-            sc->err = "lone surrogate";
+        } else if (buf_add_utf8(&b, cp)) {
           free(b.data);
           return -1;
         }
@@ -6187,10 +6180,6 @@ static int build_struct_from_vnode(capnp_dyn_t *d,
 static void dyn_err_scan(capnp_dyn_t *d, const char *what, const scan_t *sc) {
   const char *s;
   size_t n = 0;
-  if (sc && sc->err) {
-    dyn_set_err(d, sc->err);
-    return;
-  }
   if (!sc || sc->i >= sc->n) {
     dyn_set_err(d, what);
     return;

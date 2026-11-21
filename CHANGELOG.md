@@ -30,6 +30,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- JSON `\u` escapes decode one unit at a time, as `JsonCodec` does, so
+  surrogates, paired or lone, are stored as CESU-8. A pair used to be
+  joined into one UTF-8 scalar and a lone surrogate was an error.
 - `capnp-eval` splits text and JSON input into messages as `capnp` does,
   counting brackets and comment starts inside strings, and input with no
   tokens fails. Whitespace-only input used to succeed with no output.
