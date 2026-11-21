@@ -1147,6 +1147,22 @@ static const vscenario_t vat_diffs[] = {
     {"Disembargo to an unknown export",
      {{VF_DISEMBARGO, 0, 0, 55, 0, 0, 3},
       {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Resolve of an unknown promise to a capability",
+     {{VF_RESOLVE, 7, 0, 3, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Resolve of an unknown promise to an exception",
+     {{VF_RESOLVE, 7, 0, 0, 1, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Resolve of an unknown promise to a capability under its id",
+     {{VF_RESOLVE, 3, 0, 3, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 99, 0, 0},
+    {"Resolve of an unknown promise to a promise under its id",
+     {{VF_RESOLVE, 3, 0, 3, 4, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 99, 0, 0},
+    {"Resolve to CapDescriptor.none",
+     {{VF_RESOLVE, 7, 0, 0, 2, 0, 0}}, 1, 99, 0, 0},
+    {"Resolve with an unknown arm",
+     {{VF_RESOLVE, 7, 0, 0, 3, 0, 0}}, 1, 99, 0, 0},
     {"Abort",
      {{VF_ABORT, 0, 0, 0, 0, 0, 0}}, 1, 99, 0, 0},
     {"Abort carrying a remote exception",
@@ -1317,20 +1333,24 @@ static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
            capnp_builder_set_u32(&inner, 0, f->tval);
       break;
     case VF_RESOLVE:
-      /* Promise `qid` resolved to senderHosted `tval`, or with
-       * `send_to` nonzero to an exception. */
+      /* Promise `qid` resolved to senderHosted `tval`; with `send_to` 1
+       * to an exception, 2 to a none descriptor, 3 by an unknown arm, 4
+       * to senderPromise `tval`. */
       rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RESOLVE) ||
            capnp_builder_struct(&slot, 1, 1, &body) ||
            capnp_builder_set_u32(&body, 0, f->qid) ||
-           capnp_builder_set_u16(&body, 4, f->send_to ? 1 : 0) ||
+           capnp_builder_set_u16(&body, 4,
+                                 f->send_to == 1 ? 1 : f->send_to == 3 ? 9 : 0) ||
            capnp_builder_slot(&body, 1, 0, &slot);
-      if (rc == 0 && f->send_to)
+      if (rc == 0 && f->send_to == 1)
         rc = capnp_builder_struct(&slot, 1, 2, &inner) ||
              capnp_builder_set_text(&inner, 1, 0, "gone", 4);
-      else if (rc == 0)
+      else if (rc == 0 && (f->send_to == 0 || f->send_to == 4))
         rc = capnp_builder_struct(&slot, 1, 1, &inner) ||
-             capnp_builder_set_u16(&inner, 0, 1) ||
+             capnp_builder_set_u16(&inner, 0, f->send_to ? 2 : 1) ||
              capnp_builder_set_u32(&inner, 4, f->tval);
+      else if (rc == 0 && f->send_to == 2)
+        rc = capnp_builder_struct(&slot, 1, 1, &inner);
       break;
     default:
       rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_FINISH) ||

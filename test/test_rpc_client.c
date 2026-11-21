@@ -205,16 +205,105 @@ static int feed_quiet_call(capnp_rpc_conn_t *c, uint32_t qid, uint16_t mid,
   return rc;
 }
 
-/* The one frame queued is an Abort whose reason is `reason` and whose
+/* Resolve arm `arm` that feed_resolve sends as Resolve.exception. */
+#define RESOLVE_EXCEPTION 0xffff
+
+/* A Resolve of promise `pid` to descriptor arm `arm` naming `id`. */
+static int feed_resolve(capnp_rpc_conn_t *c, uint32_t pid, uint16_t arm,
+                        uint32_t id)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, res, desc;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  int rc = CAPNP_ERR_ALLOC, ok;
+  capnp_builder_init(&b);
+  ok = capnp_builder_root(&b, &root) == CAPNP_OK &&
+       capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK &&
+       capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RESOLVE) == CAPNP_OK &&
+       capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK &&
+       capnp_builder_struct(&slot, 1, 1, &res) == CAPNP_OK &&
+       capnp_builder_set_u32(&res, 0, pid) == CAPNP_OK &&
+       capnp_builder_slot(&res, 1, 0, &slot) == CAPNP_OK;
+  if (ok && arm == RESOLVE_EXCEPTION)
+    ok = capnp_builder_set_u16(&res, 4, 1) == CAPNP_OK &&
+         capnp_builder_struct(&slot, 1, 2, &desc) == CAPNP_OK &&
+         capnp_builder_set_text(&desc, 1, 0, "broken", 6) == CAPNP_OK;
+  else if (ok)
+    ok = capnp_builder_struct(&slot, 1, 1, &desc) == CAPNP_OK &&
+         capnp_builder_set_u16(&desc, 0, arm) == CAPNP_OK &&
+         capnp_builder_set_u32(&desc, 4, id) == CAPNP_OK;
+  if (ok && capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK)
+    rc = capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+/* A Return of results for `answer` whose content is the capability
+ * capTable entry 0 describes: arm `arm` naming `id`. */
+static int feed_cap_return(capnp_rpc_conn_t *c, uint32_t answer, uint16_t arm,
+                           uint32_t id)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, ret, payload, table;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  int rc = CAPNP_ERR_ALLOC;
+  capnp_builder_init(&b);
+  if (capnp_builder_root(&b, &root) == CAPNP_OK &&
+      capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK &&
+      capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RETURN) == CAPNP_OK &&
+      capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 2, 1, &ret) == CAPNP_OK &&
+      capnp_builder_set_u32(&ret, 0, answer) == CAPNP_OK &&
+      capnp_builder_slot(&ret, 2, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 0, 2, &payload) == CAPNP_OK &&
+      capnp_builder_set_cap(&payload, 0, 0, 0) == CAPNP_OK &&
+      capnp_builder_set_list_struct(&payload, 0, 1, 1, 1, 1, &table) ==
+          CAPNP_OK &&
+      capnp_builder_set_u16(&table, 0, arm) == CAPNP_OK &&
+      capnp_builder_set_u32(&table, 4, id) == CAPNP_OK &&
+      capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK)
+    rc = capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+/* Frame `i` of `q` is a Release of `count` references to `id`. */
+static int frame_release(queue_t *q, int i, uint32_t id, uint32_t count)
+{
+  capnp_message_t m = {0};
+  capnp_ptr_t r, rel;
+  int ok = i < q->tail &&
+           capnp_message_from_flat(&m, q->data[i], q->len[i]) == CAPNP_OK &&
+           capnp_root(&m, &r) == CAPNP_OK &&
+           capnp_get_u16(&r, 0, 0) == CAPNP_RPC_MSG_RELEASE &&
+           capnp_getp(&r, 0, &rel) == CAPNP_OK &&
+           capnp_get_u32(&rel, 0, 0) == id && capnp_get_u32(&rel, 4, 0) == count;
+  capnp_message_free(&m);
+  return ok;
+}
+
+/* The one frame queued is a Release of `count` references to `id`. */
+static int sent_release(queue_t *q, uint32_t id, uint32_t count)
+{
+  int ok = q->tail == 1 && frame_release(q, 0, id, count);
+  q_drop(q);
+  return ok;
+}
+
+/* Frame `i` of `q` is an Abort whose reason is `reason` and whose
  * Exception.type, at byte 4, is `type`. */
-static int sent_abort_typed(queue_t *q, const char *reason, uint16_t type)
+static int frame_abort(queue_t *q, int i, const char *reason, uint16_t type)
 {
   capnp_message_t m = {0};
   capnp_ptr_t r, exc;
   const char *text = NULL;
   size_t n = 0;
-  int ok = q->tail == 1 &&
-           capnp_message_from_flat(&m, q->data[0], q->len[0]) == CAPNP_OK &&
+  int ok = i < q->tail &&
+           capnp_message_from_flat(&m, q->data[i], q->len[i]) == CAPNP_OK &&
            capnp_root(&m, &r) == CAPNP_OK &&
            capnp_get_u16(&r, 0, 0) == CAPNP_RPC_MSG_ABORT &&
            capnp_getp(&r, 0, &exc) == CAPNP_OK &&
@@ -222,6 +311,13 @@ static int sent_abort_typed(queue_t *q, const char *reason, uint16_t type)
            n == strlen(reason) && memcmp(text, reason, n) == 0 &&
            capnp_get_u16(&exc, 4, 0) == type;
   capnp_message_free(&m);
+  return ok;
+}
+
+/* The one frame queued is such an Abort. */
+static int sent_abort_typed(queue_t *q, const char *reason, uint16_t type)
+{
+  int ok = q->tail == 1 && frame_abort(q, 0, reason, type);
   q_drop(q);
   return ok;
 }
@@ -739,6 +835,82 @@ int main(void)
       kept |= vat.answers[i].used && (vat.answers[i].question_id == 900 ||
                                       vat.answers[i].question_id == 901);
     CHECK(!kept, "Finish drops the answers");
+  }
+
+  /* A Resolve names a promise this vat never imported, so rpc.c++ drops
+   * the new capability: one the peer hosts is released at once, one of
+   * ours needs nothing. */
+  q_drop(&g_to_client);
+  CHECK(feed_resolve(&vat, 7, 1, 3) == CAPNP_OK &&
+            sent_release(&g_to_client, 3, 1),
+        "a resolution the peer hosts is released");
+  CHECK(feed_resolve(&vat, 7, 2, 4) == CAPNP_OK &&
+            sent_release(&g_to_client, 4, 1),
+        "a resolution to a peer promise is released");
+  CHECK(feed_resolve(&vat, 7, 3, 0) == CAPNP_OK && g_to_client.tail == 0,
+        "a resolution to our own export is quiet");
+
+  /* An import a Return handed us is on the table until released. A
+   * Resolve naming it when it was not a promise ends the connection, as
+   * in rpc.c++ handleResolve, after the new capability is dropped. */
+  {
+    static capnp_rpc_conn_t h;
+    uint32_t bq;
+    capnp_rpc_init(&h, send_to_vat, NULL);
+    bq = capnp_rpc_send_bootstrap(&h);
+    q_drop(&g_to_vat);
+    CHECK(feed_cap_return(&h, bq, 1, 6) == CAPNP_OK && g_to_vat.tail == 0,
+          "import: hosted bootstrap");
+    CHECK(feed_resolve(&h, 9, 1, 3) == CAPNP_OK &&
+              sent_release(&g_to_vat, 3, 1),
+          "import: an unknown promise drops the resolution");
+    CHECK(feed_resolve(&h, 6, 1, 3) == CAPNP_ERR_KIND &&
+              g_to_vat.tail == 2 && frame_release(&g_to_vat, 0, 3, 1) &&
+              frame_abort(&g_to_vat, 1,
+                          "Got 'Resolve' for a non-promise import.", 0),
+          "import: a held import drops the resolution, then aborts");
+    q_drop(&g_to_vat);
+
+    capnp_rpc_init(&h, send_to_vat, NULL);
+    bq = capnp_rpc_send_bootstrap(&h);
+    q_drop(&g_to_vat);
+    CHECK(feed_cap_return(&h, bq, 1, 6) == CAPNP_OK, "import: hosted again");
+    CHECK(feed_resolve(&h, 6, RESOLVE_EXCEPTION, 0) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_vat, "Got 'Resolve' for a non-promise import."),
+          "import: a broken resolution of a held import aborts");
+
+    capnp_rpc_init(&h, send_to_vat, NULL);
+    bq = capnp_rpc_send_bootstrap(&h);
+    q_drop(&g_to_vat);
+    CHECK(feed_cap_return(&h, bq, 1, 6) == CAPNP_OK, "import: hosted twice");
+    CHECK(capnp_rpc_send_release(&h, 6, 1) == CAPNP_OK &&
+              sent_release(&g_to_vat, 6, 1),
+          "import: released");
+    CHECK(feed_resolve(&h, 6, 1, 3) == CAPNP_OK &&
+              sent_release(&g_to_vat, 3, 1),
+          "import: a released import is unknown again");
+
+    capnp_rpc_init(&h, send_to_vat, NULL);
+    bq = capnp_rpc_send_bootstrap(&h);
+    q_drop(&g_to_vat);
+    CHECK(feed_cap_return(&h, bq, 2, 6) == CAPNP_OK, "import: promise");
+    CHECK(feed_resolve(&h, 6, 1, 3) == CAPNP_OK &&
+              sent_release(&g_to_vat, 3, 1),
+          "import: a promise import takes its resolution");
+    CHECK(feed_resolve(&h, 6, RESOLVE_EXCEPTION, 0) == CAPNP_OK &&
+              g_to_vat.tail == 0,
+          "import: a promise import takes a broken resolution");
+
+    capnp_rpc_init(&h, send_to_vat, NULL);
+    bq = capnp_rpc_send_bootstrap(&h);
+    q_drop(&g_to_vat);
+    CHECK(feed_cap_return(&h, bq, 1, 6) == CAPNP_OK, "import: hosted once more");
+    CHECK(feed_resolve(&h, 9, 1, 6) == CAPNP_OK && g_to_vat.tail == 0,
+          "import: a resolution naming a held import adds a reference");
+    CHECK(capnp_rpc_send_release(&h, 6, 1) == CAPNP_OK &&
+              sent_release(&g_to_vat, 6, 2),
+          "import: the last release gives that reference back");
+    capnp_rpc_free(&h);
   }
 
   /* Kept results nobody takes are answered resultsSentElsewhere when the

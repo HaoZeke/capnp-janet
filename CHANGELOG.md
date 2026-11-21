@@ -98,6 +98,14 @@ Pre-1.0 minor releases may include breaking API changes.
   aborts as naming no embargo. They used to be echoed or ignored. An
   `accept`, an unknown context, or a `provide` naming no Provide aborts
   with the text rpc.c++ prints.
+- A Resolve is handled as rpc.c++ handles one for a promise it never
+  imported: the new capability is released when the peer hosts it, and
+  a `none` descriptor or unknown arm aborts. It used to be answered
+  with Unimplemented. A Resolve naming a `senderHosted` import still on
+  the table aborts after that release, as does one whose new capability
+  the peer hosts under the promise's own id. A new capability naming an
+  import still on the table is given back with that import's last
+  release.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

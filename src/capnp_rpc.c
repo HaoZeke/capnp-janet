@@ -75,6 +75,7 @@ enum { KEEP_SEND, KEEP_REDIRECT, KEEP_QUIET };
 #define CAPDESC_TAG_SENDERHOSTED 1
 #define CAPDESC_TAG_SENDERPROMISE 2
 #define CAPDESC_TAG_RECEIVERHOSTED 3
+#define CAPDESC_TAG_RECEIVERANSWER 4
 #define CAPDESC_TAG_THIRDPARTYHOSTED 5
 /* ThirdPartyCapDescriptor: id @ptr0, vineId @0 (u32).
  * ThirdPartyCapId (rpc-threeparty.capnp): vat @ptr0, nonce @0 (u64).
@@ -146,8 +147,10 @@ enum { KEEP_SEND, KEEP_REDIRECT, KEEP_QUIET };
 #define PA_OP_DW 1
 #define PA_OP_PW 0
 /* Resolve: promiseId @0 (u32), union tag at byte 4: cap @ptr0 is 0. */
+#define RESOLVE_PROMISEID_OFF 0
 #define RESOLVE_TAG_OFF 4
 #define RESOLVE_TAG_CAP 0
+#define RESOLVE_TAG_EXCEPTION 1
 /* Disembargo: target @ptr0; context is a group sharing the data section,
  * union tag @4 (u16), the loopback id @0 (u32). */
 #define DIS_CTX_TAG_OFF 4
@@ -216,12 +219,25 @@ static void question_drop(capnp_rpc_question_t *q)
  * on first use and freed by capnp_rpc_free or the next capnp_rpc_init at
  * that address. A connection is used by one thread at a time; the lock
  * covers only the list. */
+typedef struct {
+  uint32_t id;
+  uint32_t refs;
+  /* References a Resolve added, given back with the last of `refs`. */
+  uint32_t extra;
+  /* The first descriptor naming it was senderPromise, which rpc.c++
+   * gives a fulfiller that a Resolve may settle. */
+  int promise;
+} rpc_import_t;
+
 typedef struct rpc_side {
   const capnp_rpc_conn_t *conn;
   struct rpc_side *next;
   /* This vat has sent Abort. rpc.c++ reads nothing after that, so the
    * peer's Abort in reply goes unanswered. */
   int aborted;
+  /* Imports the peer's Returns handed us that are not yet released. */
+  rpc_import_t *imports;
+  size_t nimports, cimports;
 } rpc_side_t;
 
 static pthread_mutex_t side_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -257,7 +273,63 @@ static void side_drop(const capnp_rpc_conn_t *c)
     }
   }
   pthread_mutex_unlock(&side_lock);
+  if (s != NULL)
+    free(s->imports);
   free(s);
+}
+
+static rpc_import_t *import_find(rpc_side_t *s, uint32_t id)
+{
+  size_t i;
+  for (i = 0; s != NULL && i < s->nimports; i++)
+    if (s->imports[i].id == id)
+      return &s->imports[i];
+  return NULL;
+}
+
+/* One more reference to import `id`, as rpc.c++ counts each descriptor
+ * that names it. */
+static void import_add(capnp_rpc_conn_t *c, uint32_t id, int promise)
+{
+  rpc_side_t *s = side_get(c, 1);
+  rpc_import_t *im = import_find(s, id);
+  if (s == NULL)
+    return;
+  if (im == NULL) {
+    if (s->nimports == s->cimports) {
+      size_t n = s->cimports ? s->cimports * 2 : 8;
+      rpc_import_t *grown =
+          (rpc_import_t *)realloc(s->imports, n * sizeof *grown);
+      if (grown == NULL)
+        return;
+      s->imports = grown;
+      s->cimports = n;
+    }
+    im = &s->imports[s->nimports++];
+    im->id = id;
+    im->refs = 0;
+    im->extra = 0;
+    im->promise = promise;
+  }
+  im->refs++;
+}
+
+/* Drop `count` references; the last one also gives back those a
+ * Resolve added, which it returns. */
+static uint32_t import_drop(capnp_rpc_conn_t *c, uint32_t id, uint32_t count)
+{
+  rpc_side_t *s = side_get(c, 0);
+  rpc_import_t *im = import_find(s, id);
+  uint32_t extra;
+  if (im == NULL)
+    return 0;
+  if (count < im->refs) {
+    im->refs -= count;
+    return 0;
+  }
+  extra = im->extra;
+  *im = s->imports[--s->nimports];
+  return extra;
 }
 
 void capnp_rpc_init(capnp_rpc_conn_t *c, capnp_rpc_send_fn send, void *send_ctx)
@@ -929,6 +1001,27 @@ static int handle_bootstrap(capnp_rpc_conn_t *c, const capnp_ptr_t *boot)
  * pickup. Dialling the third vat belongs to the network layer, so the
  * arrangement is recorded and handed over rather than acted on here.
  */
+/* Each senderHosted or senderPromise entry of a Return's capTable is an
+ * import rpc.c++ would hold until released. */
+static void note_imports(capnp_rpc_conn_t *c, const capnp_ptr_t *payload)
+{
+  capnp_ptr_t table, desc;
+  uint32_t n, i;
+  uint16_t tag;
+  if (payload->kind != CAPNP_PK_STRUCT ||
+      capnp_getp(payload, 1, &table) != CAPNP_OK)
+    return;
+  n = capnp_list_len(&table);
+  for (i = 0; i < n; i++) {
+    if (capnp_list_get_struct(&table, i, &desc) != CAPNP_OK)
+      continue;
+    tag = capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0);
+    if (tag == CAPDESC_TAG_SENDERHOSTED || tag == CAPDESC_TAG_SENDERPROMISE)
+      import_add(c, capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0),
+                 tag == CAPDESC_TAG_SENDERPROMISE);
+  }
+}
+
 static void note_introductions(capnp_rpc_conn_t *c, const capnp_ptr_t *payload)
 {
   capnp_ptr_t table;
@@ -1450,6 +1543,86 @@ static int handle_disembargo(capnp_rpc_conn_t *c, const capnp_ptr_t *dis)
   return protocol_abort(c, reason);
 }
 
+static int send_release(capnp_rpc_conn_t *c, uint32_t import_id,
+                        uint32_t count);
+
+/* Drop one reference to import `id`: at once when it is new, and with
+ * the last release when it is still on the table, as rpc.c++ counts it
+ * on the import it already has. */
+static int resolve_drop_id(capnp_rpc_conn_t *c, uint32_t id)
+{
+  rpc_import_t *im = import_find(side_get(c, 0), id);
+  if (im == NULL)
+    return send_release(c, id, 1);
+  im->extra++;
+  return CAPNP_OK;
+}
+
+/* Take the capability a Resolve names and drop it, as rpc.c++ does when
+ * nothing on this side waits for it: one the peer hosts is released.
+ * `hosted` gets the id of a senderHosted capability or vine, or -1. */
+static int resolve_drop_cap(capnp_rpc_conn_t *c, const capnp_ptr_t *res,
+                            int64_t *hosted)
+{
+  capnp_ptr_t desc, tpcd;
+  *hosted = -1;
+  if (capnp_getp(res, 0, &desc) != CAPNP_OK)
+    memset(&desc, 0, sizeof desc);
+  switch (desc.kind == CAPNP_PK_STRUCT ? capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0)
+                                       : 0) {
+  case 0:
+    return protocol_abort(c, "'Resolve' contained 'CapDescriptor.none'.");
+  case CAPDESC_TAG_SENDERHOSTED:
+    *hosted = capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0);
+    return resolve_drop_id(c, (uint32_t)*hosted);
+  case CAPDESC_TAG_SENDERPROMISE:
+    return resolve_drop_id(c, capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0));
+  case CAPDESC_TAG_RECEIVERHOSTED:
+  case CAPDESC_TAG_RECEIVERANSWER:
+    return CAPNP_OK;
+  case CAPDESC_TAG_THIRDPARTYHOSTED:
+    /* rpc.c++ imports the vine in place of the third party. */
+    if (capnp_getp(&desc, 0, &tpcd) != CAPNP_OK)
+      memset(&tpcd, 0, sizeof tpcd);
+    *hosted = tpcd.kind == CAPNP_PK_STRUCT
+                  ? capnp_get_u32(&tpcd, TPCD_VINEID_OFF, 0)
+                  : 0;
+    return resolve_drop_id(c, (uint32_t)*hosted);
+  default:
+    return protocol_abort(c, "unknown CapDescriptor type");
+  }
+}
+
+/* A Resolve as rpc.c++ handleResolve treats it. The new capability is
+ * taken first. A promise import, or an id this vat does not hold, then
+ * drops it; a held import that was not a promise ends the connection,
+ * as does a new one the peer hosts under the promise's own id.
+ * The promise import itself stays until the application releases it, so
+ * its id keeps naming one capability; rpc.c++ releases it here and
+ * forwards to the replacement. */
+static int handle_resolve(capnp_rpc_conn_t *c, const capnp_ptr_t *res)
+{
+  rpc_import_t *im;
+  uint16_t tag;
+  uint32_t pid;
+  int64_t hosted = -1;
+  int rc = CAPNP_OK;
+  if (res->kind != CAPNP_PK_STRUCT)
+    return CAPNP_OK;
+  tag = capnp_get_u16(res, RESOLVE_TAG_OFF, 0);
+  if (tag != RESOLVE_TAG_CAP && tag != RESOLVE_TAG_EXCEPTION)
+    return protocol_abort(c, "Unknown 'Resolve' type.");
+  if (tag == RESOLVE_TAG_CAP)
+    rc = resolve_drop_cap(c, res, &hosted);
+  if (rc != CAPNP_OK)
+    return rc;
+  pid = capnp_get_u32(res, RESOLVE_PROMISEID_OFF, 0);
+  im = import_find(side_get(c, 0), pid);
+  if (im != NULL ? !im->promise : hosted == (int64_t)pid)
+    return protocol_abort(c, "Got 'Resolve' for a non-promise import.");
+  return CAPNP_OK;
+}
+
 /* Echo a message we did not understand, per the spec. */
 static int send_unimplemented(capnp_rpc_conn_t *c, const capnp_ptr_t *orig)
 {
@@ -1848,6 +2021,12 @@ int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id)
 int capnp_rpc_send_release(capnp_rpc_conn_t *c, uint32_t import_id,
                            uint32_t count)
 {
+  return send_release(c, import_id, count + import_drop(c, import_id, count));
+}
+
+static int send_release(capnp_rpc_conn_t *c, uint32_t import_id,
+                        uint32_t count)
+{
   capnp_builder_t b;
   capnp_bptr_t rel;
   int rc;
@@ -2097,8 +2276,10 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
   q->failed = tag != RETURN_TAG_RESULTS;
   if (!q->failed) {
     capnp_ptr_t results;
-    if (capnp_getp(ret, 0, &results) == CAPNP_OK)
+    if (capnp_getp(ret, 0, &results) == CAPNP_OK) {
       note_introductions(c, &results);
+      note_imports(c, &results);
+    }
   }
   if (frame_store(q->reply, &q->reply_len, frame, len) != CAPNP_OK)
     q->failed = 1;
@@ -2459,11 +2640,7 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
     rc = handle_accept(c, &body);
     break;
   case CAPNP_RPC_MSG_RESOLVE:
-    /* Promise resolution. Replying unimplemented is the spec-defined
-     * signal that this vat does not adopt resolutions: the sender keeps
-     * forwarding calls addressed to the promise, which it does until
-     * Release. */
-    rc = send_unimplemented(c, &root);
+    rc = handle_resolve(c, &body);
     break;
   default:
     /* The obsolete save/delete messages. */

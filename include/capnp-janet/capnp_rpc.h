@@ -249,7 +249,8 @@ CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
  * of more references than it has, and a Disembargo loopback: this vat
  * exports no promise for one to name. A Disembargo with any other
  * context aborts too, unless it is a provide naming a Provide this vat
- * holds, which lifts that Accept's embargo. */
+ * holds, which lifts that Accept's embargo. So does a Resolve naming an
+ * import a Return handed us as senderHosted and not yet released. */
 CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
 
 /* --- client side -------------------------------------------------- */
@@ -327,7 +328,9 @@ CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c,
  * `noFinishNeeded` only drops the copy, as rpc.c++ sends nothing then. */
 CAPNP_JANET_EXPORT int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id);
 
-/* Drop `count` references to an import. */
+/* Drop `count` references to an import. Each descriptor of a Return
+ * naming it counts one; once all are dropped a Resolve naming it is no
+ * longer refused. */
 CAPNP_JANET_EXPORT int capnp_rpc_send_release(capnp_rpc_conn_t *c, uint32_t import_id,
                            uint32_t count);
 
