@@ -80,19 +80,17 @@ static void child_serve(int lfd) {
   _exit(0);
 }
 
-static void client_add(capnp_link_t *link, const char *what) {
+static int client_add(capnp_link_t *link, const char *what) {
   uint32_t qboot, qcall;
-  int i;
+  int i, cap;
   qboot = capnp_rpc_send_bootstrap(&link->conn);
   check(qboot != (uint32_t)-1, "bootstrap");
   check(capnp_link_recv(link) == CAPNP_OK, "bootstrap reply");
   check(capnp_rpc_is_answered(&link->conn, qboot), "answered bootstrap");
-  {
-    int cap = capnp_rpc_answer_cap_id(&link->conn, qboot);
-    check(cap >= 0, "bootstrap cap");
-    qcall = capnp_rpc_send_call(&link->conn, (uint32_t)cap, ADDER_IFACE, 0, 2, 0,
-                                fill_add, NULL);
-  }
+  cap = capnp_rpc_answer_cap_id(&link->conn, qboot);
+  check(cap >= 0, "bootstrap cap");
+  qcall = capnp_rpc_send_call(&link->conn, (uint32_t)cap, ADDER_IFACE, 0, 2, 0,
+                              fill_add, NULL);
   check(qcall != (uint32_t)-1, "call");
   check(capnp_link_recv(link) == CAPNP_OK, "call reply");
   check(capnp_rpc_is_answered(&link->conn, qcall) &&
@@ -107,6 +105,7 @@ static void client_add(capnp_link_t *link, const char *what) {
     capnp_message_free(&m);
   }
   (void)i;
+  return cap;
 }
 
 static int big_dispatch(void *server, uint64_t interface_id, uint16_t method_id,
@@ -373,7 +372,22 @@ static int dial_peer(uint16_t port) {
     free(client);
     return 1;
   }
-  client_add(client, "cpp sum");
+  {
+    int cap = client_add(client, "cpp sum");
+    uint32_t n = 70000, q;
+    capnp_message_t m = {0};
+    capnp_ptr_t content;
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    q = capnp_rpc_send_call(&client->conn, (uint32_t)cap, ADDER_IFACE, 1, 1, 0,
+                            fill_len, &n);
+    check(capnp_link_recv(client) == CAPNP_OK, "cpp echo over 64 KiB");
+    check(capnp_rpc_answer_content(&client->conn, q, &m, &content) == CAPNP_OK &&
+              capnp_get_data(&content, 0, &data, &len) == CAPNP_OK &&
+              len == n && data[n - 1] == 0xab,
+          "cpp echo content");
+    capnp_message_free(&m);
+  }
   capnp_link_close(client);
   free(client);
   return g_fail ? 1 : 0;
@@ -476,6 +490,30 @@ static void test_frame_segment_limit(void) {
     else
       check(rc == CAPNP_ERR_FRAMING, "512 segments refused");
     close(sv[0]);
+    close(sv[1]);
+  }
+}
+
+/* C++ RPC refuses a frame of more than 8388608 words, counting the
+ * segment table, before it reads the body. A one-segment frame of
+ * 8388607 words is in range, so the reader waits for the body and here
+ * meets end of file. */
+static void test_frame_alloc_limit(void) {
+  uint32_t words;
+  for (words = 8388607; words <= 8388608; words++) {
+    uint8_t head[8], *buf = (uint8_t *)1;
+    size_t n = 0;
+    int sv[2], rc;
+    capnp_store_le32(head, 0);
+    capnp_store_le32(head + 4, words);
+    check(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "limit socketpair");
+    check(capnp_write_all(sv[0], head, 8) == CAPNP_OK, "limit header");
+    close(sv[0]);
+    rc = capnp_read_frame_alloc(sv[1], &buf, &n);
+    if (words == 8388607)
+      check(rc == CAPNP_ERR_FRAMING && buf == NULL, "frame at the limit read");
+    else
+      check(rc == CAPNP_ERR_BOUNDS && buf == NULL, "frame over the limit refused");
     close(sv[1]);
   }
 }
@@ -799,6 +837,7 @@ int main(int argc, char **argv) {
   test_ipv4_literal();
   test_frame_little_endian();
   test_frame_segment_limit();
+  test_frame_alloc_limit();
   test_bootstrap_frame_little_endian();
   test_size_to_i32();
   test_write_pipe();
@@ -813,6 +852,7 @@ int main(int argc, char **argv) {
   test_unix_keeps_live_socket();
   test_link_setup_closes_fd();
   test_link_large_result(10000, "large link result");
+  test_link_large_result(70000, "link result over 64 KiB");
   loopback(1);
   loopback(0);
   if (g_fail) {

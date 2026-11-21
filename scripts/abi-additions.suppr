@@ -4,3 +4,7 @@
 [suppress_function]
   change_kind = added-function
   name = capnp_rpc_free
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_read_frame_alloc

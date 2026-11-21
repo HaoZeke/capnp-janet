@@ -7,6 +7,7 @@
 #include <netinet/in.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -156,10 +157,11 @@ static int read_full(int fd, uint8_t *p, size_t count) {
   return 0;
 }
 
-int capnp_read_frame(int fd, uint8_t *buf, size_t cap, size_t *out_len) {
+/* Reads the segment table into @buf, which has @cap bytes, and sums the
+ * segment sizes. */
+static int read_table(int fd, uint8_t *buf, size_t cap, uint32_t *table_out,
+                      uint32_t *words_out) {
   uint32_t nsegs, i, table_bytes, total_words = 0;
-  if (!buf || cap < 8 || !out_len)
-    return CAPNP_ERR_ARG;
   if (read_full(fd, buf, 4))
     return CAPNP_ERR_FRAMING;
   nsegs = capnp_load_le32(buf);
@@ -179,11 +181,51 @@ int capnp_read_frame(int fd, uint8_t *buf, size_t cap, size_t *out_len) {
       return CAPNP_ERR_BOUNDS;
     total_words += w;
   }
+  *table_out = table_bytes;
+  *words_out = total_words;
+  return CAPNP_OK;
+}
+
+int capnp_read_frame(int fd, uint8_t *buf, size_t cap, size_t *out_len) {
+  uint32_t table_bytes, total_words;
+  int rc;
+  if (!buf || cap < 8 || !out_len)
+    return CAPNP_ERR_ARG;
+  rc = read_table(fd, buf, cap, &table_bytes, &total_words);
+  if (rc)
+    return rc;
   if ((size_t)table_bytes + (size_t)total_words * 8 > cap)
     return CAPNP_ERR_BOUNDS;
   if (total_words &&
       read_full(fd, buf + table_bytes, (size_t)total_words * 8))
     return CAPNP_ERR_FRAMING;
+  *out_len = table_bytes + (size_t)total_words * 8;
+  return CAPNP_OK;
+}
+
+int capnp_read_frame_alloc(int fd, uint8_t **out, size_t *out_len) {
+  uint8_t table[4 + CAPNP_MAX_STREAM_SEGMENTS * 4 + 4];
+  uint32_t table_bytes, total_words;
+  uint8_t *buf;
+  int rc;
+  if (!out || !out_len)
+    return CAPNP_ERR_ARG;
+  *out = NULL;
+  rc = read_table(fd, table, sizeof(table), &table_bytes, &total_words);
+  if (rc)
+    return rc;
+  if ((uint64_t)table_bytes / 8 + total_words > CAPNP_DEFAULT_TRAVERSAL_WORDS)
+    return CAPNP_ERR_BOUNDS;
+  buf = (uint8_t *)malloc(table_bytes + (size_t)total_words * 8);
+  if (!buf)
+    return CAPNP_ERR_ALLOC;
+  memcpy(buf, table, table_bytes);
+  if (total_words &&
+      read_full(fd, buf + table_bytes, (size_t)total_words * 8)) {
+    free(buf);
+    return CAPNP_ERR_FRAMING;
+  }
+  *out = buf;
   *out_len = table_bytes + (size_t)total_words * 8;
   return CAPNP_OK;
 }
@@ -376,17 +418,17 @@ int capnp_link_accept(int listen_fd, capnp_link_t *link) {
 }
 
 int capnp_link_recv(capnp_link_t *link) {
-  uint8_t buf[65536];
+  uint8_t *buf = NULL;
   size_t n = 0;
   int rc;
   if (!link)
     return CAPNP_ERR_ARG;
-  rc = capnp_read_frame(link->fd, buf, sizeof(buf), &n);
+  rc = capnp_read_frame_alloc(link->fd, &buf, &n);
   if (rc)
     return rc;
-  if (capnp_rpc_handle(&link->conn, buf, n))
-    return CAPNP_ERR_KIND;
-  return CAPNP_OK;
+  rc = capnp_rpc_handle(&link->conn, buf, n) ? CAPNP_ERR_KIND : CAPNP_OK;
+  free(buf);
+  return rc;
 }
 
 void capnp_link_close(capnp_link_t *link) {

@@ -27,9 +27,13 @@ Pre-1.0 minor releases may include breaking API changes.
 - The builder can lay out segments the way C++ `MallocMessageBuilder`
   does. The entry points are internal to `capnp-eval`, so the shared
   library ABI is unchanged.
+- `capnp_read_frame_alloc` reads a frame of any size into a heap buffer,
+  refusing more than 8388608 words as C++ RPC does.
 
 ### Fixed
 
+- `capnp_link_recv` and `capnp/rpc-recv` accept frames over 64 KiB, so
+  a 70000-byte result from the C++ Adder arrives.
 - `capnp_link_close` frees the large answers and returns its connection
   kept, which leaked when no Finish arrived.
 - An RPC answer or Return longer than `CAPNP_RPC_MAX_ANSWER_BYTES` is
