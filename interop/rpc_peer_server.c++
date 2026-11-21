@@ -3,9 +3,12 @@
 // calls add(), proving protocol-level compatibility with the reference
 // implementation, not just wire-format byte equality.
 #include "adder.capnp.h"
-#include <capnp/ez-rpc.h>
+#include <capnp/rpc-twoparty.h>
+#include <capnp/rpc.h>
+#include <kj/async-io.h>
 #include <kj/async.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <string>
 
@@ -24,12 +27,63 @@ public:
 	}
 };
 
+// A bootstrap made when the Bootstrap message arrives. It resolves on the
+// next turn of the event loop, after capnp-C++ has written the Return, so
+// the Return always carries a senderPromise however late the client is.
+class PromiseBootstrap final
+    : public capnp::BootstrapFactory<capnp::rpc::twoparty::VatId> {
+public:
+	capnp::Capability::Client
+	createFor(capnp::rpc::twoparty::VatId::Reader) override {
+		return Adder::Client(kj::evalLater(
+		    []() -> Adder::Client { return kj::heap<AdderImpl>(); }));
+	}
+};
+
+struct Peer {
+	Peer(kj::Own<kj::AsyncIoStream> &&s, const std::string &mode)
+	    : stream(kj::mv(s)),
+	      network(*stream, capnp::rpc::twoparty::Side::SERVER),
+	      rpc(mode == "promise"
+	              ? kj::heap<capnp::RpcSystem<capnp::rpc::twoparty::VatId>>(
+	                    network, factory)
+	              : kj::heap<capnp::RpcSystem<capnp::rpc::twoparty::VatId>>(
+	                    network, kj::Maybe<capnp::Capability::Client>(
+	                                 Adder::Client(kj::heap<AdderImpl>())))) {}
+	kj::Own<kj::AsyncIoStream> stream;
+	capnp::TwoPartyVatNetwork network;
+	PromiseBootstrap factory;
+	kj::Own<capnp::RpcSystem<capnp::rpc::twoparty::VatId>> rpc;
+};
+
+static kj::Promise<void> serve(kj::ConnectionReceiver &listener,
+                               kj::TaskSet &tasks, const std::string &mode) {
+	return listener.accept().then(
+	    [&listener, &tasks, mode](kj::Own<kj::AsyncIoStream> &&s) {
+		    auto peer = kj::heap<Peer>(kj::mv(s), mode);
+		    auto done = peer->network.onDisconnect();
+		    tasks.add(done.attach(kj::mv(peer)));
+		    return serve(listener, tasks, mode);
+	    });
+}
+
+struct Ignore final : public kj::TaskSet::ErrorHandler {
+	void taskFailed(kj::Exception &&) override {}
+};
+
 int main(int argc, char **argv) {
-	std::string port = argc > 1 ? argv[1] : "0";
-	capnp::EzRpcServer server(kj::heap<AdderImpl>(), "127.0.0.1:" + port);
-	auto &waitScope = server.getWaitScope();
-	unsigned int bound = server.getPort().wait(waitScope);
-	printf("%u\n", bound);
+	unsigned int port = argc > 1 ? (unsigned int)atoi(argv[1]) : 0;
+	auto io = kj::setupAsyncIo();
+	// "promise" serves a bootstrap that capnp-C++ sends as senderPromise
+	// and resolves right after.
+	std::string mode = argc > 2 ? argv[2] : "";
+	Ignore ignore;
+	kj::TaskSet tasks(ignore);
+	auto addr = io.provider->getNetwork()
+	                .parseAddress("127.0.0.1", port)
+	                .wait(io.waitScope);
+	auto listener = addr->listen();
+	printf("%u\n", listener->getPort());
 	fflush(stdout);
-	kj::NEVER_DONE.wait(waitScope);
+	serve(*listener, tasks, mode).wait(io.waitScope);
 }

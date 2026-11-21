@@ -117,6 +117,55 @@ static int call_add(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap,
 	return 0;
 }
 
+/* The bootstrap of `rpc_peer_server PORT promise` resolves later, so
+ * capnp-C++ describes it as senderPromise. Its export id is still the
+ * one to call; the peer queues the call until the promise resolves. */
+static int check_promise(capnp_rpc_conn_t *conn, uint32_t qboot,
+			 uint8_t *buf, size_t cap)
+{
+	capnp_message_t m = {0};
+	capnp_ptr_t content, root, ret, payload, table, desc;
+	int64_t args[2] = {7, 8};
+	uint32_t q;
+	int id, tag = -1;
+	if (capnp_rpc_answer_content(conn, qboot, &m, &content) != CAPNP_OK)
+		return 1;
+	if (content.kind == CAPNP_PK_CAP && capnp_root(&m, &root) == CAPNP_OK &&
+	    capnp_getp(&root, 0, &ret) == CAPNP_OK &&
+	    capnp_getp(&ret, 0, &payload) == CAPNP_OK &&
+	    capnp_getp(&payload, 1, &table) == CAPNP_OK &&
+	    capnp_list_get_struct(&table, content.count, &desc) == CAPNP_OK)
+		tag = capnp_get_u16(&desc, 0, 0);
+	capnp_message_free(&m);
+	if (tag != 2) {
+		fprintf(stderr, "bootstrap descriptor tag %d, expected 2\n", tag);
+		return 1;
+	}
+	id = capnp_rpc_answer_cap_id(conn, qboot);
+	if (id < 0) {
+		fprintf(stderr, "senderPromise bootstrap has no id\n");
+		return 1;
+	}
+	q = capnp_rpc_send_call(conn, (uint32_t)id, ADDER_IFACE, 0, 2, 0,
+	                        fill_add, args);
+	if (q == (uint32_t)-1 || wait_answer(conn, q, buf, cap) ||
+	    capnp_rpc_answer_content(conn, q, &m, &content) != CAPNP_OK) {
+		fprintf(stderr, "add() on the promised bootstrap failed\n");
+		return 1;
+	}
+	if (capnp_get_u64(&content, 0, 0) != 15) {
+		fprintf(stderr, "add(7, 8) on the promise returned %llu\n",
+		        (unsigned long long)capnp_get_u64(&content, 0, 0));
+		capnp_message_free(&m);
+		return 1;
+	}
+	capnp_message_free(&m);
+	capnp_rpc_free(conn);
+	close(g_fd);
+	printf("All rpc promise interop assertions passed.\n");
+	return 0;
+}
+
 int main(int argc, char **argv)
 {
 	struct sockaddr_in addr;
@@ -174,6 +223,8 @@ int main(int argc, char **argv)
 		fprintf(stderr, "capnp-C++ did not answer the bootstrap\n");
 		return 1;
 	}
+	if (argc > 2 && strcmp(argv[2], "promise") == 0)
+		return check_promise(&conn, qboot, buf, sizeof buf);
 
 	/* The bootstrap capability lands in the peer's export table; a
 	 * two-party server hands out id 0 for it. */

@@ -32,6 +32,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp_rpc_answer_cap_id` reads a `senderPromise` descriptor, which
+  names an export as `senderHosted` does. A promised capability, such
+  as a bootstrap that resolves later, used to have no id.
 - `capnp_link_recv` and `capnp/rpc-recv` accept frames over 64 KiB, so
   a 70000-byte result from the C++ Adder arrives.
 - `capnp_link_close` frees the large answers and returns its connection

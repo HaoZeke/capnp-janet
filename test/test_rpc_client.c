@@ -213,6 +213,38 @@ int main(void)
     CHECK(!capnp_rpc_is_answered(&client, 77), "stray Return ignored");
   }
 
+  /* A senderPromise descriptor names an export as senderHosted does. */
+  {
+    capnp_builder_t b;
+    capnp_bptr_t root, msg, slot, ret, payload, desc;
+    uint8_t *flat = NULL;
+    size_t len = 0;
+    uint32_t pq = capnp_rpc_send_bootstrap(&client);
+    q_drop(&g_to_vat);
+    capnp_builder_init(&b);
+    CHECK(capnp_builder_root(&b, &root) == CAPNP_OK &&
+              capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK &&
+              capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RETURN) ==
+                  CAPNP_OK &&
+              capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK &&
+              capnp_builder_struct(&slot, 2, 1, &ret) == CAPNP_OK &&
+              capnp_builder_set_u32(&ret, 0, pq) == CAPNP_OK &&
+              capnp_builder_slot(&ret, 2, 0, &slot) == CAPNP_OK &&
+              capnp_builder_struct(&slot, 0, 2, &payload) == CAPNP_OK &&
+              capnp_builder_set_cap(&payload, 0, 0, 0) == CAPNP_OK &&
+              capnp_builder_set_list_struct(&payload, 0, 1, 1, 1, 1, &desc) ==
+                  CAPNP_OK &&
+              capnp_builder_set_u16(&desc, 0, 2) == CAPNP_OK &&
+              capnp_builder_set_u32(&desc, 4, 7) == CAPNP_OK &&
+              capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK,
+          "senderPromise Return built");
+    capnp_rpc_handle(&client, flat, len);
+    free(flat);
+    capnp_builder_free(&b);
+    CHECK(capnp_rpc_answer_cap_id(&client, pq) == 7,
+          "senderPromise names export 7");
+  }
+
   /* The stream window bounds how many calls are outstanding at once. */
   {
     capnp_rpc_stream_t s;

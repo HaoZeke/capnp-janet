@@ -45,6 +45,7 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define CAPDESC_TAG_OFF 0
 #define CAPDESC_SENDERHOSTED_OFF 4
 #define CAPDESC_TAG_SENDERHOSTED 1
+#define CAPDESC_TAG_SENDERPROMISE 2
 #define CAPDESC_TAG_THIRDPARTYHOSTED 5
 /* ThirdPartyCapDescriptor: id @ptr0, vineId @0 (u32).
  * ThirdPartyCapId (rpc-threeparty.capnp): vat @ptr0, nonce @0 (u64).
@@ -1182,9 +1183,12 @@ int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id)
       content.kind == CAPNP_PK_CAP &&
       capnp_getp(&payload, 1, &table) == CAPNP_OK &&
       content.count < capnp_list_len(&table) &&
-      capnp_list_get_struct(&table, content.count, &desc) == CAPNP_OK &&
-      capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0) == CAPDESC_TAG_SENDERHOSTED) {
-    id = (int)capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0);
+      capnp_list_get_struct(&table, content.count, &desc) == CAPNP_OK) {
+    /* senderPromise names an export like senderHosted does; the peer
+     * queues calls on it until the promise resolves. */
+    uint16_t tag = capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0);
+    if (tag == CAPDESC_TAG_SENDERHOSTED || tag == CAPDESC_TAG_SENDERPROMISE)
+      id = (int)capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0);
   }
   capnp_message_free(&m);
   return id;
