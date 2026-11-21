@@ -82,6 +82,9 @@ typedef int (*capnp_rpc_send_fn)(void *ctx, const uint8_t *data, size_t len);
  * still be here when the pipelined call arrives.
  */
 typedef struct capnp_rpc_answer {
+  /* Nonzero while in use. 2 marks a call that asked for
+   * sendResultsTo.yourself: the Return in `frame` waits for a
+   * takeFromOtherQuestion to collect it. */
   int used;
   uint32_t question_id;
   uint8_t frame[CAPNP_RPC_MAX_ANSWER_BYTES];
@@ -97,6 +100,8 @@ typedef struct capnp_rpc_export {
 
 /* A question this vat asked, from send until its Return arrives. */
 typedef struct capnp_rpc_question {
+  /* Nonzero while in use. 2 marks a call sent with
+   * sendResultsTo.yourself, whose Return must be resultsSentElsewhere. */
   int used;
   uint32_t question_id;
   int answered;
@@ -226,7 +231,9 @@ CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
 /* Handle one framed message. 0 when handled, non-zero on a bad frame.
  * CAPNP_ERR_IO means the peer sent Abort, and CAPNP_ERR_KIND also covers
  * an Unimplemented reply to anything but Resolve. Either one ends the
- * connection: every unanswered question fails and nothing is sent back. */
+ * connection: every unanswered question fails and nothing is sent back.
+ * A Return that rpc.c++ refuses also ends it with CAPNP_ERR_KIND, after
+ * an Abort carrying the rpc.c++ reason. */
 CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
 
 /* --- client side -------------------------------------------------- */
@@ -278,6 +285,9 @@ typedef struct capnp_rpc_call {
   void *fill_ctx;
   const capnp_rpc_cap_ref_t *caps;
   uint32_t ncaps;
+  /* sendResultsTo.yourself: the peer keeps the results for a later
+   * Return.takeFromOtherQuestion and answers resultsSentElsewhere. */
+  int results_to_yourself;
 } capnp_rpc_call_t;
 
 /* Send `call`. Returns the questionId, or (uint32_t)-1 when the table

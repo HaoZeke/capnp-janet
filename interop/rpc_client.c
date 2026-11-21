@@ -182,7 +182,7 @@ static int local_add(void *server, uint64_t iid, uint16_t mid,
 {
 	capnp_bptr_t body;
 	(void)server;
-	if (iid != ADDER_IFACE || mid != 0 ||
+	if (iid != ADDER_IFACE || (mid != 0 && mid != 4) ||
 	    capnp_builder_struct(results, 1, 0, &body))
 		return 1;
 	return capnp_builder_set_u64(&body, 0,
@@ -236,6 +236,113 @@ static int check_cap_params(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 		}
 		capnp_rpc_send_finish(conn, q);
 	}
+	return 0;
+}
+
+/* Like wait_answer, also noting the union tag of each Return seen. */
+static int wait_noting(capnp_rpc_conn_t *conn, uint32_t q, uint8_t *buf,
+		       size_t cap, unsigned *tags)
+{
+	while (!capnp_rpc_is_answered(conn, q)) {
+		capnp_message_t m = {0};
+		capnp_ptr_t root, ret;
+		ssize_t n = read_frame(g_fd, buf, cap);
+		if (n <= 0)
+			return -1;
+		if (capnp_message_from_flat(&m, buf, (size_t)n) == CAPNP_OK &&
+		    capnp_root(&m, &root) == CAPNP_OK &&
+		    capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_RETURN &&
+		    capnp_getp(&root, 0, &ret) == CAPNP_OK)
+			*tags |= 1u << capnp_get_u16(&ret, 6, 0);
+		capnp_message_free(&m);
+		if (capnp_rpc_handle(conn, buf, (size_t)n) != 0)
+			return -1;
+	}
+	return capnp_rpc_is_failed(conn, q) ? -1 : 0;
+}
+
+static int fill_relay(void *ctx, const capnp_bptr_t *params)
+{
+	const int64_t *ab = (const int64_t *)ctx;
+	return capnp_builder_set_u64(params, 0, (uint64_t)ab[0]) ||
+	       capnp_builder_set_u64(params, 8, (uint64_t)ab[1]) ||
+	       capnp_builder_set_cap(params, 2, 0, 0);
+}
+
+/* Tail calls. An add() asking for sendResultsTo.yourself comes back as
+ * resultsSentElsewhere, which the vat takes quietly. relay(target) tail-calls target.relay(), and
+ * with this vat's export as target capnp-C++ sends that call here with
+ * sendResultsTo.yourself, then answers ours with takeFromOtherQuestion. */
+static int check_tail(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
+{
+	static int self;
+	int64_t ab[2] = {5, 6};
+	capnp_rpc_cap_ref_t ref;
+	capnp_rpc_call_t call;
+	capnp_message_t m = {0};
+	capnp_ptr_t content;
+	unsigned tags = 0;
+	uint32_t q;
+	int64_t sum;
+	int eid = capnp_rpc_export(conn, &self, local_add);
+
+	memset(&call, 0, sizeof call);
+	call.interface_id = ADDER_IFACE;
+	call.params_dwords = 2;
+	call.fill = fill_add;
+	call.fill_ctx = ab;
+	call.results_to_yourself = 1;
+	q = capnp_rpc_send_call_ex(conn, &call);
+	/* capnp-C++ sends resultsSentElsewhere once the caller has sent
+	 * Finish, so a bootstrap call afterwards waits behind it. */
+	if (q == (uint32_t)-1 || capnp_rpc_send_finish(conn, q)) {
+		fprintf(stderr, "add() to yourself not sent\n");
+		return 1;
+	}
+	q = capnp_rpc_send_call(conn, 0, ADDER_IFACE, 0, 2, 0, fill_add, ab);
+	if (q == (uint32_t)-1 || wait_noting(conn, q, buf, cap, &tags) ||
+	    !(tags & (1u << 3))) {
+		fprintf(stderr, "add() to yourself: tags %#x\n", tags);
+		return 1;
+	}
+	capnp_rpc_send_finish(conn, q);
+
+	if (eid < 0)
+		return 1;
+	ref.kind = CAPNP_RPC_CAP_EXPORT;
+	ref.id = (uint32_t)eid;
+	memset(&call, 0, sizeof call);
+	call.interface_id = ADDER_IFACE;
+	call.method_id = 4;
+	call.params_dwords = 2;
+	call.params_pwords = 1;
+	call.fill = fill_relay;
+	call.fill_ctx = ab;
+	call.caps = &ref;
+	call.ncaps = 1;
+	tags = 0;
+	q = capnp_rpc_send_call_ex(conn, &call);
+	if (q == (uint32_t)-1 || wait_noting(conn, q, buf, cap, &tags) ||
+	    !(tags & (1u << 4)) ||
+	    capnp_rpc_answer_content(conn, q, &m, &content) != CAPNP_OK) {
+		fprintf(stderr, "relay() failed: tags %#x\n", tags);
+		return 1;
+	}
+	sum = (int64_t)capnp_get_u64(&content, 0, 0);
+	capnp_message_free(&m);
+	if (sum != 1011) {
+		fprintf(stderr, "relay(5, 6) returned %lld\n", (long long)sum);
+		return 1;
+	}
+	capnp_rpc_send_finish(conn, q);
+	/* The Finish and Release for the forwarded call follow; a round
+	 * trip takes them. */
+	q = capnp_rpc_send_call(conn, 0, ADDER_IFACE, 0, 2, 0, fill_add, ab);
+	if (q == (uint32_t)-1 || wait_answer(conn, q, buf, cap)) {
+		fprintf(stderr, "add() after relay() failed\n");
+		return 1;
+	}
+	capnp_rpc_send_finish(conn, q);
 	return 0;
 }
 
@@ -430,6 +537,8 @@ int main(int argc, char **argv)
 	if (check_pipeline(&conn, buf, sizeof buf))
 		return 1;
 	if (check_cap_params(&conn, buf, sizeof buf))
+		return 1;
+	if (check_tail(&conn, buf, sizeof buf))
 		return 1;
 
 	/* An Unimplemented reply ends the connection for capnp-C++, and

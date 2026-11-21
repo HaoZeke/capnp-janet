@@ -10,8 +10,9 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* Defined below, beside the rest of the answer table. */
+/* Defined below, beside the rest of the answer and question tables. */
 static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
+static void questions_fail_all(capnp_rpc_conn_t *c);
 
 /* rpc.capnp struct shapes: data words, pointer words. */
 #define MESSAGE_DW 1
@@ -25,6 +26,9 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define JOINRESULT_DW 1
 #define JOINRESULT_PW 1
 
+/* `used` value of a question or answer in a tail call; see capnp_rpc.h. */
+#define SLOT_MARKED 2
+
 /* Message.union discriminant, byte 0. */
 #define MESSAGE_TAG_OFF 0
 /* Return: answerId @0 (u32), union tag at byte 6. */
@@ -32,10 +36,14 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define RETURN_TAG_OFF 6
 #define RETURN_TAG_RESULTS 0
 #define RETURN_TAG_EXCEPTION 1
-/* Exception: reason @ptr0, type @0 (u16 enum). */
+#define RETURN_TAG_RESULTS_SENT_ELSEWHERE 3
+#define RETURN_TAG_TAKE_FROM_OTHER_QUESTION 4
+/* Return.takeFromOtherQuestion @6 (u32). */
+#define RETURN_TAKEFROM_OFF 8
+/* Exception: reason @ptr0, type @3 (u16 enum) at bits [32, 48). */
 #define EXCEPTION_DW 1
 #define EXCEPTION_PW 2
-#define EXCEPTION_TYPE_OFF 0
+#define EXCEPTION_TYPE_OFF 4
 #define EXCEPTION_TYPE_FAILED 0
 /* MessageTarget: importedCap @0 (u32), union tag at byte 4. */
 #define TARGET_IMPORTEDCAP_OFF 0
@@ -67,6 +75,9 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define CALL_QUESTIONID_OFF 0
 #define CALL_METHODID_OFF 4
 #define CALL_INTERFACEID_OFF 8
+/* Call.sendResultsTo: union tag at byte 6, caller 0, yourself 1. */
+#define CALL_SENDRESULTSTO_OFF 6
+#define CALL_SENDRESULTSTO_YOURSELF 1
 #define BOOTSTRAP_DW 1
 #define BOOTSTRAP_PW 1
 #define FINISH_DW 1
@@ -430,9 +441,14 @@ static void answer_release_caps(capnp_rpc_conn_t *c, uint32_t qid)
   capnp_message_free(&stored);
 }
 
-/* Send a Return and keep it until `Finish`, so a call pipelined against
- * this answer can still find the capability it names. */
-static int flush_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid)
+static int send_results_sent_elsewhere(capnp_rpc_conn_t *c, uint32_t qid);
+
+/* Keep a Return until `Finish`, so a call pipelined against this answer
+ * can still find the capability it names. A call that asked for
+ * sendResultsTo.yourself gets resultsSentElsewhere on the wire, and the
+ * kept Return waits for a takeFromOtherQuestion. */
+static int keep_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid,
+                       int redirect)
 {
   uint8_t *flat = NULL;
   size_t len = 0;
@@ -443,15 +459,21 @@ static int flush_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid)
     if (!c->answers[i].used) {
       if (frame_store(c->answers[i].frame, &c->answers[i].len, flat, len) ==
           CAPNP_OK) {
-        c->answers[i].used = 1;
+        c->answers[i].used = redirect ? SLOT_MARKED : 1;
         c->answers[i].question_id = qid;
       }
       break;
     }
   }
-  rc = c->send(c->send_ctx, flat, len);
+  rc = redirect ? send_results_sent_elsewhere(c, qid)
+                : c->send(c->send_ctx, flat, len);
   free(flat);
   return rc;
+}
+
+static int flush_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid)
+{
+  return keep_answer(c, b, qid, 0);
 }
 
 static int flush(capnp_rpc_conn_t *c, capnp_builder_t *b)
@@ -464,6 +486,84 @@ static int flush(capnp_rpc_conn_t *c, capnp_builder_t *b)
   rc = c->send(c->send_ctx, flat, len);
   free(flat);
   return rc;
+}
+
+/* A Return message with only the answer id and union tag set. */
+static int build_return_tag(capnp_builder_t *b, uint32_t qid, uint16_t tag,
+                            capnp_bptr_t *ret)
+{
+  capnp_bptr_t root, msg, slot;
+  if (capnp_builder_root(b, &root) ||
+      capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) ||
+      capnp_builder_set_u16(&msg, MESSAGE_TAG_OFF, CAPNP_RPC_MSG_RETURN) ||
+      capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot) ||
+      capnp_builder_struct(&slot, RETURN_DW, RETURN_PW, ret) ||
+      capnp_builder_set_u32(ret, RETURN_ANSWERID_OFF, qid) ||
+      capnp_builder_set_u16(ret, RETURN_TAG_OFF, tag))
+    return CAPNP_ERR_ALLOC;
+  return CAPNP_OK;
+}
+
+static int send_results_sent_elsewhere(capnp_rpc_conn_t *c, uint32_t qid)
+{
+  capnp_builder_t b;
+  capnp_bptr_t ret;
+  int rc;
+  capnp_builder_init(&b);
+  rc = build_return_tag(&b, qid, RETURN_TAG_RESULTS_SENT_ELSEWHERE, &ret);
+  if (rc == CAPNP_OK)
+    rc = flush(c, &b);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+/* An Exception struct in slot `ptr` of `body`. */
+static int write_exception(const capnp_bptr_t *body, uint16_t dwords,
+                           uint16_t ptr, const char *reason)
+{
+  capnp_bptr_t slot, exc;
+  if (capnp_builder_slot(body, dwords, ptr, &slot) ||
+      capnp_builder_struct(&slot, EXCEPTION_DW, EXCEPTION_PW, &exc) ||
+      capnp_builder_set_u16(&exc, EXCEPTION_TYPE_OFF, EXCEPTION_TYPE_FAILED) ||
+      capnp_builder_set_text(&exc, EXCEPTION_DW, 0, reason, strlen(reason)))
+    return CAPNP_ERR_ALLOC;
+  return CAPNP_OK;
+}
+
+/* A failed call that asked for sendResultsTo.yourself keeps its
+ * exception for takeFromOtherQuestion, like any other result. */
+static int redirect_exception(capnp_rpc_conn_t *c, uint32_t qid,
+                              const char *reason)
+{
+  capnp_builder_t b;
+  capnp_bptr_t ret;
+  int rc;
+  capnp_builder_init(&b);
+  rc = build_return_tag(&b, qid, RETURN_TAG_EXCEPTION, &ret);
+  if (rc == CAPNP_OK)
+    rc = write_exception(&ret, RETURN_DW, 0, reason);
+  if (rc == CAPNP_OK)
+    rc = keep_answer(c, &b, qid, 1);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+/* Abort with rpc.c++'s reason for refusing a message: the connection is
+ * over, so every unanswered question fails. */
+static int protocol_abort(capnp_rpc_conn_t *c, const char *reason)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg;
+  capnp_builder_init(&b);
+  if (capnp_builder_root(&b, &root) == CAPNP_OK &&
+      capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK &&
+      capnp_builder_set_u16(&msg, MESSAGE_TAG_OFF, CAPNP_RPC_MSG_ABORT) ==
+          CAPNP_OK &&
+      write_exception(&msg, MESSAGE_DW, 0, reason) == CAPNP_OK)
+    (void)flush(c, &b);
+  capnp_builder_free(&b);
+  questions_fail_all(c);
+  return CAPNP_ERR_KIND;
 }
 
 /* Answer a question with an exception. A call the vat cannot route still
@@ -655,7 +755,7 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   capnp_bptr_t ret, payload, results;
   capnp_ptr_t target, params_payload, params;
   uint32_t qid = capnp_get_u32(call, QUESTIONID_OFF, 0);
-  int eid, rc;
+  int eid, rc, yourself;
 
   memset(&params, 0, sizeof params);
   /* The cap table describes the message, not the dispatch: a call this
@@ -666,11 +766,15 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
     note_introductions(c, &params_payload);
   }
 
+  yourself = capnp_get_u16(call, CALL_SENDRESULTSTO_OFF, 0) ==
+             CALL_SENDRESULTSTO_YOURSELF;
   if (capnp_getp(call, 0, &target) != CAPNP_OK)
-    return send_return_exception(c, qid, "call has no target");
+    return yourself ? redirect_exception(c, qid, "call has no target")
+                    : send_return_exception(c, qid, "call has no target");
   eid = resolve_target(c, &target);
   if (eid < 0)
-    return send_return_exception(c, qid, "no such export");
+    return yourself ? redirect_exception(c, qid, "no such export")
+                    : send_return_exception(c, qid, "no such export");
 
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
@@ -686,11 +790,12 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
       /* A method that fails is answered with an exception, as rpc.c++
        * does when one throws; otherwise the caller waits forever. */
       capnp_builder_free(&b);
-      return send_return_exception(c, qid, "method failed");
+      return yourself ? redirect_exception(c, qid, "method failed")
+                      : send_return_exception(c, qid, "method failed");
     }
   }
   if (rc == CAPNP_OK)
-    rc = flush_answer(c, &b, qid);
+    rc = keep_answer(c, &b, qid, yourself);
   capnp_builder_free(&b);
   return rc;
 }
@@ -1151,6 +1256,9 @@ uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c, const capnp_rpc_call_t *cal
     rc = capnp_builder_set_u16(&msg, CALL_METHODID_OFF, call->method_id);
   if (rc == CAPNP_OK)
     rc = capnp_builder_set_u64(&msg, CALL_INTERFACEID_OFF, call->interface_id);
+  if (rc == CAPNP_OK && call->results_to_yourself)
+    rc = capnp_builder_set_u16(&msg, CALL_SENDRESULTSTO_OFF,
+                               CALL_SENDRESULTSTO_YOURSELF);
   if (rc == CAPNP_OK)
     rc = capnp_builder_slot(&msg, CALL_DW, 0, &slot);
   if (rc == CAPNP_OK)
@@ -1185,6 +1293,8 @@ uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c, const capnp_rpc_call_t *cal
   for (i = 0; i < call->ncaps; i++)
     if (call->caps[i].kind == CAPNP_RPC_CAP_EXPORT)
       c->exports[call->caps[i].id].refcount++;
+  if (call->results_to_yourself)
+    q->used = SLOT_MARKED;
   return qid;
 }
 
@@ -1315,18 +1425,68 @@ int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
 
 /* Record a Return against the question that asked it. A Return naming a
  * question this vat never asked is dropped: recording it would let a peer
- * plant answers that later pipelining would trust. */
-static void handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
-                          const uint8_t *frame, size_t len)
+ * plant answers that later pipelining would trust. The checks on the
+ * other arms are the ones rpc.c++ handleReturn makes. */
+static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
+                         const uint8_t *frame, size_t len)
 {
   capnp_rpc_question_t *q;
+  uint16_t tag;
   if (ret->kind != CAPNP_PK_STRUCT)
-    return;
+    return CAPNP_OK;
   q = question_find(c, capnp_get_u32(ret, RETURN_ANSWERID_OFF, 0));
   if (q == NULL)
-    return;
+    return CAPNP_OK;
+  tag = capnp_get_u16(ret, RETURN_TAG_OFF, 0);
+  /* The reasons are the Abort text capnp-C++ sends, condition included. */
+  if (q->used == SLOT_MARKED && tag == RETURN_TAG_RESULTS)
+    return protocol_abort(c, "expected !question->isTailCall; Tail call "
+                             "`Return` must set `resultsSentElsewhere`, not "
+                             "`results`.");
+  if (q->used == SLOT_MARKED && tag == RETURN_TAG_EXCEPTION)
+    return protocol_abort(c, "expected !question->isTailCall; Tail call "
+                             "`Return` must set `resultsSentElsewhere`, not "
+                             "`exception`.");
+  if (tag == RETURN_TAG_RESULTS_SENT_ELSEWHERE) {
+    if (q->used != SLOT_MARKED)
+      return protocol_abort(c, "expected question->isTailCall; `Return` had "
+                               "`resultsSentElsewhere` but this was not a "
+                               "tail call.");
+    q->answered = 1;
+    q->failed = 0;
+    if (frame_store(q->reply, &q->reply_len, frame, len) != CAPNP_OK)
+      q->failed = 1;
+    return CAPNP_OK;
+  }
+  if (tag == RETURN_TAG_TAKE_FROM_OTHER_QUESTION) {
+    capnp_rpc_answer_t *a =
+        answer_find(c, capnp_get_u32(ret, RETURN_TAKEFROM_OFF, 0));
+    capnp_message_t kept = {0};
+    capnp_ptr_t root, kret;
+    if (a == NULL)
+      return protocol_abort(c, "`Return.takeFromOtherQuestion` had invalid "
+                               "answer ID.");
+    if (a->used != SLOT_MARKED)
+      return protocol_abort(c, "`Return.takeFromOtherQuestion` referenced a "
+                               "call that did not use `sendResultsTo.yourself`.");
+    /* The results go to this question, once; the answer itself stays
+     * until Finish for anything pipelined on it. */
+    a->used = 1;
+    q->answered = 1;
+    q->failed = 1;
+    if (capnp_message_from_flat(&kept, frame_bytes(a->frame, a->len), a->len) ==
+            CAPNP_OK &&
+        capnp_root(&kept, &root) == CAPNP_OK &&
+        capnp_getp(&root, 0, &kret) == CAPNP_OK)
+      q->failed = capnp_get_u16(&kret, RETURN_TAG_OFF, 0) != RETURN_TAG_RESULTS;
+    capnp_message_free(&kept);
+    if (frame_store(q->reply, &q->reply_len, frame_bytes(a->frame, a->len),
+                    a->len) != CAPNP_OK)
+      q->failed = 1;
+    return CAPNP_OK;
+  }
   q->answered = 1;
-  q->failed = capnp_get_u16(ret, RETURN_TAG_OFF, 0) != RETURN_TAG_RESULTS;
+  q->failed = tag != RETURN_TAG_RESULTS;
   if (!q->failed) {
     capnp_ptr_t results;
     if (capnp_getp(ret, 0, &results) == CAPNP_OK)
@@ -1334,6 +1494,7 @@ static void handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
   }
   if (frame_store(q->reply, &q->reply_len, frame, len) != CAPNP_OK)
     q->failed = 1;
+  return CAPNP_OK;
 }
 
 /* --- stream flow control ------------------------------------------- */
@@ -1650,7 +1811,7 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
     rc = handle_disembargo(c, &body);
     break;
   case CAPNP_RPC_MSG_RETURN:
-    handle_return(c, &body, data, len);
+    rc = handle_return(c, &body, data, len);
     break;
   case CAPNP_RPC_MSG_PROVIDE:
     rc = handle_provide(c, &body);

@@ -39,6 +39,14 @@ public:
 			ctx.getResults().setSum(resp.getSum());
 		});
 	}
+
+	kj::Promise<void> relay(RelayContext ctx) override {
+		auto p = ctx.getParams();
+		auto req = p.getTarget().relayRequest();
+		req.setA(p.getA());
+		req.setB(p.getB());
+		return ctx.tailCall(kj::mv(req));
+	}
 };
 
 // A bootstrap made when the Bootstrap message arrives. It resolves on the

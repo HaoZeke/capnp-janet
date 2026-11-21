@@ -106,6 +106,51 @@ static int fill_u32(void *ctx, const capnp_bptr_t *params)
   return 0;
 }
 
+/* A Return naming `answer`, with union tag `tag` and `u32` at byte 8,
+ * which takeFromOtherQuestion reads. */
+static int feed_return(capnp_rpc_conn_t *c, uint32_t answer, uint16_t tag,
+                       uint32_t u32)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, ret;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  int rc = CAPNP_ERR_ALLOC;
+  capnp_builder_init(&b);
+  if (capnp_builder_root(&b, &root) == CAPNP_OK &&
+      capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK &&
+      capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RETURN) == CAPNP_OK &&
+      capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 2, 1, &ret) == CAPNP_OK &&
+      capnp_builder_set_u32(&ret, 0, answer) == CAPNP_OK &&
+      capnp_builder_set_u16(&ret, 6, tag) == CAPNP_OK &&
+      capnp_builder_set_u32(&ret, 8, u32) == CAPNP_OK &&
+      capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK)
+    rc = capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+/* The one frame queued is an Abort whose reason is `reason`. */
+static int sent_abort(queue_t *q, const char *reason)
+{
+  capnp_message_t m = {0};
+  capnp_ptr_t r, exc;
+  const char *text = NULL;
+  size_t n = 0;
+  int ok = q->tail == 1 &&
+           capnp_message_from_flat(&m, q->data[0], q->len[0]) == CAPNP_OK &&
+           capnp_root(&m, &r) == CAPNP_OK &&
+           capnp_get_u16(&r, 0, 0) == CAPNP_RPC_MSG_ABORT &&
+           capnp_getp(&r, 0, &exc) == CAPNP_OK &&
+           capnp_get_text(&exc, 0, &text, &n) == CAPNP_OK &&
+           n == strlen(reason) && memcmp(text, reason, n) == 0;
+  capnp_message_free(&m);
+  q_drop(q);
+  return ok;
+}
+
 int main(void)
 {
   /* static, not automatic: see test_rpc_join.c. */
@@ -315,6 +360,102 @@ int main(void)
     capnp_builder_free(&b);
     CHECK(capnp_rpc_answer_cap_id(&client, pq) == 7,
           "senderPromise names export 7");
+  }
+
+  /* A call with sendResultsTo.yourself is answered resultsSentElsewhere,
+   * and the vat keeps its results for a takeFromOtherQuestion. */
+  {
+    capnp_rpc_call_t call;
+    capnp_message_t m = {0};
+    capnp_ptr_t content;
+    uint32_t qy, vq;
+    memset(&call, 0, sizeof call);
+    call.interface_id = 0x1234;
+    call.params_dwords = 1;
+    call.fill = fill_u32;
+    call.fill_ctx = &arg;
+    call.results_to_yourself = 1;
+    arg = 8;
+    qy = capnp_rpc_send_call_ex(&client, &call);
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_is_answered(&client, qy) &&
+              !capnp_rpc_is_failed(&client, qy),
+          "resultsSentElsewhere answers a tail call");
+    vq = capnp_rpc_send_bootstrap(&vat);
+    q_drop(&g_to_client);
+    CHECK(feed_return(&vat, vq, 4, qy) == CAPNP_OK &&
+              capnp_rpc_answer_content(&vat, vq, &m, &content) == CAPNP_OK &&
+              capnp_get_u32(&content, 0, 0) == 16,
+          "takeFromOtherQuestion takes the kept results");
+    capnp_message_free(&m);
+    CHECK(g_to_client.tail == 0, "takeFromOtherQuestion sends nothing");
+    vq = capnp_rpc_send_bootstrap(&vat);
+    q_drop(&g_to_client);
+    CHECK(feed_return(&vat, vq, 4, qy) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_client,
+                         "`Return.takeFromOtherQuestion` referenced a call "
+                         "that did not use `sendResultsTo.yourself`."),
+          "kept results are taken once");
+    capnp_rpc_send_finish(&client, qy);
+    pump(&vat, &g_to_vat);
+  }
+
+  /* The other Return arms abort the connection as rpc.c++ does, and
+   * every question still waiting fails. */
+  {
+    capnp_rpc_call_t call;
+    uint32_t qt, qn, vq;
+    memset(&call, 0, sizeof call);
+    call.interface_id = 0x1234;
+    call.params_dwords = 1;
+    call.fill = fill_u32;
+    call.fill_ctx = &arg;
+    call.results_to_yourself = 1;
+    qt = capnp_rpc_send_call_ex(&client, &call);
+    qn = capnp_rpc_send_bootstrap(&client);
+    q_drop(&g_to_vat);
+    CHECK(feed_return(&client, qt, 0, 0) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_vat, "expected !question->isTailCall; Tail "
+                                    "call `Return` must set "
+                                    "`resultsSentElsewhere`, not `results`."),
+          "tail call refuses results");
+    CHECK(capnp_rpc_is_failed(&client, qt) && capnp_rpc_is_failed(&client, qn),
+          "abort fails waiting questions");
+    qt = capnp_rpc_send_call_ex(&client, &call);
+    q_drop(&g_to_vat);
+    CHECK(feed_return(&client, qt, 1, 0) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_vat, "expected !question->isTailCall; Tail "
+                                    "call `Return` must set "
+                                    "`resultsSentElsewhere`, not "
+                                    "`exception`."),
+          "tail call refuses an exception");
+    qn = capnp_rpc_send_bootstrap(&client);
+    q_drop(&g_to_vat);
+    CHECK(feed_return(&client, qn, 3, 0) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_vat, "expected question->isTailCall; `Return` "
+                                    "had `resultsSentElsewhere` but this "
+                                    "was not a tail call."),
+          "resultsSentElsewhere needs a tail call");
+    qn = capnp_rpc_send_bootstrap(&client);
+    q_drop(&g_to_vat);
+    CHECK(feed_return(&client, qn, 4, 4242) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_vat, "`Return.takeFromOtherQuestion` had "
+                                    "invalid answer ID."),
+          "takeFromOtherQuestion needs a known answer");
+    qn = capnp_rpc_send_call(&client, 0, 0x1234, 1, 1, 1, fill_u32, &arg);
+    pump(&vat, &g_to_vat);
+    q_drop(&g_to_client);
+    vq = capnp_rpc_send_bootstrap(&vat);
+    q_drop(&g_to_client);
+    CHECK(feed_return(&vat, vq, 4, qn) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_client,
+                         "`Return.takeFromOtherQuestion` referenced a call "
+                         "that did not use `sendResultsTo.yourself`."),
+          "takeFromOtherQuestion needs sendResultsTo.yourself");
+    capnp_rpc_send_finish(&client, qn);
+    pump(&vat, &g_to_vat);
+    q_drop(&g_to_client);
   }
 
   /* The stream window bounds how many calls are outstanding at once. */

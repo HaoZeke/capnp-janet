@@ -11,4 +11,6 @@ interface Adder @0xea01e10cbc414411 {
   self @2 () -> (adder :Adder);
   # The sum `cb.add(20, 22)` returns, for a capability in the params.
   callBack @3 (cb :Adder) -> (sum :Int64);
+  # A tail call to `target.relay(a, b)`.
+  relay @4 (target :Adder, a :Int64, b :Int64) -> (sum :Int64);
 }

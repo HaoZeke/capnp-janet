@@ -32,6 +32,9 @@ Pre-1.0 minor releases may include breaking API changes.
   the capnp-C++ Adder's `self()` answer returns before that answer does.
 - A `capnp_rpc_call_t` can pass capabilities in its params: this vat's
   exports as senderHosted and the peer's imports as receiverHosted.
+- Tail calls: a call can ask for `sendResultsTo.yourself`, a vat keeps
+  such results for a later `takeFromOtherQuestion`, and the Return arms
+  rpc.c++ refuses abort the connection with its reasons.
 - `capnp_read_frame_alloc` reads a frame of any size into a heap buffer,
   refusing more than 8388608 words as C++ RPC does.
 
