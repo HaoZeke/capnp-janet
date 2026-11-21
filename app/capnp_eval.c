@@ -1054,8 +1054,9 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
       int rc = is_json ? capnp_dyn_decode_json_recover(
                              dyn, type_name, in_buf + cstart, clen,
                              &msg_bytes, &mlen, &soft)
-                       : capnp_dyn_decode_text(dyn, type_name, in_buf + cstart,
-                                               clen, &msg_bytes, &mlen);
+                       : capnp_dyn_decode_text_recover(
+                             dyn, type_name, in_buf + cstart, clen,
+                             &msg_bytes, &mlen, &soft);
       if (soft)
         e.soft = 1;
       if (rc != CAPNP_OK ||

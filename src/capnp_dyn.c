@@ -3490,7 +3490,13 @@ enum {
   VK_BYTES = 7,
   VK_IDENT = 8,
   VK_LIST = 9,
-  VK_OBJ = 10
+  VK_OBJ = 10,
+  /* Text: a list item the parser could not read, after a recoverable
+   * error. */
+  VK_UNKNOWN = 11,
+  /* Text: a member access, application, absolute name, import or embed,
+   * which only the resolver could evaluate. */
+  VK_EXTERN = 12
 };
 
 typedef struct vnode vnode_t;
@@ -3510,6 +3516,12 @@ struct vnode {
   /* JSON source span, including quotes for strings. Not owned. */
   const char *src;
   size_t src_n;
+  /* Text: written as a bare name (void, true, false, inf, nan), which
+   * ValueTranslator resolves as an enumerant first. */
+  int ident;
+  /* Text: a negative integer beyond INT64_MIN, which ValueTranslator
+   * drops with "Integer is too big to be negative". */
+  int neg_big;
 };
 
 static void free_vnode(vnode_t *v) {
@@ -3550,6 +3562,8 @@ typedef struct {
   size_t n;
   size_t i;
   int depth;
+  /* Text: an error the C++ parser does not recover from. */
+  int fatal;
 } scan_t;
 
 static int hex_nibble(unsigned char c) {
@@ -4136,129 +4150,272 @@ static int parse_text_ident(scan_t *sc, char *out, size_t n) {
 
 static vnode_t *parse_text_expr(scan_t *sc);
 
-static vnode_t *parse_text_tuple(scan_t *sc) {
-  vnode_t *obj;
-  sc->i++; /* consume '(' */
-  if (++sc->depth > value_depth)
-    return NULL;
-  if (tpeek(sc) == ')') {
-    sc->i++;
-    sc->depth--;
-    return new_vnode(VK_OBJ);
-  }
-  /* Check if first element is `ident = expr` or unnamed `expr` */
-  {
-    size_t save = sc->i;
-    char id[128];
-    int is_named = 0;
-    if (parse_text_ident(sc, id, sizeof(id)) == 0 && tpeek(sc) == '=') {
-      is_named = 1;
-    }
-    sc->i = save;
-    if (!is_named) {
-      /* Single unnamed value in parentheses, e.g. `(99)` */
-      vnode_t *inner = parse_text_expr(sc);
-      if (!inner)
-        return NULL;
-      if (tpeek(sc) != ')') {
-        free_vnode(inner);
-        return NULL;
-      }
-      sc->i++;
-      sc->depth--;
-      return inner;
-    }
-  }
-  obj = new_vnode(VK_OBJ);
-  if (!obj)
-    return NULL;
-  while (tpeek(sc) != ')') {
-    char id[128];
-    vnode_t *val;
-    if (parse_text_ident(sc, id, sizeof(id)) != 0 || tpeek(sc) != '=') {
-      free_vnode(obj);
-      return NULL;
-    }
-    sc->i++; /* consume '=' */
-    val = op_ends(sc) ? parse_text_expr(sc) : NULL;
-    if (!val) {
-      free_vnode(obj);
-      return NULL;
-    }
-    val->key = (char *)malloc(strlen(id) + 1);
-    if (!val->key) {
-      free_vnode(val);
-      free_vnode(obj);
-      return NULL;
-    }
-    memcpy(val->key, id, strlen(id) + 1);
-    if (push_vnode(obj, val)) {
-      free_vnode(val);
-      free_vnode(obj);
-      return NULL;
-    }
-    if (tpeek(sc) == ',') {
-      sc->i++;
-      if (tpeek(sc) == ')')
-        break; /* trailing comma allowed */
-      if (tpeek(sc) == ',') {
-        free_vnode(obj);
-        return NULL; /* empty item not allowed */
-      }
-    } else if (tpeek(sc) != ')') {
-      free_vnode(obj);
-      return NULL;
-    }
-  }
-  if (tpeek(sc) != ')') {
-    free_vnode(obj);
-    return NULL;
-  }
-  sc->i++;
-  sc->depth--;
-  return obj;
+#define TEXT_OPS "!$%&*+-./:<=>?@^|~"
+
+static int soft_error(void);
+
+static char *dup_cstr(const char *src) {
+  size_t n = strlen(src) + 1;
+  char *out = (char *)malloc(n);
+  if (out)
+    memcpy(out, src, n);
+  return out;
 }
 
-static vnode_t *parse_text_list(scan_t *sc) {
-  vnode_t *arr;
-  sc->i++; /* consume '[' */
-  if (++sc->depth > value_depth)
-    return NULL;
-  arr = new_vnode(VK_LIST);
+/* Offset of the ',' or closing bracket that ends the list item at
+ * sc->i, or sc->n. The input has lexed, so brackets balance and strings
+ * end. */
+static size_t text_item_end(const scan_t *sc) {
+  scan_t t = *sc;
+  int depth = 0;
+  for (;;) {
+    int c;
+    tskip(&t);
+    if (t.i >= t.n)
+      return t.n;
+    c = (unsigned char)t.s[t.i];
+    if (c == '"') {
+      buf_t b;
+      int r;
+      memset(&b, 0, sizeof(b));
+      r = parse_text_quoted_one(&t, &b);
+      free(b.data);
+      if (r)
+        return t.n;
+      continue;
+    }
+    if (c == '(' || c == '[') {
+      depth++;
+    } else if (c == ')' || c == ']') {
+      if (depth == 0)
+        return t.i;
+      depth--;
+    } else if (c == ',' && depth == 0) {
+      return t.i;
+    }
+    t.i++;
+  }
+}
+
+/* The items of a parenthesized or bracketed list, each parsed alone as
+ * ParseListItems does (compiler/parser.c++). An item that does not
+ * parse, or is empty, becomes an unnamed VK_UNKNOWN after a recoverable
+ * error. The lexer drops one trailing empty item. */
+static vnode_t *parse_text_items(scan_t *sc, int tuple) {
+  vnode_t *arr = new_vnode(tuple ? VK_OBJ : VK_LIST);
+  int commas = 0;
   if (!arr)
     return NULL;
-  while (tpeek(sc) != ']') {
-    vnode_t *el;
-    if (tpeek(sc) == 0 || tpeek(sc) == ',') {
-      free_vnode(arr);
-      return NULL;
-    }
-    el = parse_text_expr(sc);
-    if (!el || push_vnode(arr, el)) {
-      free_vnode(el);
-      free_vnode(arr);
-      return NULL;
-    }
-    if (tpeek(sc) == ',') {
-      sc->i++;
-      if (tpeek(sc) == ']')
-        break; /* trailing comma allowed */
-      if (tpeek(sc) == ',') {
-        free_vnode(arr);
-        return NULL;
-      }
-    } else if (tpeek(sc) != ']') {
-      free_vnode(arr);
-      return NULL;
-    }
-  }
-  if (tpeek(sc) != ']') {
+  sc->i++; /* consume '(' or '[' */
+  if (++sc->depth > value_depth) {
+    sc->fatal = 1;
     free_vnode(arr);
     return NULL;
   }
-  sc->i++;
+  for (;;) {
+    size_t end = text_item_end(sc);
+    scan_t sub = *sc;
+    vnode_t *val = NULL;
+    char *key = NULL;
+    int last, bad = 0;
+    if (end >= sc->n) {
+      sc->fatal = 1;
+      free_vnode(arr);
+      return NULL;
+    }
+    sub.n = end;
+    last = sc->s[end] != ',';
+    if (last && tpeek(&sub) == 0 && (commas > 0 || arr->count == 0)) {
+      sc->i = end + 1;
+      break;
+    }
+    if (tuple) {
+      size_t save = sub.i;
+      char id[128];
+      if (parse_text_ident(&sub, id, sizeof(id)) == 0 && tpeek(&sub) == '=') {
+        sub.i++;
+        if (!op_ends(&sub))
+          bad = 1;
+        else if (!(key = dup_cstr(id))) {
+          free_vnode(arr);
+          return NULL;
+        }
+      } else {
+        sub.i = save;
+      }
+    }
+    if (!bad)
+      val = parse_text_expr(&sub);
+    if (sub.fatal) {
+      sc->fatal = 1;
+      free(key);
+      free_vnode(val);
+      free_vnode(arr);
+      return NULL;
+    }
+    if (!val || tpeek(&sub) != 0) {
+      free_vnode(val);
+      free(key);
+      key = NULL;
+      if (soft_error() || !(val = new_vnode(VK_UNKNOWN))) {
+        free_vnode(arr);
+        return NULL;
+      }
+    }
+    val->key = key;
+    if (push_vnode(arr, val)) {
+      free_vnode(val);
+      free_vnode(arr);
+      return NULL;
+    }
+    sc->i = end + 1;
+    sc->depth = sub.depth;
+    if (last)
+      break;
+    commas++;
+  }
   sc->depth--;
   return arr;
+}
+
+/* A tuple of one unnamed value is that value. */
+static vnode_t *parse_text_tuple(scan_t *sc) {
+  vnode_t *t = parse_text_items(sc, 1);
+  if (t && t->count == 1 && !t->kids[0]->key) {
+    vnode_t *v = t->kids[0];
+    t->count = 0;
+    free_vnode(t);
+    return v;
+  }
+  return t;
+}
+
+static vnode_t *parse_text_list(scan_t *sc) {
+  return parse_text_items(sc, 0);
+}
+
+static int text_num_end_ok(const scan_t *sc, size_t i) {
+  return i >= sc->n || !(isalpha((unsigned char)sc->s[i]) ||
+                         sc->s[i] == '_' || sc->s[i] == '.');
+}
+
+/* Lexes a token that starts with a digit as kj::parse does: a hex
+ * binary, then `integer`, then `number`. Both numbers may not run into a
+ * letter, `_` or `.`. */
+static int text_lex_number(scan_t *sc) {
+  const char *s = sc->s;
+  size_t n = sc->n, i = sc->i, j;
+  if (i + 2 < n && s[i] == '0' && s[i + 1] == 'x' && s[i + 2] == '"') {
+    scan_t t = *sc;
+    vnode_t *v = parse_text_hex_binary(&t);
+    if (v) {
+      free_vnode(v);
+      sc->i = t.i;
+      return 0;
+    }
+  }
+  j = i;
+  if (s[i] == '0' && i + 2 < n && s[i + 1] == 'x' &&
+      hex_nibble((unsigned char)s[i + 2]) >= 0) {
+    j = i + 2;
+    while (j < n && hex_nibble((unsigned char)s[j]) >= 0)
+      j++;
+  } else if (s[i] == '0') {
+    j = i + 1;
+    while (j < n && oct_digit((unsigned char)s[j]) >= 0)
+      j++;
+  } else {
+    while (j < n && isdigit((unsigned char)s[j]))
+      j++;
+  }
+  if (text_num_end_ok(sc, j)) {
+    sc->i = j;
+    return 0;
+  }
+  j = i;
+  while (j < n && isdigit((unsigned char)s[j]))
+    j++;
+  if (j < n && s[j] == '.') {
+    j++;
+    while (j < n && isdigit((unsigned char)s[j]))
+      j++;
+  }
+  if (j < n && (s[j] == 'e' || s[j] == 'E')) {
+    j++;
+    if (j < n && (s[j] == '+' || s[j] == '-'))
+      j++;
+    while (j < n && isdigit((unsigned char)s[j]))
+      j++;
+  }
+  if (text_num_end_ok(sc, j)) {
+    sc->i = j;
+    return 0;
+  }
+  return -1;
+}
+
+/* Whether the C++ lexer reads @s as one token sequence. When it does
+ * not, it returns no tokens and `capnp` fails the message outright.
+ * Splits it makes differently, such as `0x""` into `0`, `x` and `""`,
+ * still lex; their parse errors are recoverable. */
+static int text_lexes(const char *s, size_t n) {
+  scan_t sc;
+  char *stack = NULL;
+  size_t depth = 0, cap = 0;
+  int ok = 0;
+  memset(&sc, 0, sizeof(sc));
+  sc.s = s;
+  sc.n = n;
+  for (;;) {
+    int c;
+    tskip(&sc);
+    if (sc.i >= n) {
+      ok = depth == 0;
+      break;
+    }
+    c = (unsigned char)s[sc.i];
+    if (c == '"') {
+      buf_t b;
+      int r;
+      memset(&b, 0, sizeof(b));
+      r = parse_text_quoted_one(&sc, &b);
+      free(b.data);
+      if (r)
+        break;
+      continue;
+    }
+    if (c == '(' || c == '[') {
+      if (depth == cap) {
+        size_t ncap = cap ? cap * 2 : 16;
+        char *ns = (char *)realloc(stack, ncap);
+        if (!ns)
+          break;
+        stack = ns;
+        cap = ncap;
+      }
+      stack[depth++] = (char)c;
+    } else if (c == ')' || c == ']') {
+      if (depth == 0 || stack[depth - 1] != (c == ')' ? '(' : '['))
+        break;
+      depth--;
+    } else if (c == ',') {
+      if (depth == 0)
+        break;
+    } else if (isdigit(c)) {
+      if (text_lex_number(&sc))
+        break;
+      continue;
+    } else if (isalpha(c) || c == '_') {
+      while (sc.i < n && (isalnum((unsigned char)s[sc.i]) || s[sc.i] == '_'))
+        sc.i++;
+      continue;
+    } else if (!(isalnum(c) || c == '_' || (c != 0 && strchr(TEXT_OPS, c)))) {
+      break;
+    }
+    sc.i++;
+  }
+  free(stack);
+  return ok;
 }
 
 /* A number token may not run into a letter, `_` or `.`. */
@@ -4341,12 +4498,13 @@ static vnode_t *parse_text_number(scan_t *sc, int neg) {
            (uint64_t)(isdigit(c) ? c - '0' : tolower(c) - 'a' + 10);
     }
     if (neg) {
-      if (uv > (uint64_t)INT64_MAX + 1ull)
-        return NULL;
       v = new_vnode(VK_INT);
       if (!v)
         return NULL;
-      v->ival = (uv == (uint64_t)INT64_MAX + 1ull) ? INT64_MIN : -(int64_t)uv;
+      if (uv > (uint64_t)INT64_MAX + 1ull)
+        v->neg_big = 1;
+      else
+        v->ival = (uv == (uint64_t)INT64_MAX + 1ull) ? INT64_MIN : -(int64_t)uv;
       return v;
     } else {
       v = new_vnode(VK_UINT);
@@ -4358,10 +4516,51 @@ static vnode_t *parse_text_number(scan_t *sc, int neg) {
   }
 }
 
+/* A standalone `.` operator token, not part of a longer run. */
+static int text_dot(const scan_t *sc) {
+  return sc->i < sc->n && sc->s[sc->i] == '.' &&
+         (sc->i + 1 >= sc->n || sc->s[sc->i + 1] == '\0' ||
+          strchr(TEXT_OPS, sc->s[sc->i + 1]) == NULL);
+}
+
+static vnode_t *parse_text_base(scan_t *sc);
+
+/* An expression with its suffixes. A member access or application can
+ * only be resolved as an external constant, so it is VK_EXTERN. */
 static vnode_t *parse_text_expr(scan_t *sc) {
+  vnode_t *v = parse_text_base(sc);
+  while (v) {
+    int c = tpeek(sc);
+    if (c == '.' && text_dot(sc)) {
+      char id[128];
+      sc->i++;
+      free_vnode(v);
+      v = NULL;
+      if (parse_text_ident(sc, id, sizeof(id)) == 0)
+        v = new_vnode(VK_EXTERN);
+    } else if (c == '(') {
+      vnode_t *params = parse_text_tuple(sc);
+      free_vnode(v);
+      v = params ? new_vnode(VK_EXTERN) : NULL;
+      free_vnode(params);
+    } else {
+      break;
+    }
+  }
+  return v;
+}
+
+static vnode_t *parse_text_base(scan_t *sc) {
   int c = tpeek(sc);
   if (c == 0)
     return NULL;
+  if (c == '.' && text_dot(sc)) {
+    char id[128];
+    sc->i++;
+    if (parse_text_ident(sc, id, sizeof(id)))
+      return NULL;
+    return new_vnode(VK_EXTERN);
+  }
   if (c == '(')
     return parse_text_tuple(sc);
   if (c == '[')
@@ -4417,30 +4616,35 @@ static vnode_t *parse_text_expr(scan_t *sc) {
     vnode_t *v;
     if (parse_text_ident(sc, id, sizeof(id)))
       return NULL;
-    if (strcmp(id, "void") == 0)
-      return new_vnode(VK_VOID);
-    if (strcmp(id, "true") == 0) {
+    if ((strcmp(id, "import") == 0 || strcmp(id, "embed") == 0) &&
+        tpeek(sc) == '"') {
+      buf_t b;
+      int r;
+      memset(&b, 0, sizeof(b));
+      r = parse_text_quoted_one(sc, &b);
+      free(b.data);
+      return r ? NULL : new_vnode(VK_EXTERN);
+    }
+    if (strcmp(id, "void") == 0) {
+      v = new_vnode(VK_VOID);
+      if (v)
+        v->ident = 1;
+      return v;
+    }
+    if (strcmp(id, "true") == 0 || strcmp(id, "false") == 0) {
       v = new_vnode(VK_BOOL);
-      if (v)
-        v->bval = 1;
+      if (v) {
+        v->bval = id[0] == 't';
+        v->ident = 1;
+      }
       return v;
     }
-    if (strcmp(id, "false") == 0) {
-      v = new_vnode(VK_BOOL);
-      if (v)
-        v->bval = 0;
-      return v;
-    }
-    if (strcmp(id, "inf") == 0) {
+    if (strcmp(id, "inf") == 0 || strcmp(id, "nan") == 0) {
       v = new_vnode(VK_FLOAT);
-      if (v)
-        v->fval = INFINITY;
-      return v;
-    }
-    if (strcmp(id, "nan") == 0) {
-      v = new_vnode(VK_FLOAT);
-      if (v)
-        v->fval = NAN;
+      if (v) {
+        v->fval = id[0] == 'i' ? INFINITY : NAN;
+        v->ident = 1;
+      }
       return v;
     }
     v = new_vnode(VK_IDENT);
@@ -4459,16 +4663,17 @@ static vnode_t *parse_text_expr(scan_t *sc) {
 }
 /* --- Builder from AST (vnode_t) --- */
 
-/* `capnp convert` goes on after a recoverable kj error in a JSON value,
- * using the value kj substitutes, and fails the run at the end. With
- * json_recover unset such an error fails the decode. */
-static _Thread_local int json_recover;
-static _Thread_local int json_soft;
+/* `capnp convert` goes on after a recoverable kj error in a text or
+ * JSON value, using what kj substitutes or dropping the value, and fails
+ * the run at the end. With dec_recover unset such an error fails the
+ * decode. */
+static _Thread_local int dec_recover;
+static _Thread_local int dec_soft;
 
 static int soft_error(void) {
-  if (!json_recover)
+  if (!dec_recover)
     return -1;
-  json_soft = 1;
+  dec_soft = 1;
   return 0;
 }
 
@@ -4607,29 +4812,25 @@ static int vnode_to_int(const vnode_t *v, uint16_t which, int json,
   default:
     return -1;
   }
-  if (v->kind == VK_INT) {
-    if (is_signed) {
-      if (v->ival < smin || v->ival > smax)
-        return -1;
-      *out_bits = (uint64_t)v->ival;
-      return 0;
+  /* ValueTranslator::matchesType clamps an integer out of range to the
+   * type's bound and reports it. */
+  if (v->kind == VK_INT && v->ival < 0) {
+    if (!is_signed) {
+      *out_bits = 0;
+      return soft_error();
     }
-    if (v->ival < 0 || (uint64_t)v->ival > umax)
-      return -1;
+    if (v->ival < smin) {
+      *out_bits = (uint64_t)smin;
+      return soft_error();
+    }
     *out_bits = (uint64_t)v->ival;
     return 0;
   }
-  if (v->kind == VK_UINT) {
-    if (is_signed) {
-      if (v->uval > (uint64_t)smax)
-        return -1;
-      *out_bits = v->uval;
-      return 0;
-    }
-    if (v->uval > umax)
-      return -1;
-    *out_bits = v->uval;
-    return 0;
+  if (v->kind == VK_INT || v->kind == VK_UINT) {
+    uint64_t u = v->kind == VK_INT ? (uint64_t)v->ival : v->uval;
+    uint64_t max = is_signed ? (uint64_t)smax : umax;
+    *out_bits = u > max ? max : u;
+    return u > max ? soft_error() : 0;
   }
   /* JSON numbers are doubles, converted by checkRoundTripFromFloat:
    * clamped to the range, then truncated, then checked for a round trip. */
@@ -5064,6 +5265,111 @@ static int build_struct_from_vnode(capnp_dyn_t *d,
                                    const capnp_bptr_t *body, int json,
                                    int depth);
 
+/* What ValueTranslator::compileValue does with a text value, decided
+ * before anything is written (compiler/node-translator.c++). TV_OK
+ * compiles it, TV_SKIP drops it with a recoverable error, and TV_FATAL
+ * is a name the resolver must look up, which `capnp` cannot do. */
+enum { TV_OK = 0, TV_SKIP = 1, TV_FATAL = 2 };
+enum { TR_VOID, TR_BOOL, TR_INT, TR_FLOAT, TR_TEXT, TR_DATA };
+
+static int text_matches(int r, uint16_t which, uint16_t list_depth) {
+  if (list_depth > 0)
+    return 0;
+  switch (r) {
+  case TR_VOID:
+    return which == TY_VOID;
+  case TR_BOOL:
+    return which == TY_BOOL;
+  case TR_INT:
+    return (which >= TY_I8 && which <= TY_U64) || which == TY_F32 ||
+           which == TY_F64;
+  case TR_FLOAT:
+    return which == TY_F32 || which == TY_F64;
+  case TR_TEXT:
+    return which == TY_TEXT;
+  case TR_DATA:
+    return which == TY_DATA;
+  default:
+    return 0;
+  }
+}
+
+static int text_verdict(capnp_dyn_t *d, uint16_t which, uint16_t list_depth,
+                        uint64_t type_id, const brand_env_t *env,
+                        const vnode_t *v) {
+  int is_enum = list_depth == 0 && which == TY_ENUM;
+  int is_data = list_depth == 0 && which == TY_DATA;
+  int is_struct = list_depth == 0 && which == TY_STRUCT;
+  int r;
+  switch (v->kind) {
+  case VK_IDENT: {
+    uint16_t ord;
+    if (is_enum && vnode_to_enum(d, type_id, v, 0, &ord) == 0)
+      return TV_OK;
+    return TV_FATAL;
+  }
+  case VK_VOID:
+  case VK_BOOL:
+  case VK_FLOAT:
+    if (v->ident && is_enum)
+      return TV_FATAL;
+    r = v->kind == VK_VOID ? TR_VOID : v->kind == VK_BOOL ? TR_BOOL : TR_FLOAT;
+    break;
+  case VK_INT:
+    if (v->neg_big)
+      return TV_SKIP;
+    r = TR_INT;
+    break;
+  case VK_UINT:
+    r = TR_INT;
+    break;
+  case VK_STR:
+    r = is_data ? TR_DATA : TR_TEXT;
+    break;
+  case VK_EXTERN:
+    return TV_FATAL;
+  case VK_BYTES:
+    return is_data ? TV_OK : TV_SKIP;
+  case VK_LIST:
+    return list_depth > 0 ? TV_OK : TV_SKIP;
+  case VK_OBJ:
+    return is_struct ? TV_OK : TV_SKIP;
+  default:
+    return TV_SKIP;
+  }
+  if (text_matches(r, which, list_depth))
+    return TV_OK;
+  /* A struct takes a value that matches its first field. */
+  if (is_struct) {
+    dyn_struct_t *st = find_struct_id(d, type_id);
+    rtype_t f0;
+    int ok = 0;
+    if (st && st->nfields > 0 && !st->fields[0].is_group &&
+        resolve_field_type(d, &st->fields[0], env, &f0) == 0) {
+      ok = text_matches(r, f0.which, f0.list_depth);
+      free_rtype(&f0);
+    }
+    if (ok)
+      return TV_OK;
+  }
+  return TV_SKIP;
+}
+
+/* For a text list element: 1 to fill it, 0 to leave it default after a
+ * recoverable error, -1 to fail. JSON elements are always filled. */
+static int text_elem(capnp_dyn_t *d, const rtype_t *rt, const vnode_t *kv,
+                     int json) {
+  int tv;
+  if (json)
+    return 1;
+  tv = text_verdict(d, rt->which, rt->list_depth, rt->type_id, &rt->brand, kv);
+  if (tv == TV_FATAL)
+    return -1;
+  if (tv == TV_SKIP)
+    return soft_error() ? -1 : 0;
+  return 1;
+}
+
 static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
                                  const vnode_t *v, const capnp_bptr_t *body,
                                  uint16_t dwords, uint16_t index, int json,
@@ -5083,7 +5389,11 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
       return -1;
     for (i = 0; i < n; i++) {
       capnp_bptr_t el = capnp_bptr_add(first, i);
-      if (build_list_from_vnode(d, &inner, v->kids[i], &el, 0, 0, json,
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0)
+        return -1;
+      if (use &&
+          build_list_from_vnode(d, &inner, v->kids[i], &el, 0, 0, json,
                                 depth + 1))
         return -1;
     }
@@ -5092,10 +5402,8 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
   switch (elem_rt->which) {
   case TY_VOID:
     for (i = 0; i < n; i++) {
-      if (!json && v->kids[i]->kind != VK_VOID) {
-        dyn_note_bad(d, v->kids[i]);
+      if (text_elem(d, elem_rt, v->kids[i], json) < 0)
         return -1;
-      }
     }
     return capnp_builder_set_list_void(body, dwords, index, n);
   case TY_BOOL: {
@@ -5104,12 +5412,13 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
     if (n && !items)
       return -1;
     for (i = 0; i < n; i++) {
-      if (v->kids[i]->kind != VK_BOOL) {
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0 || (use && v->kids[i]->kind != VK_BOOL)) {
         dyn_note_bad(d, v->kids[i]);
         free(items);
         return -1;
       }
-      items[i] = (uint8_t)(v->kids[i]->bval ? 1 : 0);
+      items[i] = (uint8_t)(use && v->kids[i]->bval ? 1 : 0);
     }
     rc = capnp_builder_set_list_bool(body, dwords, index, items, n);
     free(items);
@@ -5123,7 +5432,9 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
       return -1;
     for (i = 0; i < n; i++) {
       uint64_t bits = 0;
-      if (vnode_to_int(v->kids[i], elem_rt->which, json, &bits)) {
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0 ||
+          (use && vnode_to_int(v->kids[i], elem_rt->which, json, &bits))) {
         dyn_note_bad(d, v->kids[i]);
         free(items);
         return -1;
@@ -5142,6 +5453,14 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
     if (n && !items)
       return -1;
     for (i = 0; i < n; i++) {
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0) {
+        free(items);
+        return -1;
+      }
+      items[i] = 0;
+      if (!use)
+        continue;
       if (elem_rt->which == TY_ENUM) {
         if (vnode_to_enum(d, elem_rt->type_id, v->kids[i], json, &items[i])) {
           dyn_note_bad(d, v->kids[i]);
@@ -5171,7 +5490,10 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
       return -1;
     for (i = 0; i < n; i++) {
       uint64_t bits = 0;
-      int err = (elem_rt->which == TY_F32)
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      int err = use < 0 ? -1
+                : !use  ? 0
+                : (elem_rt->which == TY_F32)
                     ? vnode_to_float(v->kids[i], TY_F32, json, &bits)
                     : vnode_to_int(v->kids[i], elem_rt->which, json, &bits);
       if (err) {
@@ -5194,7 +5516,10 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
       return -1;
     for (i = 0; i < n; i++) {
       uint64_t bits = 0;
-      int err = (elem_rt->which == TY_F64)
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      int err = use < 0 ? -1
+                : !use  ? 0
+                : (elem_rt->which == TY_F64)
                     ? vnode_to_float(v->kids[i], TY_F64, json, &bits)
                     : vnode_to_int(v->kids[i], elem_rt->which, json, &bits);
       if (err) {
@@ -5212,23 +5537,37 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
     const char **texts =
         n ? (const char **)malloc((size_t)n * sizeof(const char *)) : NULL;
     size_t *lens = n ? (size_t *)malloc((size_t)n * sizeof(size_t)) : NULL;
-    int rc;
+    int rc, dropped = 0;
     if (n && (!texts || !lens)) {
       free(texts);
       free(lens);
       return -1;
     }
     for (i = 0; i < n; i++) {
-      if (v->kids[i]->kind != VK_STR) {
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0 || (use && v->kids[i]->kind != VK_STR)) {
         dyn_note_bad(d, v->kids[i]);
         free(texts);
         free(lens);
         return -1;
       }
-      texts[i] = v->kids[i]->str ? v->kids[i]->str : "";
-      lens[i] = v->kids[i]->slen;
+      texts[i] = use ? (v->kids[i]->str ? v->kids[i]->str : "") : NULL;
+      lens[i] = use ? v->kids[i]->slen : 0;
+      if (!use)
+        dropped = 1;
     }
-    rc = capnp_builder_set_list_text_n(body, dwords, index, texts, lens, n);
+    if (!dropped) {
+      rc = capnp_builder_set_list_text_n(body, dwords, index, texts, lens, n);
+    } else {
+      /* A dropped element stays null. */
+      capnp_bptr_t first;
+      rc = capnp_builder_init_ptr_list(body, dwords, index, n, &first);
+      for (i = 0; i < n && rc == 0; i++) {
+        capnp_bptr_t el = capnp_bptr_add(first, i);
+        if (texts[i])
+          rc = capnp_builder_set_text(&el, 0, 0, texts[i], lens[i]);
+      }
+    }
     free(texts);
     free(lens);
     return rc;
@@ -5240,6 +5579,11 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
     for (i = 0; i < n; i++) {
       capnp_bptr_t el = capnp_bptr_add(first, i);
       const vnode_t *kv = v->kids[i];
+      int use = text_elem(d, elem_rt, kv, json);
+      if (use < 0)
+        return -1;
+      if (!use)
+        continue;
       if (!json && (kv->kind == VK_STR || kv->kind == VK_BYTES)) {
         if (capnp_builder_set_data(&el, 0, 0,
                                    (const uint8_t *)(kv->str ? kv->str : ""),
@@ -5282,6 +5626,11 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
     for (i = 0; i < n; i++) {
       capnp_bptr_t el =
           capnp_bptr_add(first, (size_t)i * (es->dwords + es->pwords));
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0)
+        return -1;
+      if (!use)
+        continue;
       if (es->id == JSON_VALUE_TYPE_ID && json) {
         if (build_json_value_struct(v->kids[i], &el, depth + 1))
           return -1;
@@ -5780,25 +6129,6 @@ static int build_field_from_vnode(capnp_dyn_t *d, const dyn_struct_t *st,
     }
     break;
   }
-  case TY_ANY: {
-    /* In text format, a struct or list literal may be assigned to AnyPointer */
-    if (!json && v->kind == VK_LIST &&
-        (ft.any_kind == 0 || ft.any_kind == 2) && v->count == 0) {
-      rc = capnp_builder_set_list_void(body, st->dwords, (uint16_t)f->offset,
-                                       0);
-    } else if (!json && v->kind == VK_OBJ &&
-               (ft.any_kind == 0 || ft.any_kind == 1) && v->count == 0) {
-      capnp_bptr_t slot, child;
-      if (capnp_builder_slot(body, st->dwords, (uint16_t)f->offset, &slot) ||
-          capnp_builder_struct(&slot, 0, 0, &child))
-        rc = -1;
-    } else {
-      rc = -1;
-      if (json)
-        value_bad = 1;
-    }
-    break;
-  }
   default:
     rc = -1;
     if (json)
@@ -6186,7 +6516,12 @@ static int build_struct_from_vnode(capnp_dyn_t *d,
   if (v->kind != VK_OBJ) {
     /* In text format, C++ coerces a non-tuple value to the struct's first field
      * if it matches */
-    if (!json && st->nfields > 0) {
+    if (!json) {
+      int tv = text_verdict(d, TY_STRUCT, 0, st->id, env, v);
+      if (tv == TV_FATAL)
+        return -1;
+      if (tv == TV_SKIP)
+        return soft_error();
       return build_field_from_vnode(d, st, &st->fields[0], env, v, body, 0,
                                     depth + 1);
     }
@@ -6206,8 +6541,28 @@ static int build_struct_from_vnode(capnp_dyn_t *d,
       const dyn_field_t *f;
       f = find_field(st, key);
       if (!f) {
-        dyn_err_text(d, "unknown field", key, strlen(key));
-        return -1;
+        if (soft_error()) {
+          dyn_err_text(d, "unknown field", key, strlen(key));
+          return -1;
+        }
+        continue;
+      }
+      /* A value compileValue rejects is dropped before adopt, so a union
+       * member's discriminant is not written either. */
+      if (!f->is_group) {
+        rtype_t ft;
+        int tv;
+        if (resolve_field_type(d, f, env, &ft))
+          return -1;
+        tv = text_verdict(d, ft.which, ft.list_depth, ft.type_id, &ft.brand,
+                          kv);
+        free_rtype(&ft);
+        if (tv == TV_FATAL || (tv == TV_SKIP && soft_error())) {
+          dyn_err_text(d, "bad value", key, strlen(key));
+          return -1;
+        }
+        if (tv == TV_SKIP)
+          continue;
       }
       if (build_field_from_vnode(d, st, f, env, kv, body, 0, depth + 1)) {
         if (!d->err[0])
@@ -6311,17 +6666,28 @@ static int decode_root_impl(capnp_dyn_t *d, const char *type_name,
       return CAPNP_ERR_KIND;
     }
   } else {
-    if (tpeek(&sc) != '(') {
+    if (!text_lexes(text, len) || tpeek(&sc) != '(') {
       dyn_err_scan(d, "text", &sc);
       free_rtype(&rt);
       return CAPNP_ERR_KIND;
     }
     root_v = parse_text_expr(&sc);
-    if (!root_v || tpeek(&sc) != 0 || root_v->kind != VK_OBJ) {
+    if (!root_v || sc.fatal || tpeek(&sc) != 0 ||
+        (root_v->kind != VK_OBJ && soft_error())) {
       dyn_err_scan(d, "text", &sc);
       free_vnode(root_v);
       free_rtype(&rt);
       return CAPNP_ERR_KIND;
+    }
+    /* TextCodec::decode recovers from "Input does not contain a struct"
+     * and leaves the root empty. */
+    if (root_v->kind != VK_OBJ) {
+      free_vnode(root_v);
+      root_v = new_vnode(VK_OBJ);
+      if (!root_v) {
+        free_rtype(&rt);
+        return CAPNP_ERR_ALLOC;
+      }
     }
   }
 
@@ -6364,12 +6730,25 @@ int capnp_dyn_decode_json_recover(capnp_dyn_t *d, const char *type_name,
                                   const char *text, size_t len, uint8_t **out,
                                   size_t *out_len, int *soft) {
   int rc;
-  json_recover = 1;
-  json_soft = 0;
+  dec_recover = 1;
+  dec_soft = 0;
   rc = decode_root_impl(d, type_name, text, len, 1, out, out_len);
-  json_recover = 0;
+  dec_recover = 0;
   if (soft)
-    *soft = json_soft;
+    *soft = dec_soft;
+  return rc;
+}
+
+int capnp_dyn_decode_text_recover(capnp_dyn_t *d, const char *type_name,
+                                  const char *text, size_t len, uint8_t **out,
+                                  size_t *out_len, int *soft) {
+  int rc;
+  dec_recover = 1;
+  dec_soft = 0;
+  rc = decode_root_impl(d, type_name, text, len, 0, out, out_len);
+  dec_recover = 0;
+  if (soft)
+    *soft = dec_soft;
   return rc;
 }
 /* --- capnp eval implementation --- */

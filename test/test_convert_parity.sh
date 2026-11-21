@@ -264,6 +264,54 @@ for n in 0 1 2.5 -1 -1.5 -0.5 65535 65535.5 65536 70000 2147483647.5 \
   compare "json-enum-cast-$((i++))" "$PARITY" Parity "text json"
 done
 
+# The text parser recovers from a bad list item, and ValueTranslator
+# from a bad value: both drop it, print the message and fail the run.
+# Lexer errors, extra tokens and external names fail at once.
+in_fmt=text
+while IFS= read -r v; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-recover-$((i++))" "$PARITY" Parity "text binary json"
+done <<'EOF'
+(vU8 = 300, vI8 = -129, vU64 = -1, vI64 = -9223372036854775809)
+(vI32 = 1.5, vI16 = "x", vF64 = "x", vText = 5, vData = "AB", vI8 = 2)
+(vI32 = kColor)
+(vEnum = void)
+(vEnum = nope)
+(vStruct = (x = 1.5, y = 2), noSuch = nope, vI8 = 3)
+(boxedText = "hi", flatGroup = 5)
+(lI32 = [1, "a", 3], lU8 = [1, 256], lText = ["a", 1], lEnum = [red, 5])
+(lStruct = [(x = 1), 5, "a"], lNested = [[(x = 1)], 5])
+(vU8 = 300)(vI8 = 3)
+(vStruct = (5, y = 2))
+(5)
+(vI8 = 1).foo
+(,)
+(vI8 = 1,,)
+(vI8 = , vI16 = 2)
+(vI8 = 1 2, vI16 = 2)
+(vI8 = 1, vInt8List = [1,,2])
+(= 1)
+(vI8 == 1)
+(vI8 = -, vStruct = (x = 1, @))
+(vI8 = 1, vStruct = (@))
+(vI8 = foo(1))
+(vI8 = .foo)
+(vI8 = import "x")
+(vI8 = 1 (2))
+(nope = foo(1), vI8 = 1)
+(vI8 = 1) x
+(vI8 = 1; vI16 = 2)
+(vI8 = 0x"")
+(vI8 = 10x)
+(vI8 = 08, vI16 = 1e)
+(vI32 = 1.5.3)
+(vData = 0x"0a 1b", vI8 = 0x"0a"x)
+EOF
+# A `#` in a string still ends the chunk scan, so this is one
+# application and reads as an empty root.
+printf '(vText = "a#b")\n(vI8 = 2)' >"$TMP/in.bin"
+compare text-recover-chunk "$PARITY" Parity "text binary json"
+
 # Stream input takes at most 511 segments.
 in_fmt=binary
 full=1

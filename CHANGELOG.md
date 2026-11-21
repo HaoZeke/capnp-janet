@@ -32,6 +32,11 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp-eval convert` goes on after the text errors `capnp` recovers
+  from: a list item that does not parse, a value of the wrong type, an
+  unknown field and a non-struct root are dropped, and integers out of
+  range are clamped. It prints the message and exits 1. Lexer errors,
+  extra tokens and external names still fail the message, as in C++.
 - `capnp-eval convert` goes on after the JSON errors `JsonCodec`
   recovers from, as `capnp` does: a number out of range is clamped or
   wrapped, a bad numeric string reads as 0, and a non-array list is

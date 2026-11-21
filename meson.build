@@ -314,6 +314,9 @@ if bash.found()
     args: [meson.project_source_root() / 'test/test_convert_parity.sh'],
     depends: [capnp_eval],
     workdir: meson.project_source_root(),
+    # About 25 s, alone or in a parallel sanitizer run, against the
+    # 30 s default.
+    timeout: 90,
     env: {
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },

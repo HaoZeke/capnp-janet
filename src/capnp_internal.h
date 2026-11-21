@@ -69,6 +69,15 @@ CAPNP_JANET_HIDDEN int capnp_dyn_decode_json_recover(capnp_dyn_t *d,
                                                      size_t len, uint8_t **out,
                                                      size_t *out_len,
                                                      int *soft);
+/* capnp_dyn_decode_text, going on after the errors ValueTranslator
+ * reports: a value of the wrong type or an unknown field is dropped, and
+ * an integer out of range is clamped. *soft is set as above. */
+CAPNP_JANET_HIDDEN int capnp_dyn_decode_text_recover(capnp_dyn_t *d,
+                                                     const char *type_name,
+                                                     const char *text,
+                                                     size_t len, uint8_t **out,
+                                                     size_t *out_len,
+                                                     int *soft);
 /* Canonical copy of @root, a struct or null, the way C++ `canonicalize`
  * copies: a corrupt pointer is written as null and sets *soft, and a
  * section is truncated by its raw words. The result may not be canonical
