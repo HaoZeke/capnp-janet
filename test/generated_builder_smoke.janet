@@ -64,7 +64,9 @@
   (do
     (def here (or (dyn :current-file) "test/generated_builder_smoke.janet"))
     (def schema (string (dirname here) "/../schema/codegen-features.capnp"))
-    (def dest (string "/tmp/capnp-janet-smoke-" (os/getpid)))
+    (def dest (string "/tmp/capnp-janet-smoke-"
+                      (string/join (map |(string/format "%02x" $)
+                                        (os/cryptorand 8)))))
     (os/mkdir dest)
     (spit (string dest "/codegen-features.capnp") (slurp schema))
     (def env (os/environ))
