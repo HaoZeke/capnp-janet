@@ -496,15 +496,19 @@ static int resolve_ptr(capnp_message_t *m, uint32_t seg, size_t word, int depth,
   uint64_t w;
   if (bounds_word(m, seg, word))
     return CAPNP_ERR_BOUNDS;
-  if (charge(m, 1))
-    return CAPNP_ERR_TRAVERSAL;
   w = read_word(m, seg, word);
   return resolve_word(m, seg, word, w, depth - 1, out);
 }
 
+/* The pointer word inside its parent is charged with the parent. C++
+ * charges the root pointer twice: in getRootInternal and in getRoot. */
 int capnp_root(capnp_message_t *m, capnp_ptr_t *out) {
   if (!m || !out || m->nsegs == 0)
     return CAPNP_ERR_ARG;
+  if (bounds_word(m, 0, 0))
+    return CAPNP_ERR_BOUNDS;
+  if (charge(m, 2))
+    return CAPNP_ERR_TRAVERSAL;
   return resolve_ptr(m, 0, 0, m->depth_limit, out);
 }
 

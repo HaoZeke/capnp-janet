@@ -356,7 +356,7 @@ static void test_traversal_budget(void) {
   capnp_builder_free(&b);
 
   CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "parse");
-  /* One pointer word plus a 5-word body (4 data + 1 pointer) is more than 3. */
+  /* Two root charges plus a 5-word body (4 data + 1 pointer) is more than 3. */
   m.traversal_left = 3;
   CHECK(capnp_root(&m, &r) == CAPNP_ERR_TRAVERSAL, "root over budget");
   capnp_message_free(&m);
@@ -367,6 +367,43 @@ static void test_traversal_budget(void) {
   CHECK(capnp_root(&m, &r) == CAPNP_OK, "root within budget");
   CHECK(capnp_getp(&r, 0, &k) == CAPNP_ERR_TRAVERSAL, "child over budget");
   capnp_message_free(&m);
+}
+
+/* C++ charges the root pointer twice and each object it lands, but not the
+ * pointer words inside a parent. Reading every name of
+ * (items = [(name = "abc"), (name = "def")]) costs 2 + 1 + 3 + 2 = 8. */
+static void test_traversal_matches_cpp(void) {
+  static const uint8_t flat[] = {
+      0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0x00,
+      0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x05, 0x00, 0x00, 0x00,
+      0x22, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00,
+      0x61, 0x62, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x65, 0x66, 0x00,
+      0x00, 0x00, 0x00, 0x00};
+  uint64_t budget;
+  for (budget = 7; budget <= 8; budget++) {
+    capnp_message_t m = {0};
+    capnp_ptr_t r, items, item;
+    const char *t;
+    size_t n;
+    uint32_t i;
+    int rc;
+    CHECK(capnp_message_from_flat(&m, flat, sizeof flat) == CAPNP_OK, "parse");
+    m.traversal_left = budget;
+    rc = capnp_root(&m, &r);
+    if (!rc)
+      rc = capnp_getp(&r, 0, &items);
+    for (i = 0; !rc && i < 2; i++) {
+      rc = capnp_list_get_struct(&items, i, &item);
+      if (!rc)
+        rc = capnp_get_text(&item, 0, &t, &n);
+    }
+    if (budget == 8)
+      CHECK(rc == CAPNP_OK && m.traversal_left == 0, "C++ budget suffices");
+    else
+      CHECK(rc == CAPNP_ERR_TRAVERSAL, "one word less runs out");
+    capnp_message_free(&m);
+  }
 }
 
 static void test_zero_size_and_far_validation(void) {
@@ -550,6 +587,7 @@ int main(void) {
   test_builder_offset_overflow();
   test_many_segments_roundtrip();
   test_traversal_budget();
+  test_traversal_matches_cpp();
   test_zero_size_and_far_validation();
   test_virtual_traversal_charge();
   return harness_finish();
