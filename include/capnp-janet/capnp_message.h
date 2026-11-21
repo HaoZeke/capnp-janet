@@ -5,8 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* Hostile segment tables stop here. The builder refuses to emit more,
- * so a message it writes stays readable. */
+/* The builder refuses to emit more segments than this. Flat and segment
+ * array readers take any count, like FlatArrayMessageReader. */
 #define CAPNP_MAX_SEGMENTS 512u
 
 /* Stream readers in C++ (InputStreamMessageReader and the async reader

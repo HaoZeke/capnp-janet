@@ -406,6 +406,41 @@ static void test_traversal_matches_cpp(void) {
   }
 }
 
+/* FlatArrayMessageReader and SegmentArrayMessageReader take any segment
+ * count; only stream readers stop at 511. */
+static void test_flat_many_segments(void) {
+  enum { NSEG = 600, TABLE = (4 + 4 * NSEG + 7) / 8 * 8 };
+  static uint8_t flat[TABLE + 8 * (NSEG + 1)];
+  static capnp_segment_t segs[NSEG];
+  capnp_message_t m = {0};
+  capnp_ptr_t r;
+  uint32_t i;
+
+  memset(flat, 0, sizeof flat);
+  capnp_store_le32(flat, NSEG - 1);
+  capnp_store_le32(flat + 4, 2);
+  for (i = 1; i < NSEG; i++)
+    capnp_store_le32(flat + 4 + 4 * i, 1);
+  capnp_store_le64(flat + TABLE, capnp_wp_make_struct(0, 1, 0));
+  capnp_store_le64(flat + TABLE + 8, 7);
+  CHECK(capnp_message_from_flat(&m, flat, sizeof flat) == CAPNP_OK &&
+            m.nsegs == NSEG,
+        "flat array with 600 segments");
+  CHECK(capnp_root(&m, &r) == CAPNP_OK && capnp_get_u64(&r, 0, 0) == 7,
+        "flat root");
+  capnp_message_free(&m);
+
+  segs[0].data = flat + TABLE;
+  segs[0].words = 2;
+  for (i = 1; i < NSEG; i++) {
+    segs[i].data = flat + TABLE + 8 * (1 + i);
+    segs[i].words = 1;
+  }
+  CHECK(capnp_message_from_segments(&m, segs, NSEG) == CAPNP_OK,
+        "segment array with 600 segments");
+  capnp_message_free(&m);
+}
+
 static void test_zero_size_and_far_validation(void) {
   uint8_t seg0[8], seg1[16], seg2[32];
   capnp_segment_t segs[3];
@@ -588,6 +623,7 @@ int main(void) {
   test_many_segments_roundtrip();
   test_traversal_budget();
   test_traversal_matches_cpp();
+  test_flat_many_segments();
   test_zero_size_and_far_validation();
   test_virtual_traversal_charge();
   return harness_finish();

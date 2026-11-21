@@ -27,6 +27,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp_message_from_flat`, `capnp_message_view_flat` and
+  `capnp_message_from_segments` take any segment count, like
+  `FlatArrayMessageReader` and `SegmentArrayMessageReader`.
 - Stream readers (`capnp_read_frame` and `capnp-eval` input) refuse a
   segment table of 512 entries, as `InputStreamMessageReader` does.
 - The text parser rejects runs of operator characters such as `=-5` or

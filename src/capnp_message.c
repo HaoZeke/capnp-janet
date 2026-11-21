@@ -41,7 +41,7 @@ static int attach_segments(capnp_message_t *m, const capnp_segment_t *segs,
                            uint32_t nsegs) {
   capnp_segment_t *copy;
   uint32_t i;
-  if (nsegs == 0 || nsegs > CAPNP_MAX_SEGMENTS)
+  if (nsegs == 0)
     return CAPNP_ERR_FRAMING;
   for (i = 0; i < nsegs; i++) {
     if (!segs || !segs[i].data || (segs[i].words == 0 && i == 0) ||
@@ -83,7 +83,7 @@ static int parse_flat(capnp_message_t *m, const uint8_t *data, size_t len,
   if (len < 8)
     return CAPNP_ERR_FRAMING;
   nsegs = capnp_load_le32(data) + 1u;
-  if (nsegs == 0 || nsegs > CAPNP_MAX_SEGMENTS)
+  if (nsegs == 0)
     return CAPNP_ERR_FRAMING;
   /* A 32-bit size_t cannot hold a segment table past SIZE_MAX/4.
    * On a wider size_t the comparison is out of range for nsegs. */
