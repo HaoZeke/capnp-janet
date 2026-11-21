@@ -504,7 +504,7 @@ out:
  * transform leads into. Copies into `buf`. */
 static const char *promised_failure(capnp_rpc_conn_t *c,
                                     const capnp_ptr_t *promised, char *buf,
-                                    size_t cap)
+                                    size_t cap, uint16_t *type)
 {
   capnp_rpc_answer_t *a;
   capnp_message_t stored = {0};
@@ -514,6 +514,7 @@ static const char *promised_failure(capnp_rpc_conn_t *c,
   const char *reason = "no such export";
   uint32_t nops = 0;
 
+  *type = EXCEPTION_TYPE_FAILED;
   if (promised->kind != CAPNP_PK_STRUCT && promised->kind != CAPNP_PK_NULL)
     return reason;
   a = answer_find(c, capnp_get_u32(promised, PA_QUESTIONID_OFF, 0));
@@ -534,6 +535,7 @@ static const char *promised_failure(capnp_rpc_conn_t *c,
       memcpy(buf, text, n);
       buf[n] = '\0';
       reason = buf;
+      *type = capnp_get_u16(&exc, EXCEPTION_TYPE_OFF, 0);
     }
     break;
   case RETURN_TAG_RESULTS:
@@ -585,9 +587,42 @@ typedef struct result_caps {
   capnp_rpc_conn_t *c;
   capnp_rpc_cap_ref_t caps[CAPNP_RPC_MAX_RESULT_CAPS];
   uint32_t n;
+  /* The exception capnp_rpc_fail asked for, if the method fails. */
+  char *fail_reason;
+  uint16_t fail_type;
 } result_caps_t;
 
 static _Thread_local result_caps_t *current_results;
+
+int capnp_rpc_fail(int type, const char *reason)
+{
+  result_caps_t *r = current_results;
+  char *copy;
+  if (r == NULL || reason == NULL || type < 0 || type > 0xffff)
+    return -1;
+  copy = (char *)malloc(strlen(reason) + 1);
+  if (copy == NULL)
+    return -1;
+  strcpy(copy, reason);
+  free(r->fail_reason);
+  r->fail_reason = copy;
+  r->fail_type = (uint16_t)type;
+  return 0;
+}
+
+int capnp_rpc_unimplemented(const char *interface_name, uint64_t interface_id,
+                            uint16_t method_id)
+{
+  char reason[512];
+  if (interface_name == NULL)
+    return -1;
+  snprintf(reason, sizeof reason,
+           "Method not implemented.; interfaceName = %s; typeId = %llu; "
+           "methodId = %u",
+           interface_name, (unsigned long long)interface_id,
+           (unsigned)method_id);
+  return capnp_rpc_fail(CAPNP_RPC_EXCEPTION_UNIMPLEMENTED, reason);
+}
 
 int capnp_rpc_result_cap(const capnp_rpc_cap_ref_t *cap)
 {
@@ -824,8 +859,9 @@ static int write_exception(const capnp_bptr_t *body, uint16_t dwords,
  * rpc.c++ keeps the answer: its question id stays in use, and a call
  * pipelined on it fails with the same reason. A call that asked for
  * sendResultsTo.yourself keeps it for takeFromOtherQuestion. */
-static int answer_exception(capnp_rpc_conn_t *c, uint32_t qid,
-                            const char *reason, int mode)
+static int answer_exception_typed(capnp_rpc_conn_t *c, uint32_t qid,
+                                  const char *reason, size_t len,
+                                  uint16_t type, int mode)
 {
   capnp_builder_t b;
   capnp_bptr_t ret;
@@ -833,11 +869,18 @@ static int answer_exception(capnp_rpc_conn_t *c, uint32_t qid,
   capnp_builder_init(&b);
   rc = build_return_tag(&b, qid, RETURN_TAG_EXCEPTION, &ret);
   if (rc == CAPNP_OK)
-    rc = write_exception(&ret, RETURN_DW, 0, reason);
+    rc = write_exception_typed(&ret, RETURN_DW, 0, reason, len, type);
   if (rc == CAPNP_OK)
     rc = keep_answer(c, &b, qid, mode);
   capnp_builder_free(&b);
   return rc;
+}
+
+static int answer_exception(capnp_rpc_conn_t *c, uint32_t qid,
+                            const char *reason, int mode)
+{
+  return answer_exception_typed(c, qid, reason, strlen(reason),
+                                EXCEPTION_TYPE_FAILED, mode);
 }
 
 /* Abort with rpc.c++'s reason for refusing a message: the connection is
@@ -1138,7 +1181,7 @@ int capnp_rpc_write_third_party_cap(capnp_rpc_conn_t *c, capnp_bptr_t *cd,
  * refuses aborts. A null target reads as the default, importedCap 0. */
 static int message_target(capnp_rpc_conn_t *c, const capnp_ptr_t *body,
                           int *eid, const char **failure, char *buf,
-                          size_t cap)
+                          size_t cap, uint16_t *type)
 {
   capnp_ptr_t target;
   uint16_t which = TARGET_TAG_IMPORTEDCAP;
@@ -1161,7 +1204,7 @@ static int message_target(capnp_rpc_conn_t *c, const capnp_ptr_t *body,
       memset(&pa, 0, sizeof pa);
     *eid = resolve_promised_answer(c, &pa);
     if (*eid < 0)
-      *failure = promised_failure(c, &pa, buf, cap);
+      *failure = promised_failure(c, &pa, buf, cap, type);
   } else {
     /* rpc.c++ prints the target, and a MessageTarget with an unknown arm
      * prints as "()". */
@@ -1176,15 +1219,16 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   capnp_bptr_t ret, payload, results;
   capnp_ptr_t params_payload, params;
   uint32_t qid = capnp_get_u32(call, QUESTIONID_OFF, 0);
-  uint16_t send_to;
+  uint16_t send_to, ftype = EXCEPTION_TYPE_FAILED;
   const char *failure = NULL;
-  char reason[256];
+  char reason[1024];
   int eid = -1, rc, yourself, mode;
 
   /* The checks and their order are rpc.c++ handleCall's: the target,
    * then sendResultsTo, then the question id. */
   memset(&params, 0, sizeof params);
-  rc = message_target(c, call, &eid, &failure, reason, sizeof reason);
+  rc = message_target(c, call, &eid, &failure, reason, sizeof reason,
+                      &ftype);
   if (rc != CAPNP_OK)
     return rc;
 
@@ -1224,7 +1268,8 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
                              "already in use");
   }
   if (failure != NULL)
-    return answer_exception(c, qid, failure, mode);
+    return answer_exception_typed(c, qid, failure, strlen(failure), ftype,
+                                  mode);
 
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
@@ -1236,6 +1281,8 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
     uint32_t i;
     caps.c = c;
     caps.n = 0;
+    caps.fail_reason = NULL;
+    caps.fail_type = EXCEPTION_TYPE_FAILED;
     if (capnp_builder_slot(&payload, PAYLOAD_DW, 0, &results)) {
       rc = CAPNP_ERR_ALLOC;
     } else {
@@ -1249,9 +1296,15 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
       if (failed) {
         /* A method that fails is answered with an exception, as rpc.c++
          * does when one throws; otherwise the caller waits forever. */
+        const char *why =
+            caps.fail_reason != NULL ? caps.fail_reason : "method failed";
         capnp_builder_free(&b);
-        return answer_exception(c, qid, "method failed", mode);
+        rc = answer_exception_typed(c, qid, why, strlen(why), caps.fail_type,
+                                    mode);
+        free(caps.fail_reason);
+        return rc;
       }
+      free(caps.fail_reason);
       rc = write_cap_refs(&payload, caps.caps, caps.n);
     }
     /* Each export sent takes a reference the peer gives back with
@@ -1516,7 +1569,7 @@ static int handle_disembargo(capnp_rpc_conn_t *c, const capnp_ptr_t *dis)
   const char *failure = NULL;
   char reason[320];
   int eid = -1, rc;
-  uint16_t ctx;
+  uint16_t ctx, ftype;
 
   if (dis->kind != CAPNP_PK_STRUCT)
     return CAPNP_OK;
@@ -1529,7 +1582,8 @@ static int handle_disembargo(capnp_rpc_conn_t *c, const capnp_ptr_t *dis)
                              "'Disembargo.context.receiverLoopback'.");
   if (ctx != DIS_CTX_SENDER_LOOPBACK)
     return abort_unimplemented_disembargo(c, dis);
-  rc = message_target(c, dis, &eid, &failure, reason, sizeof reason);
+  rc = message_target(c, dis, &eid, &failure, reason, sizeof reason,
+                      &ftype);
   if (rc != CAPNP_OK)
     return rc;
   if (failure != NULL)

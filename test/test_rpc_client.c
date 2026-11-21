@@ -83,6 +83,19 @@ static int doubler_dispatch(void *server, uint64_t iid, uint16_t mid,
   doubler_calls++;
   if (doubler_calls >= doubler_fail_from)
     return CAPNP_ERR_ARG;
+  if (mid == 11) {
+    CHECK(capnp_rpc_fail(CAPNP_RPC_EXCEPTION_OVERLOADED, "busy") == 0,
+          "fail inside a dispatch");
+    return CAPNP_ERR_ARG;
+  }
+  if (mid == 12) {
+    CHECK(capnp_rpc_unimplemented("x.capnp:X", iid, mid) == 0,
+          "unimplemented inside a dispatch");
+    return CAPNP_ERR_ARG;
+  }
+  if (mid == 13)
+    CHECK(capnp_rpc_fail(CAPNP_RPC_EXCEPTION_FAILED, "unused") == 0,
+          "fail before succeeding");
   if (mid == 7) {
     /* The capability keeps the answer for pipelining. */
     static uint8_t big[10000];
@@ -282,6 +295,29 @@ static int frame_release(queue_t *q, int i, uint32_t id, uint32_t count)
            capnp_get_u16(&r, 0, 0) == CAPNP_RPC_MSG_RELEASE &&
            capnp_getp(&r, 0, &rel) == CAPNP_OK &&
            capnp_get_u32(&rel, 0, 0) == id && capnp_get_u32(&rel, 4, 0) == count;
+  capnp_message_free(&m);
+  return ok;
+}
+
+/* Frame `i` of `q` is a Return of an exception with `reason` and
+ * Exception.type `type`. */
+static int frame_exception(queue_t *q, int i, const char *reason,
+                           uint16_t type)
+{
+  capnp_message_t m = {0};
+  capnp_ptr_t r, ret, exc;
+  const char *text = NULL;
+  size_t n = 0;
+  int ok = i < q->tail &&
+           capnp_message_from_flat(&m, q->data[i], q->len[i]) == CAPNP_OK &&
+           capnp_root(&m, &r) == CAPNP_OK &&
+           capnp_get_u16(&r, 0, 0) == CAPNP_RPC_MSG_RETURN &&
+           capnp_getp(&r, 0, &ret) == CAPNP_OK &&
+           capnp_get_u16(&ret, 6, 0) == 1 &&
+           capnp_getp(&ret, 0, &exc) == CAPNP_OK &&
+           capnp_get_text(&exc, 0, &text, &n) == CAPNP_OK &&
+           n == strlen(reason) && memcmp(text, reason, n) == 0 &&
+           capnp_get_u16(&exc, 4, 0) == type;
   capnp_message_free(&m);
   return ok;
 }
@@ -506,6 +542,37 @@ int main(void)
   pump(&client, &g_to_client);
   CHECK(capnp_rpc_is_answered(&client, q), "failed method answered");
   CHECK(capnp_rpc_is_failed(&client, q), "failed method is an exception");
+  doubler_fail_from = 1 << 30;
+
+  /* A dispatch chooses the exception it fails with; rpc.c++ words an
+   * unimplemented method with the interface, type id and method. */
+  CHECK(capnp_rpc_fail(CAPNP_RPC_EXCEPTION_FAILED, "x") == -1,
+        "fail outside a dispatch");
+  q = capnp_rpc_send_call(&client, 0, 0x1234, 11, 1, 1, fill_u32, &arg);
+  pump(&vat, &g_to_vat);
+  CHECK(frame_exception(&g_to_client, 0, "busy",
+                        CAPNP_RPC_EXCEPTION_OVERLOADED),
+        "the reason and type a dispatch chose");
+  pump(&client, &g_to_client);
+  q = capnp_rpc_send_call(&client, 0, 0x1234, 12, 1, 1, fill_u32, &arg);
+  pump(&vat, &g_to_vat);
+  CHECK(frame_exception(&g_to_client, 0,
+                        "Method not implemented.; interfaceName = x.capnp:X; "
+                        "typeId = 4660; methodId = 12",
+                        CAPNP_RPC_EXCEPTION_UNIMPLEMENTED),
+        "an unimplemented method worded as rpc.c++ words it");
+  pump(&client, &g_to_client);
+  q = capnp_rpc_send_call(&client, 0, 0x1234, 13, 1, 1, fill_u32, &arg);
+  pump(&vat, &g_to_vat);
+  pump(&client, &g_to_client);
+  CHECK(capnp_rpc_is_answered(&client, q) && !capnp_rpc_is_failed(&client, q),
+        "a dispatch that succeeds ignores capnp_rpc_fail");
+  q = capnp_rpc_send_call(&client, 0, 0x1234, 1, 1, 1, fill_u32, &arg);
+  doubler_fail_from = doubler_calls + 1;
+  pump(&vat, &g_to_vat);
+  CHECK(frame_exception(&g_to_client, 0, "method failed", 0),
+        "the next failure is method failed again");
+  pump(&client, &g_to_client);
   doubler_fail_from = 1 << 30;
 
   /* A Return of any size is recorded on the caller and kept by the vat

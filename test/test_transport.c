@@ -1197,8 +1197,11 @@ static const vscenario_t vat_diffs[] = {
      {{VF_DISEMBARGO, 0, VT_NULL, 0, 2, 0, 0}}, 1, 99, 0, 0},
     {"Disembargo provide on an unknown target arm",
      {{VF_DISEMBARGO, 0, VT_UNKNOWN, 0, 3, 0, 4294967295u}}, 1, 99, 0, 0},
-    {"unknown method, worded by the server",
-     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0}}, 1, 1, 0, 1},
+    {"unknown method",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0}}, 1, 1, 0, 0},
+    {"call pipelined on an unknown method's answer",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0}}, 2, 2, 0, 0},
     {"Abort",
      {{VF_ABORT, 0, 0, 0, 0, 0, 0}}, 1, 99, 0, 0},
     {"Abort carrying a remote exception",
@@ -1220,11 +1223,15 @@ static const vscenario_t vat_diffs[] = {
 };
 #define N_VAT_DIFFS (sizeof vat_diffs / sizeof vat_diffs[0])
 
-/* Method 0 adds; any other method fails, as an unknown one does in C++. */
+/* Method 0 adds; any other method fails as the generated C++ server
+ * fails an unknown one. */
 static int vd_dispatch(void *server, uint64_t interface_id, uint16_t method_id,
                        const capnp_ptr_t *params, const capnp_bptr_t *results) {
-  if (method_id != 0)
+  if (method_id != 0) {
+    (void)capnp_rpc_unimplemented("adder.capnp:Adder", interface_id,
+                                  method_id);
     return CAPNP_ERR_ARG;
+  }
   return adder_dispatch(server, interface_id, method_id, params, results);
 }
 

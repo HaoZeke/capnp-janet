@@ -291,6 +291,28 @@ typedef struct capnp_rpc_cap_ref {
  * the peer gives back with Release or Finish.releaseResultCaps. */
 CAPNP_JANET_EXPORT int capnp_rpc_result_cap(const capnp_rpc_cap_ref_t *cap);
 
+/* Exception.type values. */
+enum {
+  CAPNP_RPC_EXCEPTION_FAILED = 0,
+  CAPNP_RPC_EXCEPTION_OVERLOADED = 1,
+  CAPNP_RPC_EXCEPTION_DISCONNECTED = 2,
+  CAPNP_RPC_EXCEPTION_UNIMPLEMENTED = 3
+};
+
+/* From inside a dispatch function that then returns non-zero: answer the
+ * call with an exception of `type` carrying `reason`, which is copied.
+ * Without it the exception is "method failed" of type failed. Returns
+ * -1 outside a dispatch. */
+CAPNP_JANET_EXPORT int capnp_rpc_fail(int type, const char *reason);
+
+/* capnp_rpc_fail with the exception capnp-C++ raises for a method its
+ * server does not implement: type unimplemented, naming the interface
+ * as `interface_name` (for example "adder.capnp:Adder"), its type id,
+ * and the method. */
+CAPNP_JANET_EXPORT int capnp_rpc_unimplemented(const char *interface_name,
+                                               uint64_t interface_id,
+                                               uint16_t method_id);
+
 /* A call, addressed to an imported capability or, for promise
  * pipelining, to the capability that question `target`'s results hold
  * at the end of `transform`. Each transform entry is a getPointerField

@@ -1815,6 +1815,13 @@ static Janet cfun_rpc_serve(int32_t argc, Janet *argv) {
   return janet_wrap_nil();
 }
 
+static Janet cfun_rpc_fail(int32_t argc, Janet *argv) {
+  janet_fixarity(argc, 2);
+  return janet_wrap_boolean(
+      capnp_rpc_fail(janet_getinteger(argv, 0),
+                     (const char *)janet_getstring(argv, 1)) == 0);
+}
+
 typedef struct {
   int fd;
 } rpc_listen_wrap;
@@ -2209,6 +2216,12 @@ static const JanetReg capnp_cfuns[] = {
      "(capnp/rpc-serve conn handler)\n\n"
      "handler is (fn [interface-id method-id params results] ...). "
      "params and results are valid only for the call."},
+    {"rpc-fail", cfun_rpc_fail,
+     "(capnp/rpc-fail type reason)\n\n"
+     "From inside an rpc-serve handler that then returns a non-zero "
+     "number: answer the call with an exception of Exception.type `type` "
+     "(0 failed, 1 overloaded, 2 disconnected, 3 unimplemented) carrying "
+     "`reason`. Returns false outside a handler."},
     {"rpc-listen-tcp", cfun_rpc_listen_tcp,
      "(capnp/rpc-listen-tcp host port)\n\nReturns [listener bound-port]."},
     {"rpc-listen-unix", cfun_rpc_listen_unix,

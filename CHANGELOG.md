@@ -45,6 +45,9 @@ Pre-1.0 minor releases may include breaking API changes.
   capnp-C++ client.
 - `capnp_read_frame_alloc` reads a frame of any size into a heap buffer,
   refusing more than 8388608 words as C++ RPC does.
+- `capnp_rpc_fail` and `capnp_rpc_unimplemented` let a dispatch function
+  choose the exception a failing method is answered with, and Janet
+  handlers can call `capnp/rpc-fail`.
 
 ### Fixed
 

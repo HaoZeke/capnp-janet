@@ -20,3 +20,11 @@
 [suppress_function]
   change_kind = added-function
   name = capnp_rpc_answer_cap
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_fail
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_unimplemented
