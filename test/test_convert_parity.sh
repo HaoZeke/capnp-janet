@@ -190,6 +190,17 @@ check union-ffff "$PARITY" Parity "$ALL" -- \
   0020000a00000000 0 0 0 0 0 0 0 0 0000ffff00000000 $(printf '0 %.0s' {1..33})
 check list-root "$PARITY" Parity "$ALL" -- \
   0000000100000001 0000000000000005
+# JsonCodec copies a `Json.Value` whole before it prints it, so a corrupt
+# pointer its active member never reads still fails the JSON run.
+for extra in "" "--short"; do
+  extra=($extra)
+  check json-value-unread-oob "$PARITY" Parity "$ALL" -- \
+    $(parity_ptr 27 0001000200000010 2 3ff0000000000000 000000017ffffff0)
+  check json-value-nested-unread-oob "$PARITY" Parity "$ALL" -- \
+    $(parity_ptr 27 0001000200000010 4 0 0000001f00000001 \
+      0001000200000004 2 0 000000017ffffff0)
+done
+extra=()
 full=0
 
 # Binary output is a copy into C++'s MallocMessageBuilder: fixed-size

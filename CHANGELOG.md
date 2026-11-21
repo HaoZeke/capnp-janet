@@ -109,6 +109,10 @@ Pre-1.0 minor releases may include breaking API changes.
 - A Return naming a question id with the high bit set is ignored, as
   rpc.c++ keeps those ids for calls that want no Return. It used to
   abort as naming no question.
+- The JSON encoder follows every pointer under a `Json.Value`, as the
+  copy in `JsonValueHandler` does, and fails on one it cannot read. A
+  corrupt pointer the active member never reads used to pass, where
+  `capnp convert` prints the message and exits 1.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

@@ -2911,6 +2911,58 @@ static int encode_json_data_bytes(buf_t *b, const uint8_t *data, size_t len,
   return buf_ch(b, ']');
 }
 
+/* Follow every pointer under @p the way WireHelpers::copyPointer does,
+ * noting the first one that cannot be read. */
+static void check_copy_ptr(const capnp_ptr_t *p, int depth) {
+  capnp_ptr_t c;
+  uint32_t i;
+  int rc;
+  if (depth > value_depth)
+    return;
+  if (p->kind == CAPNP_PK_STRUCT) {
+    for (i = 0; i < p->pwords; i++) {
+      rc = capnp_getp(p, (uint16_t)i, &c);
+      if (rc != CAPNP_OK)
+        note_wire(rc);
+      else
+        check_copy_ptr(&c, depth + 1);
+    }
+  } else if (p->kind == CAPNP_PK_LIST &&
+             (p->esize == CAPNP_SZ_PTR || p->esize == CAPNP_SZ_COMPOSITE)) {
+    for (i = 0; i < p->count; i++) {
+      rc = capnp_list_getp(p, i, &c);
+      if (rc != CAPNP_OK)
+        note_wire(rc);
+      else
+        check_copy_ptr(&c, depth + 1);
+    }
+  } else if (p->kind == CAPNP_PK_CAP && encode_no_caps) {
+    note_wire(CAPNP_ERR_KIND);
+  }
+}
+
+static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
+                                    int *multiline, int has_prefix, int pretty,
+                                    int depth);
+
+/* JsonValueHandler::encode copies the first pointer of a `Json.Value`
+ * before printing it, and that copy reads its whole tree. */
+static int encode_json_value_top(buf_t *b, const capnp_ptr_t *s, int indent,
+                                 int *multiline, int has_prefix, int pretty,
+                                 int depth) {
+  capnp_ptr_t c;
+  int rc;
+  if (s && s->kind == CAPNP_PK_STRUCT && s->pwords > 0) {
+    rc = capnp_getp(s, 0, &c);
+    if (rc != CAPNP_OK)
+      note_wire(rc);
+    else
+      check_copy_ptr(&c, depth + 1);
+  }
+  return encode_json_value_struct(b, s, indent, multiline, has_prefix, pretty,
+                                  depth);
+}
+
 /* Encode a capnp/compat/json.capnp:Value struct directly as raw JSON */
 static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
                                     int *multiline, int has_prefix, int pretty,
@@ -3161,8 +3213,8 @@ static int encode_json_list(buf_t *b, capnp_dyn_t *d,
         if (!es)
           rc = -1;
         else if (es->id == JSON_VALUE_TYPE_ID)
-          rc = encode_json_value_struct(&eb, &el, sub_indent, &cm, 0, pretty,
-                                        depth + 1);
+          rc = encode_json_value_top(&eb, &el, sub_indent, &cm, 0, pretty,
+                                     depth + 1);
         else
           rc = encode_json_struct(&eb, d, es, &elem_rt->brand, &el, NULL, NULL,
                                   sub_indent, &cm, 0, pretty, depth + 1);
@@ -3317,8 +3369,8 @@ static int encode_json_field_item(buf_t *b, capnp_dyn_t *d,
     if (child.kind == CAPNP_PK_NULL && f->has_def_val)
       capnp_getp(&f->def_val, 0, &child);
     if (cs->id == JSON_VALUE_TYPE_ID)
-      rc = encode_json_value_struct(b, &child, indent, multiline, 1, pretty,
-                                    depth + 1);
+      rc = encode_json_value_top(b, &child, indent, multiline, 1, pretty,
+                                 depth + 1);
     else
       rc = encode_json_struct(b, d, cs, &ft.brand, &child, NULL, NULL, indent,
                               multiline, 1, pretty, depth + 1);
@@ -3348,8 +3400,8 @@ static int encode_json_struct(buf_t *b, capnp_dyn_t *d,
   if (depth > value_depth)
     return -1;
   if (st->id == JSON_VALUE_TYPE_ID)
-    return encode_json_value_struct(b, s, indent, multiline, has_prefix, pretty,
-                                    depth);
+    return encode_json_value_top(b, s, indent, multiline, has_prefix, pretty,
+                                 depth);
   s = as_struct(s, &empty);
   memset(&fl, 0, sizeof(fl));
   if (gather_json_fields(d, st, env, s, disc_override, union_decl_name, "", &fl,
