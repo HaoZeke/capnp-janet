@@ -399,6 +399,9 @@ test('abi_layout', test_abi_layout)
 # reference implementation will talk to us, so this bootstraps a real
 # EzRpcServer and calls it.
 cpp_ok = add_languages('cpp', required: false, native: false)
+if not cpp_ok
+  warning('no C++ compiler found: every interop test against capnp-C++ is skipped; set CXX (CC=gcc CXX=g++) to run them.')
+endif
 capnp_rpc_dep = dependency('capnp-rpc', required: false)
 capnp_tool = find_program('capnp', required: false)
 capnpc_cpp = find_program('capnpc-c++', required: false)
@@ -529,7 +532,7 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
     timeout: 60,
   )
 else
-  message('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')
+  warning('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')
 endif
 
 if bash.found()
