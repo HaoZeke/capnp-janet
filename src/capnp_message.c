@@ -268,6 +268,10 @@ static int land_struct(capnp_message_t *m, uint32_t seg, size_t body,
                        uint16_t dwords, uint16_t pwords, int depth,
                        capnp_ptr_t *out) {
   size_t nwords = (size_t)dwords + (size_t)pwords;
+  /* `depth` is what the struct may still follow: C++ readStructPointer
+   * needs the reader's nestingLimit above zero. */
+  if (depth < 0)
+    return CAPNP_ERR_DEPTH;
   if (seg >= m->nsegs)
     return CAPNP_ERR_SEGMENT;
   /* checkOffset clamps an out-of-range target to the segment end.
@@ -291,6 +295,8 @@ static int land_struct(capnp_message_t *m, uint32_t seg, size_t body,
 
 static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
                      uint32_t count, int depth, capnp_ptr_t *out) {
+  if (depth < 0)
+    return CAPNP_ERR_DEPTH;
   if (seg >= m->nsegs)
     return CAPNP_ERR_SEGMENT;
   /* Same clamp as SegmentReader::checkOffset. A zero-word list whose
@@ -416,8 +422,6 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
   if (kind == CAPNP_WK_FAR) {
     uint32_t tseg = capnp_wp_far_seg(w);
     uint32_t toff = capnp_wp_far_off(w);
-    if (depth <= 0)
-      return CAPNP_ERR_DEPTH;
     if (capnp_wp_far_two(w)) {
       uint64_t pad, tag;
       uint32_t cseg, coff;
@@ -490,8 +494,6 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
 static int resolve_ptr(capnp_message_t *m, uint32_t seg, size_t word, int depth,
                        capnp_ptr_t *out) {
   uint64_t w;
-  if (depth <= 0)
-    return CAPNP_ERR_DEPTH;
   if (bounds_word(m, seg, word))
     return CAPNP_ERR_BOUNDS;
   if (charge(m, 1))
@@ -634,10 +636,23 @@ static int text_from_bytes(const capnp_ptr_t *list, const char **out,
   return CAPNP_OK;
 }
 
+/* C++ reads Text and Data with no nesting check, so a blob stays readable
+ * from a struct that may follow no further pointers. */
+static int getp_blob(const capnp_ptr_t *s, uint16_t ptr_index,
+                     capnp_ptr_t *out) {
+  capnp_ptr_t holder;
+  if (!s)
+    return CAPNP_ERR_KIND;
+  holder = *s;
+  if (holder.depth_left < 1)
+    holder.depth_left = 1;
+  return capnp_getp(&holder, ptr_index, out);
+}
+
 int capnp_get_text(const capnp_ptr_t *s, uint16_t ptr_index, const char **out,
                    size_t *len) {
   capnp_ptr_t list;
-  int rc = capnp_getp(s, ptr_index, &list);
+  int rc = getp_blob(s, ptr_index, &list);
   if (rc)
     return rc;
   if (list.kind == CAPNP_PK_NULL) {
@@ -703,7 +718,10 @@ int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
 
   /* C=6 pointer list: resolve element pointer to the Text blob. */
   if (list->esize == CAPNP_SZ_PTR) {
-    rc = capnp_list_getp(list, index, &elem);
+    capnp_ptr_t holder = *list;
+    if (holder.depth_left < 1)
+      holder.depth_left = 1;
+    rc = capnp_list_getp(&holder, index, &elem);
     if (rc)
       return rc;
     if (elem.kind == CAPNP_PK_NULL) {
@@ -736,7 +754,7 @@ int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
 int capnp_get_data(const capnp_ptr_t *s, uint16_t ptr_index, const uint8_t **out,
                    size_t *len) {
   capnp_ptr_t list;
-  int rc = capnp_getp(s, ptr_index, &list);
+  int rc = getp_blob(s, ptr_index, &list);
   if (rc)
     return rc;
   if (list.kind == CAPNP_PK_NULL) {

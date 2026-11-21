@@ -155,6 +155,56 @@ static void test_depth_limit_and_cycle(void) {
   capnp_message_free(&m);
 }
 
+/* C++ checks the nesting limit only when it lands a struct or a list.
+ * A struct that may follow nothing further still reads a null pointer and
+ * its Text, directly or through a far pointer. */
+static void test_blob_at_depth_limit(void) {
+  uint8_t near_seg[32], far0[24], far1[16];
+  capnp_segment_t segs[2];
+  capnp_message_t m = {0};
+  capnp_ptr_t root, next, list;
+  const char *t = NULL;
+  size_t n = 0;
+
+  capnp_store_le64(near_seg, capnp_wp_make_struct(0, 0, 2));
+  capnp_store_le64(near_seg + 8, 0);
+  capnp_store_le64(near_seg + 16, capnp_wp_make_list(0, CAPNP_SZ_BYTE, 4));
+  memcpy(near_seg + 24, "end\0\0\0\0\0", 8);
+  segs[0].data = near_seg;
+  segs[0].words = 4;
+  CHECK(capnp_message_from_segments(&m, segs, 1) == CAPNP_OK, "near view");
+  m.depth_limit = 1;
+  CHECK(capnp_root(&m, &root) == CAPNP_OK && root.depth_left == 0,
+        "near root at the limit");
+  CHECK(capnp_getp(&root, 0, &next) == CAPNP_OK &&
+            next.kind == CAPNP_PK_NULL,
+        "null pointer at the limit");
+  CHECK(capnp_get_text(&root, 1, &t, &n) == CAPNP_OK && n == 3 &&
+            memcmp(t, "end", 3) == 0,
+        "text at the limit");
+  CHECK(capnp_getp(&root, 1, &list) == CAPNP_ERR_DEPTH,
+        "a list past the limit still fails");
+  capnp_message_free(&m);
+
+  capnp_store_le64(far0, capnp_wp_make_struct(0, 0, 2));
+  capnp_store_le64(far0 + 8, 0);
+  capnp_store_le64(far0 + 16, capnp_wp_make_far(0, 0, 1));
+  capnp_store_le64(far1, capnp_wp_make_list(0, CAPNP_SZ_BYTE, 4));
+  memcpy(far1 + 8, "end\0\0\0\0\0", 8);
+  segs[0].data = far0;
+  segs[0].words = 3;
+  segs[1].data = far1;
+  segs[1].words = 2;
+  CHECK(capnp_message_from_segments(&m, segs, 2) == CAPNP_OK, "far view");
+  m.depth_limit = 1;
+  CHECK(capnp_root(&m, &root) == CAPNP_OK, "far root");
+  t = NULL;
+  CHECK(capnp_get_text(&root, 1, &t, &n) == CAPNP_OK && n == 3 &&
+            memcmp(t, "end", 3) == 0,
+        "far text at the limit");
+  capnp_message_free(&m);
+}
+
 static void test_builder_offset_overflow(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body;
@@ -495,6 +545,7 @@ int main(void) {
   test_double_far_list_out_of_bounds();
   test_negative_composite_count();
   test_depth_limit_and_cycle();
+  test_blob_at_depth_limit();
   test_text_requires_nul();
   test_builder_offset_overflow();
   test_many_segments_roundtrip();
