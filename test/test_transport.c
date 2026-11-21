@@ -1196,6 +1196,12 @@ static const vscenario_t vat_diffs[] = {
      {{VF_DISEMBARGO, 0, VT_PROMISED, 5, 2, 3, 0, 0}}, 1, 99, 0, 0, 0},
     {"Disembargo provide on a promised answer with an unknown op",
      {{VF_DISEMBARGO, 0, VT_PROMISED, 2, 3, 0x101, 7, 0}}, 1, 99, 0, 0, 0},
+    {"call pipelined with an unknown op",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 0x102, 0}}, 1, 99, 0, 0, 0},
+    {"call pipelined on a missing answer with an unknown op",
+     {{VF_CALL, 1, VT_PROMISED, 50, 0, 0, 0x101, 0}}, 1, 99, 0, 0, 0},
+    {"Disembargo senderLoopback on a missing answer with an unknown op",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 99, 0, 0x101, 0, 0}}, 1, 99, 0, 0, 0},
     {"Disembargo accept on a null promised answer",
      {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 2, 0x400, 0, 0}}, 1, 99, 0, 0, 0},
     {"Disembargo accept on an empty transform",
@@ -1394,14 +1400,19 @@ static int build_target(const capnp_bptr_t *call, const vframe_t *f) {
         capnp_builder_struct(&slot, 1, 1, &pa) ||
         capnp_builder_set_u32(&pa, 0, f->tval))
       return -1;
-    if (f->count == 0)
+    /* `count` low byte ops of getPointerField; 0x100 makes the last
+     * one an unknown arm. */
+    if ((f->count & 0xff) == 0)
       return 0;
-    if (capnp_builder_set_list_struct(&pa, 1, 0, f->count, 1, 0, &ops))
+    if (capnp_builder_set_list_struct(&pa, 1, 0, f->count & 0xff, 1, 0, &ops))
       return -1;
-    for (i = 0; i < f->count; i++) {
+    for (i = 0; i < (f->count & 0xff); i++) {
       capnp_bptr_t e = ops;
       e.word += i;
-      if (capnp_builder_set_u16(&e, 0, 1))
+      if (capnp_builder_set_u16(&e, 0,
+                                (f->count & 0x100) && i + 1 == (f->count & 0xff)
+                                    ? 5
+                                    : 1))
         return -1;
     }
     return 0;
@@ -1945,6 +1956,12 @@ static const struct {
     {"call pipelined on results that are no capability",
      "return 1 results 42 | return 2 exception: Pipeline call on a request "
      "that returned no capabilities or was already closed."},
+    {"call pipelined with an unknown op",
+     "abort: Unsupported pipeline op.; (uint)opReader.which() = 5"},
+    {"call pipelined on a missing answer with an unknown op",
+     "abort: Unsupported pipeline op.; (uint)opReader.which() = 5"},
+    {"Disembargo senderLoopback on a missing answer with an unknown op",
+     "abort: Unsupported pipeline op.; (uint)opReader.which() = 5"},
     {"three capabilities in the params of a call",
      "return 1 results 42 | release 7 x1 | release 6 x1 | release 5 "
      "x1 | return 2 results 42"},

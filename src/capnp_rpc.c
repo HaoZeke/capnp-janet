@@ -141,6 +141,7 @@ enum { KEEP_SEND, KEEP_REDIRECT, KEEP_QUIET };
 #define PA_QUESTIONID_OFF 0
 #define PA_OP_TAG_OFF 0
 #define PA_OP_GETPTRFIELD_OFF 2
+#define PA_OP_TAG_NOOP 0
 #define PA_OP_TAG_GETPTRFIELD 1
 #define PA_DW 1
 #define PA_PW 1
@@ -1421,9 +1422,26 @@ static int message_target(capnp_rpc_conn_t *c, const capnp_ptr_t *body,
       return protocol_abort(c, "Message target is not a current export ID.");
     *eid = (int)id;
   } else if (which == TARGET_TAG_PROMISEDANSWER) {
-    capnp_ptr_t pa;
+    capnp_ptr_t pa, ops, op;
+    uint32_t i, n = 0;
+    uint16_t tag;
     if (capnp_getp(&target, 0, &pa) != CAPNP_OK)
       memset(&pa, 0, sizeof pa);
+    /* rpc.c++ converts the whole transform before it pipelines, on any
+     * answer or none. */
+    if (pa.kind == CAPNP_PK_STRUCT && capnp_getp(&pa, 0, &ops) == CAPNP_OK)
+      n = capnp_list_len(&ops);
+    for (i = 0; i < n; i++) {
+      if (capnp_list_get_struct(&ops, i, &op) != CAPNP_OK)
+        break;
+      tag = capnp_get_u16(&op, PA_OP_TAG_OFF, 0);
+      if (tag != PA_OP_TAG_NOOP && tag != PA_OP_TAG_GETPTRFIELD) {
+        snprintf(buf, cap,
+                 "Unsupported pipeline op.; (uint)opReader.which() = %u",
+                 (unsigned)tag);
+        return protocol_abort(c, buf);
+      }
+    }
     *eid = resolve_promised_answer(c, &pa);
     if (*eid < 0)
       *failure = promised_failure(c, &pa, buf, cap, type);

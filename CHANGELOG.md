@@ -109,6 +109,9 @@ Pre-1.0 minor releases may include breaking API changes.
   the peer hosts under the promise's own id. A new capability naming an
   import still on the table is given back with that import's last
   release.
+- A Call or Disembargo whose promisedAnswer transform has an op other
+  than `noop` or `getPointerField` aborts with the rpc.c++ reason, on
+  any answer. The op used to be skipped.
 - A Return naming a question id with the high bit set is ignored, as
   rpc.c++ keeps those ids for calls that want no Return. It used to
   abort as naming no question.
