@@ -3,6 +3,9 @@
  * With no arguments, two vats on a Unix socket and two on TCP loopback
  * call an adder and check the sum. `dial <port>` calls the capnp-C++
  * Adder. `serve <port>` listens and answers one C++ client.
+ * `bad-return <port>` answers the bootstrap of each of five C++ clients
+ * with a Return arm rpc.c++ refuses, and checks that the Abort it sends
+ * back gives the reason this vat gives for the same Return.
  */
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_message.h>
@@ -413,6 +416,140 @@ static int serve_peer(uint16_t port) {
   close(lfd);
   free(link);
   return 0;
+}
+
+static const struct {
+  uint16_t tag;
+  uint32_t take_from;
+  const char *name;
+} bad_returns[] = {
+    {2, 0, "canceled"},
+    {3, 0, "resultsSentElsewhere"},
+    {4, 99, "takeFromOtherQuestion"},
+    {5, 0, "acceptFromThirdParty"},
+    {9, 0, "unknown arm"},
+};
+
+static int build_return(uint32_t answer, uint16_t tag, uint32_t take_from,
+                        uint8_t **out, size_t *len) {
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, ret;
+  int rc;
+  capnp_builder_init(&b);
+  rc = capnp_builder_root(&b, &root) ||
+       capnp_builder_struct(&root, 1, 1, &msg) ||
+       capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RETURN) ||
+       capnp_builder_slot(&msg, 1, 0, &slot) ||
+       capnp_builder_struct(&slot, 2, 1, &ret) ||
+       capnp_builder_set_u32(&ret, 0, answer) ||
+       capnp_builder_set_u16(&ret, 6, tag) ||
+       capnp_builder_set_u32(&ret, 8, take_from) ||
+       capnp_builder_serialize(&b, out, len);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+/* The reason text of an Abort frame, copied into `reason`; else -1. */
+static int abort_reason(const uint8_t *frame, size_t n, char *reason,
+                        size_t cap) {
+  capnp_message_t m = {0};
+  capnp_ptr_t root, exc;
+  const char *text = NULL;
+  size_t tn = 0;
+  int rc = -1;
+  if (capnp_message_from_flat(&m, frame, n) == CAPNP_OK &&
+      capnp_root(&m, &root) == CAPNP_OK &&
+      capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_ABORT &&
+      capnp_getp(&root, 0, &exc) == CAPNP_OK &&
+      capnp_get_text(&exc, 0, &text, &tn) == CAPNP_OK && tn < cap) {
+    memcpy(reason, text, tn);
+    reason[tn] = 0;
+    rc = 0;
+  }
+  capnp_message_free(&m);
+  return rc;
+}
+
+static char g_local_abort[256];
+
+static int keep_abort(void *ctx, const uint8_t *data, size_t len) {
+  (void)ctx;
+  if (abort_reason(data, len, g_local_abort, sizeof g_local_abort))
+    g_local_abort[0] = 0;
+  return 0;
+}
+
+/* The Abort this vat sends for the same Return to its own bootstrap. */
+static int local_abort(uint16_t tag, uint32_t take_from) {
+  static capnp_rpc_conn_t c;
+  uint8_t *out = NULL;
+  size_t len = 0;
+  uint32_t q;
+  int rc;
+  capnp_rpc_init(&c, keep_abort, NULL);
+  q = capnp_rpc_send_bootstrap(&c);
+  g_local_abort[0] = 0;
+  rc = build_return(q, tag, take_from, &out, &len) ||
+       capnp_rpc_handle(&c, out, len) != CAPNP_ERR_KIND;
+  free(out);
+  capnp_rpc_free(&c);
+  return rc;
+}
+
+static int serve_bad_returns(uint16_t port) {
+  int lfd = -1, failed = 0;
+  uint16_t bound = 0;
+  size_t i;
+  if (capnp_listen_tcp("127.0.0.1", port, &lfd, &bound) != CAPNP_OK)
+    return 1;
+  printf("%u\n", bound);
+  fflush(stdout);
+  for (i = 0; i < sizeof bad_returns / sizeof bad_returns[0]; i++) {
+    char cpp[256] = "";
+    int fd = accept(lfd, NULL, NULL), sent = 0;
+    if (fd < 0)
+      return 1;
+    for (;;) {
+      capnp_message_t m = {0};
+      capnp_ptr_t root, body;
+      uint8_t *frame = NULL;
+      size_t n = 0;
+      int tag = -1, done = 0;
+      if (capnp_read_frame_alloc(fd, &frame, &n) != CAPNP_OK)
+        break;
+      if (capnp_message_from_flat(&m, frame, n) == CAPNP_OK &&
+          capnp_root(&m, &root) == CAPNP_OK)
+        tag = capnp_get_u16(&root, 0, 0);
+      if (tag == CAPNP_RPC_MSG_BOOTSTRAP && !sent &&
+          capnp_getp(&root, 0, &body) == CAPNP_OK) {
+        uint8_t *out = NULL;
+        size_t len = 0;
+        sent = build_return(capnp_get_u32(&body, 0, 0), bad_returns[i].tag,
+                            bad_returns[i].take_from, &out, &len) == 0 &&
+               capnp_write_all(fd, out, len) == CAPNP_OK;
+        free(out);
+      }
+      if (tag == CAPNP_RPC_MSG_ABORT) {
+        abort_reason(frame, n, cpp, sizeof cpp);
+        done = 1;
+      }
+      capnp_message_free(&m);
+      free(frame);
+      if (done)
+        break;
+    }
+    close(fd);
+    if (local_abort(bad_returns[i].tag, bad_returns[i].take_from) ||
+        cpp[0] == 0 || strcmp(cpp, g_local_abort) != 0) {
+      fprintf(stderr, "FAIL Return %s: capnp-C++ \"%s\", this vat \"%s\"\n",
+              bad_returns[i].name, cpp, g_local_abort);
+      failed++;
+    } else {
+      printf("same Return %s: %s\n", bad_returns[i].name, cpp);
+    }
+  }
+  close(lfd);
+  return failed != 0;
 }
 
 /* Segment table is little-endian on the wire. The sizes below are
@@ -834,6 +971,8 @@ int main(int argc, char **argv) {
     return dial_peer((uint16_t)atoi(argv[2]));
   if (argc >= 3 && strcmp(argv[1], "serve") == 0)
     return serve_peer((uint16_t)atoi(argv[2]));
+  if (argc >= 3 && strcmp(argv[1], "bad-return") == 0)
+    return serve_bad_returns((uint16_t)atoi(argv[2]));
   test_ipv4_literal();
   test_frame_little_endian();
   test_frame_segment_limit();

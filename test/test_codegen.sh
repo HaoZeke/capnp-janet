@@ -14,6 +14,12 @@ if ! command -v capnp >/dev/null 2>&1; then
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# `capnp compile` searches only /usr/include and /usr/local/include for
+# `/capnp/c++.capnp`, which adder.capnp imports.
+CAPNP_INC=$(pkg-config --variable=includedir capnp 2>/dev/null || true)
+if [[ ! -f "$CAPNP_INC/capnp/c++.capnp" ]]; then
+  CAPNP_INC="$(dirname "$(command -v capnp)")/../include"
+fi
 cp "$ROOT/schema/addressbook.capnp" "$TMP/"
 cd "$TMP"
 capnp compile "-o$PLUGIN" addressbook.capnp
@@ -44,7 +50,7 @@ fi
 # caller need not spell them. A parameter struct sized wrong drops
 # arguments past the end without complaint.
 cp "$ROOT/schema/adder.capnp" "$TMP/"
-capnp compile "-o$PLUGIN" adder.capnp
+capnp compile "-I$CAPNP_INC" "-o$PLUGIN" adder.capnp
 test -f adder.janet
 grep -q 'Adder-interface-id' adder.janet
 grep -q '0xea01e10cbc414411' adder.janet

@@ -40,6 +40,8 @@ public:
 		});
 	}
 
+	kj::Promise<void> hang(HangContext) override { return kj::NEVER_DONE; }
+
 	kj::Promise<void> relay(RelayContext ctx) override {
 		auto p = ctx.getParams();
 		auto req = p.getTarget().relayRequest();

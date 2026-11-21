@@ -404,6 +404,13 @@ capnp_tool = find_program('capnp', required: false)
 capnpc_cpp = find_program('capnpc-c++', required: false)
 
 if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found() and bash.found()
+  # `capnp compile` searches only /usr/include and /usr/local/include for
+  # `/capnp/c++.capnp`, so a prefixed install must be named.
+  capnp_include = capnp_rpc_dep.get_variable(
+    pkgconfig: 'includedir',
+    default_value: '/usr/include',
+  )
+
   adder_cpp = custom_target(
     'adder-capnp-cpp',
     input: 'schema' / 'adder.capnp',
@@ -411,6 +418,7 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
     command: [
       capnp_tool, 'compile',
       '--src-prefix=' + meson.current_source_dir() / 'schema',
+      '-I' + capnp_include,
       '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
       '@INPUT@',
     ],

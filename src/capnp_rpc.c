@@ -36,6 +36,7 @@ static void questions_fail_all(capnp_rpc_conn_t *c);
 #define RETURN_TAG_OFF 6
 #define RETURN_TAG_RESULTS 0
 #define RETURN_TAG_EXCEPTION 1
+#define RETURN_TAG_CANCELED 2
 #define RETURN_TAG_RESULTS_SENT_ELSEWHERE 3
 #define RETURN_TAG_TAKE_FROM_OTHER_QUESTION 4
 /* Return.takeFromOtherQuestion @6 (u32). */
@@ -1447,6 +1448,11 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
     return protocol_abort(c, "expected !question->isTailCall; Tail call "
                              "`Return` must set `resultsSentElsewhere`, not "
                              "`exception`.");
+  if (tag == RETURN_TAG_CANCELED)
+    return protocol_abort(c, "Return message falsely claims call was "
+                             "canceled.");
+  if (tag > RETURN_TAG_TAKE_FROM_OTHER_QUESTION)
+    return protocol_abort(c, "Unknown 'Return' type.");
   if (tag == RETURN_TAG_RESULTS_SENT_ELSEWHERE) {
     if (q->used != SLOT_MARKED)
       return protocol_abort(c, "expected question->isTailCall; `Return` had "

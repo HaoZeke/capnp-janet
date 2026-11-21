@@ -239,25 +239,31 @@ static int check_cap_params(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 	return 0;
 }
 
+/* Handle one frame, noting the union tag of a Return in `tags`. */
+static int handle_noting(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap,
+			 unsigned *tags)
+{
+	capnp_message_t m = {0};
+	capnp_ptr_t root, ret;
+	ssize_t n = read_frame(g_fd, buf, cap);
+	if (n <= 0)
+		return -1;
+	if (capnp_message_from_flat(&m, buf, (size_t)n) == CAPNP_OK &&
+	    capnp_root(&m, &root) == CAPNP_OK &&
+	    capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_RETURN &&
+	    capnp_getp(&root, 0, &ret) == CAPNP_OK)
+		*tags |= 1u << capnp_get_u16(&ret, 6, 0);
+	capnp_message_free(&m);
+	return capnp_rpc_handle(conn, buf, (size_t)n) != 0 ? -1 : 0;
+}
+
 /* Like wait_answer, also noting the union tag of each Return seen. */
 static int wait_noting(capnp_rpc_conn_t *conn, uint32_t q, uint8_t *buf,
 		       size_t cap, unsigned *tags)
 {
-	while (!capnp_rpc_is_answered(conn, q)) {
-		capnp_message_t m = {0};
-		capnp_ptr_t root, ret;
-		ssize_t n = read_frame(g_fd, buf, cap);
-		if (n <= 0)
+	while (!capnp_rpc_is_answered(conn, q))
+		if (handle_noting(conn, buf, cap, tags))
 			return -1;
-		if (capnp_message_from_flat(&m, buf, (size_t)n) == CAPNP_OK &&
-		    capnp_root(&m, &root) == CAPNP_OK &&
-		    capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_RETURN &&
-		    capnp_getp(&root, 0, &ret) == CAPNP_OK)
-			*tags |= 1u << capnp_get_u16(&ret, 6, 0);
-		capnp_message_free(&m);
-		if (capnp_rpc_handle(conn, buf, (size_t)n) != 0)
-			return -1;
-	}
 	return capnp_rpc_is_failed(conn, q) ? -1 : 0;
 }
 
@@ -344,6 +350,183 @@ static int check_tail(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 	}
 	capnp_rpc_send_finish(conn, q);
 	return 0;
+}
+
+/* hang() never returns. After Finish capnp-C++ cancels it and answers
+ * canceled, which the vat takes quietly for a question it dropped. That
+ * Return may come after the answer to a later call. */
+static int check_cancel(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
+{
+	int64_t ab[2] = {1, 2};
+	unsigned tags = 0;
+	uint32_t q = capnp_rpc_send_call(conn, 0, ADDER_IFACE, 5, 0, 0, NULL,
+	                                 NULL);
+	if (q == (uint32_t)-1 || capnp_rpc_send_finish(conn, q)) {
+		fprintf(stderr, "hang() not sent\n");
+		return 1;
+	}
+	q = capnp_rpc_send_call(conn, 0, ADDER_IFACE, 0, 2, 0, fill_add, ab);
+	if (q == (uint32_t)-1 || wait_noting(conn, q, buf, cap, &tags)) {
+		fprintf(stderr, "add() after hang() failed\n");
+		return 1;
+	}
+	capnp_rpc_send_finish(conn, q);
+	while (!(tags & (1u << 2)))
+		if (handle_noting(conn, buf, cap, &tags)) {
+			fprintf(stderr, "hang() after Finish: tags %#x\n", tags);
+			return 1;
+		}
+	return 0;
+}
+
+/* The reason of an Abort frame, copied into `reason`; else -1. */
+static int abort_reason(const uint8_t *frame, size_t n, char *reason,
+			size_t cap)
+{
+	capnp_message_t m = {0};
+	capnp_ptr_t root, exc;
+	const char *text = NULL;
+	size_t tn = 0;
+	int rc = -1;
+	if (capnp_message_from_flat(&m, frame, n) == CAPNP_OK &&
+	    capnp_root(&m, &root) == CAPNP_OK &&
+	    capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_ABORT &&
+	    capnp_getp(&root, 0, &exc) == CAPNP_OK &&
+	    capnp_get_text(&exc, 0, &text, &tn) == CAPNP_OK && tn < cap) {
+		memcpy(reason, text, tn);
+		reason[tn] = 0;
+		rc = 0;
+	}
+	capnp_message_free(&m);
+	return rc;
+}
+
+/* A Return with no content naming `answer`, with union tag `tag`. */
+static int bare_return(uint32_t answer, uint16_t tag, uint8_t **out,
+		       size_t *len)
+{
+	capnp_builder_t b;
+	capnp_bptr_t root, msg, slot, ret;
+	int rc;
+	capnp_builder_init(&b);
+	rc = capnp_builder_root(&b, &root) ||
+	     capnp_builder_struct(&root, 1, 1, &msg) ||
+	     capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RETURN) ||
+	     capnp_builder_slot(&msg, 1, 0, &slot) ||
+	     capnp_builder_struct(&slot, 2, 1, &ret) ||
+	     capnp_builder_set_u32(&ret, 0, answer) ||
+	     capnp_builder_set_u16(&ret, 6, tag) ||
+	     capnp_builder_serialize(&b, out, len);
+	capnp_builder_free(&b);
+	return rc;
+}
+
+static char g_local_abort[256];
+
+static int keep_abort(void *ctx, const uint8_t *data, size_t len)
+{
+	(void)ctx;
+	if (abort_reason(data, len, g_local_abort, sizeof g_local_abort))
+		g_local_abort[0] = 0;
+	return 0;
+}
+
+/* relay() makes capnp-C++ send this vat a call with
+ * sendResultsTo.yourself. Answering it with `tag` (results or an
+ * exception) breaks the tail call, and the Abort capnp-C++ sends must
+ * give the reason this vat gives for the same Return. */
+static int check_tail_refusal(const struct sockaddr_in *addr, uint16_t tag)
+{
+	static capnp_rpc_conn_t c, local;
+	static int self;
+	int64_t ab[2] = {5, 6};
+	char cpp[256] = "";
+	capnp_rpc_cap_ref_t ref;
+	capnp_rpc_call_t call;
+	uint8_t *out = NULL;
+	size_t len = 0;
+	uint8_t buf[16384];
+	uint32_t q;
+	int saved = g_fd, rc = 1;
+
+	g_fd = socket(AF_INET, SOCK_STREAM, 0);
+	if (g_fd < 0 ||
+	    connect(g_fd, (const struct sockaddr *)addr, sizeof *addr) != 0)
+		goto done;
+	capnp_rpc_init(&c, send_fd, NULL);
+	q = capnp_rpc_send_bootstrap(&c);
+	if (q == (uint32_t)-1 || wait_answer(&c, q, buf, sizeof buf))
+		goto done;
+	ref.kind = CAPNP_RPC_CAP_EXPORT;
+	ref.id = (uint32_t)capnp_rpc_export(&c, &self, local_add);
+	memset(&call, 0, sizeof call);
+	call.interface_id = ADDER_IFACE;
+	call.method_id = 4;
+	call.params_dwords = 2;
+	call.params_pwords = 1;
+	call.fill = fill_relay;
+	call.fill_ctx = ab;
+	call.caps = &ref;
+	call.ncaps = 1;
+	if (capnp_rpc_send_call_ex(&c, &call) == (uint32_t)-1)
+		goto done;
+	for (;;) {
+		capnp_message_t m = {0};
+		capnp_ptr_t root, body;
+		int mtag = -1, yourself = 0;
+		uint32_t qid = 0;
+		ssize_t n = read_frame(g_fd, buf, sizeof buf);
+		if (n <= 0)
+			goto done;
+		if (capnp_message_from_flat(&m, buf, (size_t)n) == CAPNP_OK &&
+		    capnp_root(&m, &root) == CAPNP_OK &&
+		    capnp_getp(&root, 0, &body) == CAPNP_OK) {
+			mtag = capnp_get_u16(&root, 0, 0);
+			yourself = mtag == CAPNP_RPC_MSG_CALL &&
+			           capnp_get_u16(&body, 6, 0) == 1;
+			qid = capnp_get_u32(&body, 0, 0);
+		}
+		capnp_message_free(&m);
+		if (mtag == CAPNP_RPC_MSG_ABORT) {
+			abort_reason(buf, (size_t)n, cpp, sizeof cpp);
+			break;
+		}
+		if (yourself) {
+			int bad = bare_return(qid, tag, &out, &len) ||
+			          send_fd(NULL, out, len);
+			free(out);
+			out = NULL;
+			if (bad)
+				goto done;
+		} else {
+			capnp_rpc_handle(&c, buf, (size_t)n);
+		}
+	}
+
+	capnp_rpc_init(&local, keep_abort, NULL);
+	memset(&call, 0, sizeof call);
+	call.interface_id = ADDER_IFACE;
+	call.results_to_yourself = 1;
+	q = capnp_rpc_send_call_ex(&local, &call);
+	g_local_abort[0] = 0;
+	if (q == (uint32_t)-1 || bare_return(q, tag, &out, &len))
+		goto done;
+	capnp_rpc_handle(&local, out, len);
+	if (cpp[0] == 0 || strcmp(cpp, g_local_abort) != 0) {
+		fprintf(stderr, "tail Return %u: capnp-C++ \"%s\", this vat \"%s\"\n",
+		        tag, cpp, g_local_abort);
+		goto done;
+	}
+	printf("same tail Return %u: %s\n", tag, cpp);
+	rc = 0;
+done:
+	free(out);
+	capnp_rpc_free(&c);
+	capnp_rpc_free(&local);
+	if (g_fd >= 0)
+		close(g_fd);
+	g_fd = saved;
+	return rc;
 }
 
 /* The bootstrap of `rpc_peer_server PORT promise` resolves later, so
@@ -540,6 +723,8 @@ int main(int argc, char **argv)
 		return 1;
 	if (check_tail(&conn, buf, sizeof buf))
 		return 1;
+	if (check_cancel(&conn, buf, sizeof buf))
+		return 1;
 
 	/* An Unimplemented reply ends the connection for capnp-C++, and
 	 * echoing it back would make the peer abort. */
@@ -568,6 +753,9 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	}
+
+	if (check_tail_refusal(&addr, 0) || check_tail_refusal(&addr, 1))
+		return 1;
 
 	capnp_rpc_free(&conn);
 	close(g_fd);

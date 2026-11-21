@@ -443,6 +443,28 @@ int main(void)
               sent_abort(&g_to_vat, "`Return.takeFromOtherQuestion` had "
                                     "invalid answer ID."),
           "takeFromOtherQuestion needs a known answer");
+    qn = capnp_rpc_send_bootstrap(&client);
+    q_drop(&g_to_vat);
+    CHECK(feed_return(&client, qn, 2, 0) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_vat, "Return message falsely claims call "
+                                    "was canceled."),
+          "canceled needs a Finish first");
+    qn = capnp_rpc_send_bootstrap(&client);
+    q_drop(&g_to_vat);
+    CHECK(feed_return(&client, qn, 5, 0) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_vat, "Unknown 'Return' type."),
+          "acceptFromThirdParty is refused");
+    qn = capnp_rpc_send_bootstrap(&client);
+    q_drop(&g_to_vat);
+    CHECK(feed_return(&client, qn, 9, 0) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_vat, "Unknown 'Return' type."),
+          "an unknown Return arm is refused");
+    qn = capnp_rpc_send_bootstrap(&client);
+    q_drop(&g_to_vat);
+    CHECK(capnp_rpc_send_finish(&client, qn) == CAPNP_OK, "finish first");
+    q_drop(&g_to_vat);
+    CHECK(feed_return(&client, qn, 2, 0) == CAPNP_OK && g_to_vat.tail == 0,
+          "canceled after Finish is quiet");
     qn = capnp_rpc_send_call(&client, 0, 0x1234, 1, 1, 1, fill_u32, &arg);
     pump(&vat, &g_to_vat);
     q_drop(&g_to_client);

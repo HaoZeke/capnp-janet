@@ -3,6 +3,8 @@
 # called by the C vat (interop/rpc_client.c). The explicit interface id is
 # mirrored as ADDER_IFACE in the C client.
 
+using Cxx = import "/capnp/c++.capnp";
+
 interface Adder @0xea01e10cbc414411 {
   add @0 (a :Int64, b :Int64) -> (sum :Int64);
   # `n` bytes of 0xab, for a Return longer than any fixed buffer.
@@ -13,4 +15,6 @@ interface Adder @0xea01e10cbc414411 {
   callBack @3 (cb :Adder) -> (sum :Int64);
   # A tail call to `target.relay(a, b)`.
   relay @4 (target :Adder, a :Int64, b :Int64) -> (sum :Int64);
+  # Never returns; a Finish cancels it, and capnp-C++ answers canceled.
+  hang @5 () -> () $Cxx.allowCancellation;
 }

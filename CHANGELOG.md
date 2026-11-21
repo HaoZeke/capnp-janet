@@ -35,6 +35,10 @@ Pre-1.0 minor releases may include breaking API changes.
 - Tail calls: a call can ask for `sendResultsTo.yourself`, a vat keeps
   such results for a later `takeFromOtherQuestion`, and the Return arms
   rpc.c++ refuses abort the connection with its reasons.
+- A Return claiming `canceled` before Finish, `acceptFromThirdParty`,
+  or an unknown arm aborts the connection with the reason capnp-C++
+  gives. `test_transport bad-return` checks each reason against a live
+  capnp-C++ client.
 - `capnp_read_frame_alloc` reads a frame of any size into a heap buffer,
   refusing more than 8388608 words as C++ RPC does.
 
