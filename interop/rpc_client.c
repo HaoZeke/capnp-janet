@@ -25,12 +25,24 @@
 
 static int g_fd = -1;
 static int g_sends;
+/* With `g_keep_last` set, a copy of the last frame sent, for the caller
+ * to free. */
+static int g_keep_last;
+static uint8_t *g_last;
+static size_t g_last_len;
 
 static int send_fd(void *ctx, const uint8_t *data, size_t len)
 {
 	size_t off = 0;
 	(void)ctx;
 	g_sends++;
+	if (g_keep_last) {
+		free(g_last);
+		g_last = (uint8_t *)malloc(len);
+		if (g_last != NULL)
+			memcpy(g_last, data, len);
+		g_last_len = len;
+	}
 	while (off < len) {
 		ssize_t n = write(g_fd, data + off, len - off);
 		if (n <= 0)
@@ -747,12 +759,18 @@ int main(int argc, char **argv)
 	if (check_cancel(&conn, buf, sizeof buf))
 		return 1;
 
-	/* An Unimplemented reply ends the connection for capnp-C++, and
-	 * echoing it back would make the peer abort. */
+	/* An Unimplemented reply to anything but Resolve ends the
+	 * connection: the vat aborts with the reason rpc.c++ gives, and
+	 * capnp-C++ closes. */
 	{
+		static const char want[] =
+		    "Peer did not implement required RPC message type.; "
+		    "(uint)message.which() = 7";
+		char reason[256] = "";
 		ssize_t n;
 		int sends, rc;
-		int64_t sum = 0;
+		uint8_t *sent = NULL;
+		size_t sent_len = 0;
 		if (send_save()) {
 			fprintf(stderr, "save not sent\n");
 			return 1;
@@ -763,16 +781,36 @@ int main(int argc, char **argv)
 			return 1;
 		}
 		sends = g_sends;
+		g_keep_last = 1;
 		rc = capnp_rpc_handle(&conn, buf, (size_t)n);
-		if (rc != CAPNP_ERR_KIND || g_sends != sends) {
-			fprintf(stderr, "Unimplemented: rc %d, %d message(s) sent\n",
-			        rc, g_sends - sends);
+		g_keep_last = 0;
+		sent = g_last;
+		sent_len = g_last_len;
+		g_last = NULL;
+		if (rc != CAPNP_ERR_KIND || g_sends != sends + 1 || sent == NULL ||
+		    abort_reason(sent, sent_len, reason, sizeof reason) ||
+		    strcmp(reason, want) != 0) {
+			fprintf(stderr, "Unimplemented: rc %d, %d message(s) sent, "
+			        "reason \"%s\"\n", rc, g_sends - sends, reason);
+			free(sent);
 			return 1;
 		}
-		if (call_add(&conn, buf, sizeof buf, 1, 2, &sum) || sum != 3) {
-			fprintf(stderr, "capnp-C++ dropped the connection\n");
-			return 1;
+		free(sent);
+		/* capnp-C++ answers an Abort with its own, then closes. */
+		{
+			char back[256] = "";
+			n = read_frame(g_fd, buf, sizeof buf);
+			if (n <= 0 ||
+			    abort_reason(buf, (size_t)n, back, sizeof back) ||
+			    strncmp(back, "remote exception: ", 18) != 0 ||
+			    strcmp(back + 18, want) != 0 ||
+			    read_frame(g_fd, buf, sizeof buf) > 0) {
+				fprintf(stderr, "after Abort: \"%s\"\n", back);
+				return 1;
+			}
+			printf("capnp-C++ answers: %s\n", back);
 		}
+		printf("Unimplemented aborts: %s\n", reason);
 	}
 
 	if (check_tail_refusal(&addr, 0) || check_tail_refusal(&addr, 1))

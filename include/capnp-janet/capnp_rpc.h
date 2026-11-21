@@ -231,9 +231,10 @@ CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
                      capnp_rpc_dispatch_fn dispatch);
 
 /* Handle one framed message. 0 when handled, non-zero on a bad frame.
- * CAPNP_ERR_IO means the peer sent Abort, and CAPNP_ERR_KIND also covers
- * an Unimplemented reply to anything but Resolve. Either one ends the
- * connection: every unanswered question fails and nothing is sent back.
+ * CAPNP_ERR_IO means the peer sent Abort: every unanswered question
+ * fails and nothing is sent back. CAPNP_ERR_KIND also covers an
+ * Unimplemented reply to anything but Resolve, which ends the
+ * connection with an Abort carrying the rpc.c++ reason.
  * A Return that rpc.c++ refuses, including one naming no question we
  * hold, also ends it with CAPNP_ERR_KIND, after an Abort carrying the
  * rpc.c++ reason. So does a Call or Bootstrap rpc.c++ refuses: one

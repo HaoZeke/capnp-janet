@@ -127,6 +127,9 @@ static void questions_fail_all(capnp_rpc_conn_t *c);
 #define PA_PW 1
 #define PA_OP_DW 1
 #define PA_OP_PW 0
+/* Resolve: promiseId @0 (u32), union tag at byte 4: cap @ptr0 is 0. */
+#define RESOLVE_TAG_OFF 4
+#define RESOLVE_TAG_CAP 0
 /* Disembargo: target @ptr0; context is a group sharing the data section,
  * union tag @4 (u16), the loopback id @0 (u32). */
 #define DIS_CTX_TAG_OFF 4
@@ -1905,17 +1908,39 @@ static void questions_fail_all(capnp_rpc_conn_t *c)
   }
 }
 
-/* rpc.c++ handleUnimplemented: a Resolve may go unadopted, and any other
- * message the peer refused is fatal to the connection. This vat never
- * sends Resolve, so it has no export to give back for one. Replying in
- * kind would bounce between two vats forever. */
+/* rpc.c++ handleUnimplemented: a Resolve may go unadopted, which gives
+ * back the reference its descriptor carried, and any other message the
+ * peer refused is fatal to the connection. */
 static int handle_unimplemented(capnp_rpc_conn_t *c, const capnp_ptr_t *orig)
 {
-  if (orig->kind == CAPNP_PK_STRUCT &&
-      capnp_get_u16(orig, MESSAGE_TAG_OFF, 0) == CAPNP_RPC_MSG_RESOLVE)
+  char reason[96];
+  uint16_t which = orig->kind == CAPNP_PK_STRUCT
+                       ? capnp_get_u16(orig, MESSAGE_TAG_OFF, 0)
+                       : CAPNP_RPC_MSG_UNIMPLEMENTED;
+  if (which == CAPNP_RPC_MSG_RESOLVE) {
+    capnp_ptr_t res, cap, tpcd;
+    uint16_t tag;
+    if (capnp_getp(orig, 0, &res) != CAPNP_OK ||
+        res.kind != CAPNP_PK_STRUCT ||
+        capnp_get_u16(&res, RESOLVE_TAG_OFF, 0) != RESOLVE_TAG_CAP ||
+        capnp_getp(&res, 0, &cap) != CAPNP_OK || cap.kind != CAPNP_PK_STRUCT)
+      return CAPNP_OK;
+    tag = capnp_get_u16(&cap, CAPDESC_TAG_OFF, 0);
+    if (tag == CAPDESC_TAG_SENDERHOSTED || tag == CAPDESC_TAG_SENDERPROMISE)
+      return export_release(c, capnp_get_u32(&cap, CAPDESC_SENDERHOSTED_OFF, 0),
+                            1);
+    if (tag == CAPDESC_TAG_THIRDPARTYHOSTED) {
+      if (capnp_getp(&cap, 0, &tpcd) != CAPNP_OK)
+        memset(&tpcd, 0, sizeof tpcd);
+      return export_release(c, capnp_get_u32(&tpcd, TPCD_VINEID_OFF, 0), 1);
+    }
     return CAPNP_OK;
-  questions_fail_all(c);
-  return CAPNP_ERR_KIND;
+  }
+  snprintf(reason, sizeof reason,
+           "Peer did not implement required RPC message type.; "
+           "(uint)message.which() = %u",
+           (unsigned)which);
+  return protocol_abort(c, reason);
 }
 
 int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)

@@ -61,6 +61,10 @@ Pre-1.0 minor releases may include breaking API changes.
   aborts with capnp-C++'s reason, and so does a Finish whose results name
   an export already released. These used to be ignored, or to drop the
   export.
+- An Unimplemented reply to anything but Resolve aborts with capnp-C++'s
+  reason; it used to end the connection with nothing sent. An
+  Unimplemented Resolve gives back the reference its descriptor carried,
+  as rpc.c++ does.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

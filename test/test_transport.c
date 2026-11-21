@@ -1007,7 +1007,15 @@ static void test_write_sigpipe_two_threads(void) {
 
 /* --- vat-diff: the same frames to capnp-C++ and to this vat ---------- */
 
-enum { VF_BOOT, VF_CALL, VF_RELEASE, VF_UNIMPL, VF_FINISH, VF_RETURN };
+enum {
+  VF_BOOT,
+  VF_CALL,
+  VF_RELEASE,
+  VF_UNIMPL,
+  VF_UNIMPL_RESOLVE,
+  VF_FINISH,
+  VF_RETURN
+};
 enum { VT_IMPORT, VT_PROMISED, VT_UNKNOWN, VT_NULL };
 #define NULL_ANSWER 0xffffffffu
 
@@ -1020,7 +1028,10 @@ typedef struct {
   uint32_t tval;
   uint16_t send_to;
   uint16_t method;
-  /* Release count; for a Bootstrap, nonzero sends a deprecatedObjectId. */
+  /* Release count; for a Bootstrap, nonzero sends a deprecatedObjectId;
+   * for a promised target, how many getPointerField 0 steps follow. For
+   * an Unimplemented Resolve, `method` is the descriptor arm naming
+   * export `tval`, and `send_to` nonzero sends an exception. */
   uint32_t count;
 } vframe_t;
 
@@ -1075,6 +1086,16 @@ static const vscenario_t vat_diffs[] = {
       {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
     {"Return for an unknown question",
      {{VF_RETURN, 5, 0, 0, 0, 0, 0}}, 1, 5, 0, 0},
+    {"Unimplemented for a Call",
+     {{VF_UNIMPL, 1, VT_IMPORT, 0, 0, 0, 0}}, 1, 99, 0, 0},
+    {"Unimplemented for a Resolve of the bootstrap",
+     {{VF_UNIMPL_RESOLVE, 0, 0, 0, 0, 1, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Unimplemented for a Resolve of an unknown export",
+     {{VF_UNIMPL_RESOLVE, 0, 0, 77, 0, 2, 0}}, 1, 99, 0, 0},
+    {"Unimplemented for a Resolve to an exception",
+     {{VF_UNIMPL_RESOLVE, 0, 0, 0, 1, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
     {"Release of an unknown export",
      {{VF_RELEASE, 99, 0, 0, 0, 0, 1}}, 1, 99, 0, 0},
     {"Release beyond the reference count",
@@ -1106,14 +1127,29 @@ static int build_target(const capnp_bptr_t *call, const vframe_t *f) {
   switch (f->target) {
   case VT_IMPORT:
     return capnp_builder_set_u32(&target, 0, f->tval);
-  case VT_PROMISED:
+  case VT_PROMISED: {
+    capnp_bptr_t ops;
+    uint32_t i;
     /* A `tval` of NULL_ANSWER leaves the promisedAnswer null. */
     if (f->tval == NULL_ANSWER)
       return capnp_builder_set_u16(&target, 4, 1);
-    return capnp_builder_set_u16(&target, 4, 1) ||
-           capnp_builder_slot(&target, 1, 0, &slot) ||
-           capnp_builder_struct(&slot, 1, 1, &pa) ||
-           capnp_builder_set_u32(&pa, 0, f->tval);
+    if (capnp_builder_set_u16(&target, 4, 1) ||
+        capnp_builder_slot(&target, 1, 0, &slot) ||
+        capnp_builder_struct(&slot, 1, 1, &pa) ||
+        capnp_builder_set_u32(&pa, 0, f->tval))
+      return -1;
+    if (f->count == 0)
+      return 0;
+    if (capnp_builder_set_list_struct(&pa, 1, 0, f->count, 1, 0, &ops))
+      return -1;
+    for (i = 0; i < f->count; i++) {
+      capnp_bptr_t e = ops;
+      e.word += i;
+      if (capnp_builder_set_u16(&e, 0, 1))
+        return -1;
+    }
+    return 0;
+  }
   default:
     return capnp_builder_set_u16(&target, 4, 2);
   }
@@ -1173,6 +1209,24 @@ static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
            capnp_builder_set_u16(&inner, 0, CAPNP_RPC_MSG_CALL) ||
            capnp_builder_slot(&inner, 1, 0, &slot) || build_vcall(&slot, f);
       break;
+    case VF_UNIMPL_RESOLVE: {
+      capnp_bptr_t res, cap;
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_UNIMPLEMENTED) ||
+           capnp_builder_struct(&slot, 1, 1, &inner) ||
+           capnp_builder_set_u16(&inner, 0, CAPNP_RPC_MSG_RESOLVE) ||
+           capnp_builder_slot(&inner, 1, 0, &slot) ||
+           capnp_builder_struct(&slot, 1, 1, &res) ||
+           capnp_builder_set_u16(&res, 4, f->send_to ? 1 : 0) ||
+           capnp_builder_slot(&res, 1, 0, &slot);
+      if (rc == 0 && f->send_to)
+        rc = capnp_builder_struct(&slot, 1, 2, &cap) ||
+             capnp_builder_set_text(&cap, 1, 0, "gone", 4);
+      else if (rc == 0)
+        rc = capnp_builder_struct(&slot, 1, 1, &cap) ||
+             capnp_builder_set_u16(&cap, 0, f->method) ||
+             capnp_builder_set_u32(&cap, 4, f->tval);
+      break;
+    }
     default:
       rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_FINISH) ||
            capnp_builder_struct(&slot, 1, 0, &body) ||
@@ -1421,6 +1475,42 @@ static int vat_diff(uint16_t port) {
   return failed != 0;
 }
 
+/* What capnp-C++ 1.4.0 answered in vat-diff, so this vat is checked
+ * against it with no C++ peer running. */
+static const struct {
+  const char *name;
+  const char *cpp;
+} vat_recorded[] = {
+    {"Unimplemented for a Call",
+     "abort: Peer did not implement required RPC message type.; "
+     "(uint)message.which() = 2"},
+    {"Unimplemented for a Resolve of the bootstrap",
+     "abort: Message target is not a current export ID."},
+    {"Unimplemented for a Resolve of an unknown export",
+     "abort: Tried to release invalid export ID."},
+    {"Unimplemented for a Resolve to an exception", "return 1 results 42"},
+};
+
+static void test_vat_recorded(void) {
+  size_t i, j;
+  for (i = 0; i < sizeof vat_recorded / sizeof vat_recorded[0]; i++) {
+    char ours[1024] = "";
+    for (j = 0; j < N_VAT_DIFFS; j++)
+      if (strcmp(vat_diffs[j].name, vat_recorded[i].name) == 0)
+        break;
+    if (j < N_VAT_DIFFS) {
+      vd_local(&vat_diffs[j], ours, sizeof ours);
+      if (vat_diffs[j].opaque)
+        opaque_reasons(ours);
+    }
+    if (strcmp(ours, vat_recorded[i].cpp) != 0) {
+      fprintf(stderr, "FAIL recorded %s: capnp-C++ \"%s\", this vat \"%s\"\n",
+              vat_recorded[i].name, vat_recorded[i].cpp, ours);
+      g_fail++;
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   if (argc >= 3 && strcmp(argv[1], "dial") == 0)
     return dial_peer((uint16_t)atoi(argv[2]));
@@ -1451,6 +1541,7 @@ int main(int argc, char **argv) {
   test_link_large_result(70000, "link result over 64 KiB");
   loopback(1);
   loopback(0);
+  test_vat_recorded();
   if (g_fail) {
     fprintf(stderr, "%d transport checks failed\n", g_fail);
     return 1;
