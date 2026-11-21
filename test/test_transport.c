@@ -1043,7 +1043,8 @@ typedef struct {
  * vat, and the replies up to an Abort or the Return for `until` are
  * compared. `opaque` compares only which exception reasons repeat, for
  * a method whose own error text is the server's business. `known` marks
- * a difference listed in the notes, printed without failing. */
+ * a difference listed in the notes, printed without failing; one that
+ * stops differing fails, so the list stays true. */
 typedef struct {
   const char *name;
   vframe_t frames[3];
@@ -1166,10 +1167,46 @@ static const vscenario_t vat_diffs[] = {
     {"Return for a high question id",
      {{VF_RETURN, 0x80000005u, 0, 0, 0, 0, 0},
       {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Provide, which this vat serves at level 3",
+     {{VF_TAG, 0, 0, 0, 0, 10, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 1},
+    {"Accept, which this vat serves at level 3",
+     {{VF_TAG, 0, 0, 0, 0, 11, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 1},
+    {"Join, which this vat serves at level 3",
+     {{VF_TAG, 0, 0, 0, 0, 12, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 1},
+    {"Disembargo accept",
+     {{VF_DISEMBARGO, 0, 0, 3, 2, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Disembargo provide naming no Provide",
+     {{VF_DISEMBARGO, 0, 0, 0, 3, 0, 4},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Disembargo with an unknown context arm",
+     {{VF_DISEMBARGO, 0, 0, 0, 9, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Disembargo accept on a promised answer with a transform",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 5, 2, 3, 0}}, 1, 99, 0, 0},
+    {"Disembargo provide on a promised answer with an unknown op",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 2, 3, 0x101, 7}}, 1, 99, 0, 0},
+    {"Disembargo accept on a null promised answer",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 2, 0x400, 0}}, 1, 99, 0, 0},
+    {"Disembargo accept on an empty transform",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 2, 0x200, 0}}, 1, 99, 0, 0},
+    {"Disembargo accept with no target",
+     {{VF_DISEMBARGO, 0, VT_NULL, 0, 2, 0, 0}}, 1, 99, 0, 0},
+    {"Disembargo provide on an unknown target arm",
+     {{VF_DISEMBARGO, 0, VT_UNKNOWN, 0, 3, 0, 4294967295u}}, 1, 99, 0, 0},
+    {"unknown method, worded by the server",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0}}, 1, 1, 0, 1},
     {"Abort",
      {{VF_ABORT, 0, 0, 0, 0, 0, 0}}, 1, 99, 0, 0},
     {"Abort carrying a remote exception",
-     {{VF_ABORT, 0, 0, 0, 1, 0, 0}}, 1, 99, 0, 1},
+     {{VF_ABORT, 0, 0, 0, 1, 0, 0}}, 1, 99, 0, 0},
+    {"Abort of type disconnected",
+     {{VF_ABORT, 0, 0, 0, 0, 2, 0}}, 1, 99, 0, 0},
+    {"Abort carrying a remote exception of type unimplemented",
+     {{VF_ABORT, 0, 0, 0, 1, 3, 0}}, 1, 99, 0, 0},
     {"Release of an unknown export",
      {{VF_RELEASE, 99, 0, 0, 0, 0, 1}}, 1, 99, 0, 0},
     {"Release beyond the reference count",
@@ -1250,6 +1287,33 @@ static int build_vcall(const capnp_bptr_t *slot0, const vframe_t *f) {
          capnp_builder_set_u64(&content, 8, 22);
 }
 
+static int build_dis_promised(const capnp_bptr_t *target, const vframe_t *f) {
+  capnp_bptr_t slot, pa, ops, e;
+  uint32_t i, n = f->method & 0xff;
+  if (capnp_builder_slot(target, 1, 0, &slot))
+    return -1;
+  if (f->method & 0x400)
+    return 0;
+  if (capnp_builder_struct(&slot, 1, 1, &pa) ||
+      capnp_builder_set_u32(&pa, 0, f->tval))
+    return -1;
+  if (f->method & 0x200)
+    return capnp_builder_set_list_struct(&pa, 1, 0, 0, 1, 0, &ops);
+  if (n == 0)
+    return 0;
+  if (capnp_builder_set_list_struct(&pa, 1, 0, n, 1, 0, &ops))
+    return -1;
+  for (i = 0; i < n; i++) {
+    e = ops;
+    e.word += i;
+    if (capnp_builder_set_u16(&e, 0,
+                              (i & 1) ? 0 : (i == 0 && (f->method & 0x100)) ? 5 : 1) ||
+        capnp_builder_set_u16(&e, 2, (uint16_t)(i * 3)))
+      return -1;
+  }
+  return 0;
+}
+
 static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
   capnp_builder_t b;
   capnp_bptr_t root, msg, slot, body, inner;
@@ -1257,7 +1321,8 @@ static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
   if (f->kind == VF_RETURN)
     return build_return(f->qid, 0, 0, out, len);
   if (f->kind == VF_ABORT) {
-    /* `send_to` nonzero sends what rpc.c++ answers an Abort with. */
+    /* `send_to` nonzero sends what rpc.c++ answers an Abort with, and
+     * `method` is the Exception.type. */
     const char *why = f->send_to ? "remote exception: gone" : "gone";
     capnp_builder_init(&b);
     rc = capnp_builder_root(&b, &root) ||
@@ -1266,6 +1331,7 @@ static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
          capnp_builder_slot(&msg, 1, 0, &slot) ||
          capnp_builder_struct(&slot, 1, 2, &body) ||
          capnp_builder_set_text(&body, 1, 0, why, strlen(why)) ||
+         capnp_builder_set_u16(&body, 4, f->method) ||
          capnp_builder_serialize(&b, out, len);
     capnp_builder_free(&b);
     return rc;
@@ -1326,14 +1392,26 @@ static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
            capnp_builder_struct(&slot, 1, 1, &body);
       break;
     case VF_DISEMBARGO:
-      /* Context arm `send_to`, embargo id `count`, on import `tval`. */
+      /* Context arm `send_to`, embargo id `count`, on import `tval`. A
+       * promised target names question `tval`, with `method` low byte
+       * ops alternating getPointerField and noop; 0x100 makes the first
+       * op an unknown arm, 0x200 sends an empty transform, and 0x400 a
+       * null promisedAnswer. */
       rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_DISEMBARGO) ||
            capnp_builder_struct(&slot, 1, 1, &body) ||
            capnp_builder_set_u32(&body, 0, f->count) ||
            capnp_builder_set_u16(&body, 4, f->send_to) ||
-           capnp_builder_slot(&body, 1, 0, &slot) ||
-           capnp_builder_struct(&slot, 1, 1, &inner) ||
-           capnp_builder_set_u32(&inner, 0, f->tval);
+           capnp_builder_slot(&body, 1, 0, &slot);
+      if (rc == 0 && f->target != VT_NULL)
+        rc = capnp_builder_struct(&slot, 1, 1, &inner) ||
+             capnp_builder_set_u16(&inner, 4,
+                                   f->target == VT_PROMISED  ? 1
+                                   : f->target == VT_UNKNOWN ? 7
+                                                             : 0) ||
+             (f->target != VT_PROMISED &&
+              capnp_builder_set_u32(&inner, 0, f->tval));
+      if (rc == 0 && f->target == VT_PROMISED)
+        rc = build_dis_promised(&inner, f);
       break;
     case VF_RESOLVE:
       /* Promise `qid` resolved to senderHosted `tval`; with `send_to` 1
@@ -1368,12 +1446,20 @@ static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
   return rc;
 }
 
+/* An Exception's type when it is not `failed`. */
+static const char *exc_type(const capnp_ptr_t *exc) {
+  static const char *names[] = {"", " (overloaded)", " (disconnected)",
+                                " (unimplemented)"};
+  uint16_t t = exc->kind == CAPNP_PK_STRUCT ? capnp_get_u16(exc, 4, 0) : 0;
+  return t < 4 ? names[t] : " (unknown type)";
+}
+
 /* Append one reply to `out`; 1 when it ends the exchange. */
 static int describe_reply(const uint8_t *frame, size_t n, uint32_t until,
                           char *out, size_t cap) {
   capnp_message_t m = {0};
   capnp_ptr_t root, body, p, content;
-  char ev[320];
+  char ev[640];
   const char *text = NULL;
   size_t tn = 0;
   int end = 0;
@@ -1387,7 +1473,8 @@ static int describe_reply(const uint8_t *frame, size_t n, uint32_t until,
     if (tag == CAPNP_RPC_MSG_ABORT) {
       if (capnp_get_text(&body, 0, &text, &tn) != CAPNP_OK || text == NULL)
         tn = 0;
-      snprintf(ev, sizeof ev, "abort: %.*s", (int)tn, tn ? text : "");
+      snprintf(ev, sizeof ev, "abort: %.*s%s", (int)tn, tn ? text : "",
+               exc_type(&body));
       end = 1;
     } else if (tag == CAPNP_RPC_MSG_RETURN) {
       uint32_t aid = capnp_get_u32(&body, 0, 0);
@@ -1404,8 +1491,8 @@ static int describe_reply(const uint8_t *frame, size_t n, uint32_t until,
         if (capnp_getp(&body, 0, &p) != CAPNP_OK ||
             capnp_get_text(&p, 0, &text, &tn) != CAPNP_OK || text == NULL)
           tn = 0;
-        snprintf(ev, sizeof ev, "return %u exception: %.*s", (unsigned)aid,
-                 (int)tn, tn ? text : "");
+        snprintf(ev, sizeof ev, "return %u exception: %.*s%s", (unsigned)aid,
+                 (int)tn, tn ? text : "", exc_type(&p));
       } else {
         snprintf(ev, sizeof ev, "return %u arm %u", (unsigned)aid,
                  (unsigned)arm);
@@ -1414,6 +1501,24 @@ static int describe_reply(const uint8_t *frame, size_t n, uint32_t until,
     } else if (tag == CAPNP_RPC_MSG_UNIMPLEMENTED) {
       snprintf(ev, sizeof ev, "unimplemented %u",
                (unsigned)capnp_get_u16(&body, 0, 0));
+    } else if (tag == CAPNP_RPC_MSG_RELEASE) {
+      snprintf(ev, sizeof ev, "release %u x%u",
+               (unsigned)capnp_get_u32(&body, 0, 0),
+               (unsigned)capnp_get_u32(&body, 4, 0));
+    } else if (tag == CAPNP_RPC_MSG_RESOLVE) {
+      uint32_t pid = capnp_get_u32(&body, 0, 0);
+      if (capnp_getp(&body, 0, &p) != CAPNP_OK)
+        memset(&p, 0, sizeof p);
+      if (capnp_get_u16(&body, 4, 0) == 1) {
+        if (capnp_get_text(&p, 0, &text, &tn) != CAPNP_OK || text == NULL)
+          tn = 0;
+        snprintf(ev, sizeof ev, "resolve %u exception: %.*s%s", (unsigned)pid,
+                 (int)tn, tn ? text : "", exc_type(&p));
+      } else {
+        snprintf(ev, sizeof ev, "resolve %u cap %u:%u", (unsigned)pid,
+                 (unsigned)capnp_get_u16(&p, 0, 0),
+                 (unsigned)capnp_get_u32(&p, 4, 0));
+      }
     } else {
       snprintf(ev, sizeof ev, "message %u", (unsigned)tag);
     }
@@ -1613,6 +1718,11 @@ static int vat_diff(uint16_t port) {
     }
     if (strcmp(cpp, ours) == 0) {
       printf("same %s: %s\n", vat_diffs[i].name, cpp);
+      if (vat_diffs[i].known) {
+        fprintf(stderr, "FAIL %s: listed as a difference but the same\n",
+                vat_diffs[i].name);
+        failed++;
+      }
     } else if (vat_diffs[i].known) {
       printf("known difference %s: capnp-C++ \"%s\", this vat \"%s\"\n",
              vat_diffs[i].name, cpp, ours);
