@@ -1318,6 +1318,50 @@ int capnp_dyn_get_f64(const capnp_dyn_t *d, const capnp_ptr_t *s,
   return rc;
 }
 
+/* C++ readTextPointer and readDataPointer do not check the nesting limit,
+ * so a Text or Data field reads even where a struct could not. */
+static int getp_blob(const capnp_ptr_t *s, uint16_t idx, capnp_ptr_t *out) {
+  capnp_ptr_t holder = *s;
+  if (holder.depth_left < 1)
+    holder.depth_left = 1;
+  return capnp_getp(&holder, idx, out);
+}
+
+static int list_fits(const capnp_ptr_t *l, int want);
+static int elem_esize(const rtype_t *elem);
+
+/* The kind checks DynamicStruct::Reader::get makes through the layout
+ * readers before it returns a pointer field. */
+static int ptr_fits_type(const capnp_ptr_t *p, const rtype_t *ft) {
+  rtype_t elem;
+  if (p->kind == CAPNP_PK_NULL)
+    return 1;
+  if (ft->list_depth > 0) {
+    elem = *ft;
+    elem.list_depth--;
+    return p->kind == CAPNP_PK_LIST && list_fits(p, elem_esize(&elem));
+  }
+  switch (ft->which) {
+  case TY_TEXT:
+  case TY_DATA:
+    return p->kind == CAPNP_PK_LIST && p->esize == CAPNP_SZ_BYTE;
+  case TY_STRUCT:
+    return p->kind == CAPNP_PK_STRUCT;
+  case TY_IFACE:
+    return p->kind == CAPNP_PK_CAP;
+  case TY_ANY:
+    if (ft->any_kind == 1)
+      return p->kind == CAPNP_PK_STRUCT;
+    if (ft->any_kind == 2)
+      return p->kind == CAPNP_PK_LIST;
+    if (ft->any_kind == 3)
+      return p->kind == CAPNP_PK_CAP;
+    return 1;
+  default:
+    return 1;
+  }
+}
+
 int capnp_dyn_get_text(const capnp_dyn_t *d, const capnp_ptr_t *s,
                        const char *type_name, const char *field,
                        const char **out, size_t *len) {
@@ -1336,10 +1380,11 @@ int capnp_dyn_get_text(const capnp_dyn_t *d, const capnp_ptr_t *s,
     return CAPNP_ERR_KIND;
   }
   free_rtype(&ft);
-  if (capnp_getp(s, (uint16_t)f->offset, &p) == CAPNP_OK &&
-      p.kind != CAPNP_PK_NULL) {
+  rc = getp_blob(s, (uint16_t)f->offset, &p);
+  if (rc)
+    return rc;
+  if (p.kind != CAPNP_PK_NULL)
     return capnp_get_text(s, (uint16_t)f->offset, out, len);
-  }
   if (f->has_def_val && capnp_get_u16(&f->def_val, 0, 0xffff) == TY_TEXT) {
     if (capnp_getp(&f->def_val, 0, &p) == CAPNP_OK && p.kind != CAPNP_PK_NULL)
       return capnp_get_text(&f->def_val, 0, out, len);
@@ -1372,8 +1417,13 @@ int capnp_dyn_get_ptr(const capnp_dyn_t *d, const capnp_ptr_t *s,
     free_rtype(&ft);
     return CAPNP_ERR_KIND;
   }
+  if (ft.list_depth == 0 && (ft.which == TY_TEXT || ft.which == TY_DATA))
+    rc = getp_blob(s, (uint16_t)f->offset, &p);
+  else
+    rc = capnp_getp(s, (uint16_t)f->offset, &p);
+  if (rc == CAPNP_OK && !ptr_fits_type(&p, &ft))
+    rc = CAPNP_ERR_KIND;
   free_rtype(&ft);
-  rc = capnp_getp(s, (uint16_t)f->offset, &p);
   if (rc != CAPNP_OK)
     return rc;
   if (p.kind == CAPNP_PK_NULL && f->has_def_val) {

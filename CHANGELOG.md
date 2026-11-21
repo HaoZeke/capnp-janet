@@ -30,6 +30,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp_dyn_get_text` and `capnp_dyn_get_ptr` read Text and Data at any
+  depth and fail on corrupt pointers or pointers of the wrong kind, as
+  `DynamicStruct::Reader::get` does. They used to return the default.
 - `capnp-eval` exits with status 1 on usage errors, like `capnp`.
 - Text number literals follow the kj lexer: a leading zero reads octal
   digits only, so `08` and `09e1` are parse errors, and `0X` starts neither
