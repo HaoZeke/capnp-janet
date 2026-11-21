@@ -1115,6 +1115,17 @@ static const vscenario_t vat_diffs[] = {
     {"question reused after a Return without capabilities",
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0},
       {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 99, 0, 0},
+    {"call with onlyPromisePipeline",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0}}, 2, 2, 0, 0},
+    {"call with onlyPromisePipeline, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0}}, 3, 2, 0, 0},
+    {"call with noPromisePipelining",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 2}}, 1, 1, 0, 0},
+    {"call with onlyPromisePipeline reusing an active question",
+     {{VF_CALL, 0, VT_IMPORT, 0, 0, 0, 1}}, 1, 99, 0, 0},
     {"Abort",
      {{VF_ABORT, 0, 0, 0, 0, 0, 0}}, 1, 99, 0, 0},
     {"Abort carrying a remote exception",
@@ -1180,7 +1191,12 @@ static int build_target(const capnp_bptr_t *call, const vframe_t *f) {
 
 static int build_vcall(const capnp_bptr_t *slot0, const vframe_t *f) {
   capnp_bptr_t call, slot, payload, content;
+  /* For a call on an import, `count` bit 1 sets onlyPromisePipeline and
+   * bit 2 noPromisePipelining. */
+  uint32_t hints = f->target == VT_PROMISED ? 0 : f->count;
   return capnp_builder_struct(slot0, 3, 3, &call) ||
+         capnp_builder_set_bool(&call, 130, (hints & 1) != 0) ||
+         capnp_builder_set_bool(&call, 129, (hints & 2) != 0) ||
          capnp_builder_set_u32(&call, 0, f->qid) ||
          capnp_builder_set_u16(&call, 4, f->method) ||
          capnp_builder_set_u16(&call, 6, f->send_to) ||

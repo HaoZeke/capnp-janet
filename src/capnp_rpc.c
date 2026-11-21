@@ -32,6 +32,13 @@ static void questions_fail_all(capnp_rpc_conn_t *c);
 #define SLOT_MARKED 2
 /* A redirected answer whose results a takeFromOtherQuestion collected. */
 #define SLOT_TAKEN 3
+/* A call with onlyPromisePipeline, kept for pipelining and never
+ * returned. */
+#define SLOT_QUIET 4
+
+/* How keep_answer treats a Return: sent, kept for sendResultsTo.yourself,
+ * or kept without a word for onlyPromisePipeline. */
+enum { KEEP_SEND, KEEP_REDIRECT, KEEP_QUIET };
 /* Bits of a question's `used`: asked, sent with sendResultsTo.yourself,
  * and finished by us before its Return arrived. */
 #define Q_USED 1
@@ -90,6 +97,8 @@ static void questions_fail_all(capnp_rpc_conn_t *c);
 /* Call.sendResultsTo: union tag at byte 6, caller 0, yourself 1. */
 #define CALL_SENDRESULTSTO_OFF 6
 #define CALL_SENDRESULTSTO_YOURSELF 1
+/* Call.onlyPromisePipeline: the caller wants no Return. */
+#define CALL_ONLY_PIPELINE_BIT 130
 #define BOOTSTRAP_DW 1
 #define BOOTSTRAP_PW 1
 #define FINISH_DW 1
@@ -644,9 +653,10 @@ static int send_results_sent_elsewhere(capnp_rpc_conn_t *c, uint32_t qid);
  * can still find the capability it names. A call that asked for
  * sendResultsTo.yourself sends nothing yet: the kept Return waits for a
  * takeFromOtherQuestion, and resultsSentElsewhere goes out then or at
- * Finish, as rpc.c++ sends it. */
+ * Finish, as rpc.c++ sends it. One with onlyPromisePipeline is never
+ * sent at all. */
 static int keep_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid,
-                       int redirect)
+                       int mode)
 {
   uint8_t *flat = NULL;
   size_t len = 0;
@@ -657,20 +667,22 @@ static int keep_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid,
     if (!c->answers[i].used) {
       if (frame_store(c->answers[i].frame, &c->answers[i].len, flat, len) ==
           CAPNP_OK) {
-        c->answers[i].used = redirect ? SLOT_MARKED : 1;
+        c->answers[i].used = mode == KEEP_REDIRECT ? SLOT_MARKED
+                             : mode == KEEP_QUIET  ? SLOT_QUIET
+                                                   : 1;
         c->answers[i].question_id = qid;
       }
       break;
     }
   }
-  rc = redirect ? CAPNP_OK : c->send(c->send_ctx, flat, len);
+  rc = mode != KEEP_SEND ? CAPNP_OK : c->send(c->send_ctx, flat, len);
   free(flat);
   return rc;
 }
 
 static int flush_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid)
 {
-  return keep_answer(c, b, qid, 0);
+  return keep_answer(c, b, qid, KEEP_SEND);
 }
 
 static int flush(capnp_rpc_conn_t *c, capnp_builder_t *b)
@@ -740,7 +752,7 @@ static int write_exception(const capnp_bptr_t *body, uint16_t dwords,
  * pipelined on it fails with the same reason. A call that asked for
  * sendResultsTo.yourself keeps it for takeFromOtherQuestion. */
 static int answer_exception(capnp_rpc_conn_t *c, uint32_t qid,
-                            const char *reason, int redirect)
+                            const char *reason, int mode)
 {
   capnp_builder_t b;
   capnp_bptr_t ret;
@@ -750,7 +762,7 @@ static int answer_exception(capnp_rpc_conn_t *c, uint32_t qid,
   if (rc == CAPNP_OK)
     rc = write_exception(&ret, RETURN_DW, 0, reason);
   if (rc == CAPNP_OK)
-    rc = keep_answer(c, &b, qid, redirect);
+    rc = keep_answer(c, &b, qid, mode);
   capnp_builder_free(&b);
   return rc;
 }
@@ -888,10 +900,10 @@ static int handle_bootstrap(capnp_rpc_conn_t *c, const capnp_ptr_t *boot)
                             "exports.",
                             0);
   if (c->bootstrap == NULL)
-    return answer_exception(c, qid, "no bootstrap capability", 0);
+    return answer_exception(c, qid, "no bootstrap capability", KEEP_SEND);
   eid = capnp_rpc_export(c, c->bootstrap, c->bootstrap_dispatch);
   if (eid < 0)
-    return answer_exception(c, qid, "export table full", 0);
+    return answer_exception(c, qid, "export table full", KEEP_SEND);
 
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
@@ -1035,7 +1047,7 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   uint16_t send_to, which = TARGET_TAG_IMPORTEDCAP;
   const char *failure = NULL;
   char reason[256];
-  int eid = -1, rc, yourself;
+  int eid = -1, rc, yourself, mode;
 
   /* The checks and their order are rpc.c++ handleCall's: the target,
    * then sendResultsTo, then the question id. A null target reads as
@@ -1069,6 +1081,10 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   if (send_to > CALL_SENDRESULTSTO_YOURSELF)
     return protocol_abort(c, "Unsupported `Call.sendResultsTo`.");
   yourself = send_to == CALL_SENDRESULTSTO_YOURSELF;
+  /* rpc.c++ ignores onlyPromisePipeline on a call it redirects. */
+  mode = yourself ? KEEP_REDIRECT
+         : capnp_get_bool(call, CALL_ONLY_PIPELINE_BIT, 0) ? KEEP_QUIET
+                                                           : KEEP_SEND;
 
   /* The cap table describes the message, not the dispatch: a call this
    * vat cannot route still told us where a third party's capability
@@ -1081,11 +1097,13 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   if (answer_find(c, qid) != NULL) {
     /* rpc.c++ has already made the call's context by then, and that
      * context answers as it unwinds, before the Abort: canceled, or
-     * resultsSentElsewhere for results sent to the callee. */
+     * resultsSentElsewhere for results sent to the callee, and nothing
+     * for an onlyPromisePipeline call. */
     capnp_builder_t b;
     capnp_bptr_t ret;
     capnp_builder_init(&b);
-    if (build_return_tag(&b, qid,
+    if (mode != KEEP_QUIET &&
+        build_return_tag(&b, qid,
                          yourself ? RETURN_TAG_RESULTS_SENT_ELSEWHERE
                                   : RETURN_TAG_CANCELED,
                          &ret) == CAPNP_OK)
@@ -1095,7 +1113,7 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
                              "already in use");
   }
   if (failure != NULL)
-    return answer_exception(c, qid, failure, yourself);
+    return answer_exception(c, qid, failure, mode);
 
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
@@ -1121,20 +1139,20 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
         /* A method that fails is answered with an exception, as rpc.c++
          * does when one throws; otherwise the caller waits forever. */
         capnp_builder_free(&b);
-        return answer_exception(c, qid, "method failed", yourself);
+        return answer_exception(c, qid, "method failed", mode);
       }
       rc = write_cap_refs(&payload, caps.caps, caps.n);
     }
     /* Each export sent takes a reference the peer gives back with
      * Release. Redirected results stay here, as in rpc.c++, where they
      * are never written out and export nothing. */
-    for (i = 0; rc == CAPNP_OK && !yourself && i < caps.n; i++)
+    for (i = 0; rc == CAPNP_OK && mode == KEEP_SEND && i < caps.n; i++)
       if (caps.caps[i].kind == CAPNP_RPC_CAP_EXPORT)
         c->exports[caps.caps[i].id].refcount++;
     /* With no capability in the results nothing can be pipelined on
      * them, so rpc.c++ says no Finish is needed and forgets the answer,
      * which frees its question id. */
-    if (rc == CAPNP_OK && !yourself && caps.n == 0) {
+    if (rc == CAPNP_OK && mode == KEEP_SEND && caps.n == 0) {
       if (capnp_builder_set_bool(&ret, RETURN_NO_FINISH_BIT, 1))
         rc = CAPNP_ERR_ALLOC;
       else
@@ -1144,7 +1162,7 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
     }
   }
   if (rc == CAPNP_OK)
-    rc = keep_answer(c, &b, qid, yourself);
+    rc = keep_answer(c, &b, qid, mode);
   capnp_builder_free(&b);
   return rc;
 }

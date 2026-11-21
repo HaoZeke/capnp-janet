@@ -171,6 +171,40 @@ static int feed_release(capnp_rpc_conn_t *c, uint32_t id, uint32_t count)
   return rc;
 }
 
+/* A Call to import 0 with onlyPromisePipeline set, method `mid` and
+ * `arg` as its u32 param. */
+static int feed_quiet_call(capnp_rpc_conn_t *c, uint32_t qid, uint16_t mid,
+                           uint32_t arg)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, call, target, payload, params;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  int rc = CAPNP_ERR_ALLOC;
+  capnp_builder_init(&b);
+  if (capnp_builder_root(&b, &root) == CAPNP_OK &&
+      capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK &&
+      capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_CALL) == CAPNP_OK &&
+      capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 3, 3, &call) == CAPNP_OK &&
+      capnp_builder_set_u32(&call, 0, qid) == CAPNP_OK &&
+      capnp_builder_set_u16(&call, 4, mid) == CAPNP_OK &&
+      capnp_builder_set_u64(&call, 8, 0x1234) == CAPNP_OK &&
+      capnp_builder_set_bool(&call, 130, 1) == CAPNP_OK &&
+      capnp_builder_slot(&call, 3, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 1, 1, &target) == CAPNP_OK &&
+      capnp_builder_slot(&call, 3, 1, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 0, 2, &payload) == CAPNP_OK &&
+      capnp_builder_slot(&payload, 0, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 1, 0, &params) == CAPNP_OK &&
+      capnp_builder_set_u32(&params, 0, arg) == CAPNP_OK &&
+      capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK)
+    rc = capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+  return rc;
+}
+
 /* The one frame queued is an Abort whose reason is `reason` and whose
  * Exception.type, at byte 4, is `type`. */
 static int sent_abort_typed(queue_t *q, const char *reason, uint16_t type)
@@ -679,6 +713,32 @@ int main(void)
               g_to_vat.tail == 1,
           "results with a capability are finished");
     pump(&vat, &g_to_vat);
+  }
+
+  /* A call with onlyPromisePipeline is never returned, as rpc.c++ sends
+   * nothing for it; its answer stays for pipelining until Finish, and a
+   * capability in it takes no reference. */
+  {
+    int i, kept = 0, before = vat.exports[0].refcount;
+    q_drop(&g_to_client);
+    CHECK(feed_quiet_call(&vat, 900, 0, 4) == CAPNP_OK &&
+              g_to_client.tail == 0,
+          "onlyPromisePipeline gets no Return");
+    for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++)
+      kept |= vat.answers[i].used && vat.answers[i].question_id == 900;
+    CHECK(kept, "its answer stays for pipelining");
+    CHECK(feed_quiet_call(&vat, 901, 9, 0) == CAPNP_OK &&
+              g_to_client.tail == 0 && vat.exports[0].refcount == before,
+          "a capability in it takes no reference");
+    capnp_rpc_send_finish(&client, 900);
+    capnp_rpc_send_finish(&client, 901);
+    pump(&vat, &g_to_vat);
+    CHECK(g_to_client.tail == 0 && vat.exports[0].refcount == before,
+          "Finish sends and releases nothing");
+    for (i = 0, kept = 0; i < CAPNP_RPC_MAX_ANSWERS; i++)
+      kept |= vat.answers[i].used && (vat.answers[i].question_id == 900 ||
+                                      vat.answers[i].question_id == 901);
+    CHECK(!kept, "Finish drops the answers");
   }
 
   /* Kept results nobody takes are answered resultsSentElsewhere when the
