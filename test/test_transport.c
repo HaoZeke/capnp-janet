@@ -1037,6 +1037,10 @@ typedef struct {
    * an Unimplemented Resolve, `method` is the descriptor arm naming
    * export `tval`, and `send_to` nonzero sends an exception. */
   uint32_t count;
+  /* For a call, the low byte is how many capTable entries of the params
+   * name the caller's export 5, as senderHosted, or senderPromise with
+   * 0x100 set. Bits 24 to 27 pick a list of exports from `vf_id_lists`. */
+  uint32_t pcaps;
 } vframe_t;
 
 /* After a Bootstrap on question 0 has been answered, `frames` go to each
@@ -1059,201 +1063,308 @@ typedef struct {
 
 static const vscenario_t vat_diffs[] = {
     {"call to an unknown export",
-     {{VF_CALL, 1, VT_IMPORT, 99, 0, 0, 0}}, 1, 1, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 99, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
     {"call pipelined on a missing answer",
-     {{VF_CALL, 1, VT_PROMISED, 50, 0, 0, 0}}, 1, 1, 0, 0, 0},
+     {{VF_CALL, 1, VT_PROMISED, 50, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
     {"call pipelined on the bootstrap answer",
-     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
     {"call pipelined on a finished answer",
-     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0},
-      {VF_FINISH, 1, 0, 0, 0, 0, 0},
-      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0}}, 3, 2, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
     {"call pipelined on a failed answer",
-     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0},
-      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0}}, 2, 2, 1, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0, 0}}, 2, 2, 1, 0, 0},
     {"call with a null target",
-     {{VF_CALL, 1, VT_NULL, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
+     {{VF_CALL, 1, VT_NULL, 0, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
     {"call with an unknown target arm",
-     {{VF_CALL, 1, VT_UNKNOWN, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
+     {{VF_CALL, 1, VT_UNKNOWN, 0, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
     {"sendResultsTo.thirdParty",
-     {{VF_CALL, 1, VT_IMPORT, 0, 2, 0, 0}}, 1, 1, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 2, 0, 0, 0}}, 1, 1, 0, 0, 0},
     {"sendResultsTo unknown arm",
-     {{VF_CALL, 1, VT_IMPORT, 0, 7, 0, 0}}, 1, 1, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 7, 0, 0, 0}}, 1, 1, 0, 0, 0},
     {"call reusing an active question",
-     {{VF_CALL, 0, VT_IMPORT, 0, 0, 0, 0}}, 1, 99, 0, 0, 0},
+     {{VF_CALL, 0, VT_IMPORT, 0, 0, 0, 0, 0}}, 1, 99, 0, 0, 0},
     {"call with results sent to yourself reusing an active question",
-     {{VF_CALL, 0, VT_IMPORT, 0, 1, 0, 0}}, 1, 99, 0, 0, 0},
+     {{VF_CALL, 0, VT_IMPORT, 0, 1, 0, 0, 0}}, 1, 99, 0, 0, 0},
     {"call on a null promisedAnswer",
-     {{VF_CALL, 1, VT_PROMISED, NULL_ANSWER, 0, 0, 0}}, 1, 1, 0, 0, 0},
+     {{VF_CALL, 1, VT_PROMISED, NULL_ANSWER, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
     {"bootstrap reusing an active question",
-     {{VF_BOOT, 0, 0, 0, 0, 0, 0}}, 1, 0, 0, 0, 0},
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0}}, 1, 0, 0, 0, 0},
     {"bootstrap with deprecatedObjectId",
-     {{VF_BOOT, 1, 0, 0, 0, 0, 1}}, 1, 1, 0, 0, 0},
+     {{VF_BOOT, 1, 0, 0, 0, 0, 1, 0}}, 1, 1, 0, 0, 0},
     {"Finish for an unknown question",
-     {{VF_FINISH, 33, 0, 0, 0, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_FINISH, 33, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Return for an unknown question",
-     {{VF_RETURN, 5, 0, 0, 0, 0, 0}}, 1, 5, 0, 0, 0},
+     {{VF_RETURN, 5, 0, 0, 0, 0, 0, 0}}, 1, 5, 0, 0, 0},
     {"Unimplemented for a Call",
-     {{VF_UNIMPL, 1, VT_IMPORT, 0, 0, 0, 0}}, 1, 99, 0, 0, 0},
+     {{VF_UNIMPL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 1, 99, 0, 0, 0},
     {"Unimplemented for a Resolve of the bootstrap",
-     {{VF_UNIMPL_RESOLVE, 0, 0, 0, 0, 1, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_UNIMPL_RESOLVE, 0, 0, 0, 0, 1, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Unimplemented for a Resolve of an unknown export",
-     {{VF_UNIMPL_RESOLVE, 0, 0, 77, 0, 2, 0}}, 1, 99, 0, 0, 0},
+     {{VF_UNIMPL_RESOLVE, 0, 0, 77, 0, 2, 0, 0}}, 1, 99, 0, 0, 0},
     {"Unimplemented for a Resolve to an exception",
-     {{VF_UNIMPL_RESOLVE, 0, 0, 0, 1, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_UNIMPL_RESOLVE, 0, 0, 0, 1, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"call pipelined through the bootstrap capability",
-     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1}}, 1, 1, 0, 0, 0},
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1, 0}}, 1, 1, 0, 0, 0},
     {"call pipelined through a field with no capability",
-     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0},
-      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 1}}, 2, 2, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 1, 0}}, 2, 2, 0, 0, 0},
     {"call pipelined on results that are no capability",
-     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0},
-      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0}}, 2, 2, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
     {"results sent to yourself, then a call",
-     {{VF_CALL, 1, VT_IMPORT, 0, 1, 0, 0},
-      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 1, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
     {"results sent to yourself, then Finish",
-     {{VF_CALL, 1, VT_IMPORT, 0, 1, 0, 0},
-      {VF_FINISH, 1, 0, 0, 0, 0, 0},
-      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 1, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
     {"question reused after a Return without capabilities",
-     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
     {"call with onlyPromisePipeline",
-     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1},
-      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
     {"call with onlyPromisePipeline, then Finish",
-     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1},
-      {VF_FINISH, 1, 0, 0, 0, 0, 0},
-      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
     {"call with noPromisePipelining",
-     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 2}}, 1, 1, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 2, 0}}, 1, 1, 0, 0, 0},
     {"call with onlyPromisePipeline reusing an active question",
-     {{VF_CALL, 0, VT_IMPORT, 0, 0, 0, 1}}, 1, 99, 0, 0, 0},
+     {{VF_CALL, 0, VT_IMPORT, 0, 0, 0, 1, 0}}, 1, 99, 0, 0, 0},
     {"message type 20",
-     {{VF_TAG, 0, 0, 0, 0, 20, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_TAG, 0, 0, 0, 0, 20, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"obsolete Save",
-     {{VF_TAG, 0, 0, 0, 0, 7, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_TAG, 0, 0, 0, 0, 7, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"obsolete Delete",
-     {{VF_TAG, 0, 0, 0, 0, 9, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_TAG, 0, 0, 0, 0, 9, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Disembargo senderLoopback to the bootstrap",
-     {{VF_DISEMBARGO, 0, 0, 0, 0, 0, 3},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, 0, 0, 0, 0, 3, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Disembargo receiverLoopback",
-     {{VF_DISEMBARGO, 0, 0, 0, 1, 0, 3},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, 0, 0, 1, 0, 3, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Disembargo to an unknown export",
-     {{VF_DISEMBARGO, 0, 0, 55, 0, 0, 3},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, 0, 55, 0, 0, 3, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Resolve of an unknown promise to a capability",
-     {{VF_RESOLVE, 7, 0, 3, 0, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_RESOLVE, 7, 0, 3, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Resolve of an unknown promise to an exception",
-     {{VF_RESOLVE, 7, 0, 0, 1, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_RESOLVE, 7, 0, 0, 1, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Resolve of an unknown promise to a capability under its id",
-     {{VF_RESOLVE, 3, 0, 3, 0, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+     {{VF_RESOLVE, 3, 0, 3, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
     {"Resolve of an unknown promise to a promise under its id",
-     {{VF_RESOLVE, 3, 0, 3, 4, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+     {{VF_RESOLVE, 3, 0, 3, 4, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
     {"Resolve to CapDescriptor.none",
-     {{VF_RESOLVE, 7, 0, 0, 2, 0, 0}}, 1, 99, 0, 0, 0},
+     {{VF_RESOLVE, 7, 0, 0, 2, 0, 0, 0}}, 1, 99, 0, 0, 0},
     {"Resolve with an unknown arm",
-     {{VF_RESOLVE, 7, 0, 0, 3, 0, 0}}, 1, 99, 0, 0, 0},
+     {{VF_RESOLVE, 7, 0, 0, 3, 0, 0, 0}}, 1, 99, 0, 0, 0},
     {"Return for a high question id",
-     {{VF_RETURN, 0x80000005u, 0, 0, 0, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_RETURN, 0x80000005u, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Provide, which this vat serves at level 3",
-     {{VF_TAG, 0, 0, 0, 0, 10, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
+     {{VF_TAG, 0, 0, 0, 0, 10, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
     {"Accept, which this vat serves at level 3",
-     {{VF_TAG, 0, 0, 0, 0, 11, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
+     {{VF_TAG, 0, 0, 0, 0, 11, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
     {"Join, which this vat serves at level 3",
-     {{VF_TAG, 0, 0, 0, 0, 12, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
+     {{VF_TAG, 0, 0, 0, 0, 12, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
     {"Disembargo accept",
-     {{VF_DISEMBARGO, 0, 0, 3, 2, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, 0, 3, 2, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Disembargo provide naming no Provide",
-     {{VF_DISEMBARGO, 0, 0, 0, 3, 0, 4},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, 0, 0, 3, 0, 4, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Disembargo with an unknown context arm",
-     {{VF_DISEMBARGO, 0, 0, 0, 9, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, 0, 0, 9, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Disembargo accept on a promised answer with a transform",
-     {{VF_DISEMBARGO, 0, VT_PROMISED, 5, 2, 3, 0}}, 1, 99, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 5, 2, 3, 0, 0}}, 1, 99, 0, 0, 0},
     {"Disembargo provide on a promised answer with an unknown op",
-     {{VF_DISEMBARGO, 0, VT_PROMISED, 2, 3, 0x101, 7}}, 1, 99, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 2, 3, 0x101, 7, 0}}, 1, 99, 0, 0, 0},
     {"Disembargo accept on a null promised answer",
-     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 2, 0x400, 0}}, 1, 99, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 2, 0x400, 0, 0}}, 1, 99, 0, 0, 0},
     {"Disembargo accept on an empty transform",
-     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 2, 0x200, 0}}, 1, 99, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 2, 0x200, 0, 0}}, 1, 99, 0, 0, 0},
     {"Disembargo accept with no target",
-     {{VF_DISEMBARGO, 0, VT_NULL, 0, 2, 0, 0}}, 1, 99, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, VT_NULL, 0, 2, 0, 0, 0}}, 1, 99, 0, 0, 0},
     {"Disembargo provide on an unknown target arm",
-     {{VF_DISEMBARGO, 0, VT_UNKNOWN, 0, 3, 0, 4294967295u}}, 1, 99, 0, 0, 0},
+     {{VF_DISEMBARGO, 0, VT_UNKNOWN, 0, 3, 0, 4294967295u, 0}}, 1, 99, 0, 0, 0},
     {"unknown method",
-     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0}}, 1, 1, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 0}}, 1, 1, 0, 0, 0},
     {"call pipelined on an unknown method's answer",
-     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0},
-      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0}}, 2, 2, 0, 0, 0},
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
     {"Abort",
-     {{VF_ABORT, 0, 0, 0, 0, 0, 0}}, 1, 99, 0, 0, 0},
+     {{VF_ABORT, 0, 0, 0, 0, 0, 0, 0}}, 1, 99, 0, 0, 0},
     {"Abort carrying a remote exception",
-     {{VF_ABORT, 0, 0, 0, 1, 0, 0}}, 1, 99, 0, 0, 0},
+     {{VF_ABORT, 0, 0, 0, 1, 0, 0, 0}}, 1, 99, 0, 0, 0},
     {"Abort of type disconnected",
-     {{VF_ABORT, 0, 0, 0, 0, 2, 0}}, 1, 99, 0, 0, 0},
+     {{VF_ABORT, 0, 0, 0, 0, 2, 0, 0}}, 1, 99, 0, 0, 0},
     {"Abort carrying a remote exception of type unimplemented",
-     {{VF_ABORT, 0, 0, 0, 1, 3, 0}}, 1, 99, 0, 0, 0},
+     {{VF_ABORT, 0, 0, 0, 1, 3, 0, 0}}, 1, 99, 0, 0, 0},
     {"Release of an unknown export",
-     {{VF_RELEASE, 99, 0, 0, 0, 0, 1}}, 1, 99, 0, 0, 0},
+     {{VF_RELEASE, 99, 0, 0, 0, 0, 1, 0}}, 1, 99, 0, 0, 0},
     {"Release beyond the reference count",
-     {{VF_RELEASE, 0, 0, 0, 0, 0, 5}}, 1, 99, 0, 0, 0},
+     {{VF_RELEASE, 0, 0, 0, 0, 0, 5, 0}}, 1, 99, 0, 0, 0},
     {"Release of the last reference",
-     {{VF_RELEASE, 0, 0, 0, 0, 0, 1},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+     {{VF_RELEASE, 0, 0, 0, 0, 0, 1, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Finish releasing a released result",
-     {{VF_RELEASE, 0, 0, 0, 0, 0, 1},
-      {VF_FINISH, 0, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+     {{VF_RELEASE, 0, 0, 0, 0, 0, 1, 0},
+      {VF_FINISH, 0, 0, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+    {"capability in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"one capability twice in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 2},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"promise in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0x101},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of a failing call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of a failing call, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"capability in the params of a call returning one",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of a call returning one, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"capability in the params of a call sent to yourself",
+     {{VF_CALL, 1, VT_IMPORT, 0, 1, 0, 0, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of a call sent to yourself, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 1, 0, 0, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"capability in the params of an onlyPromisePipeline call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of an onlyPromisePipeline call, released "
+     "later by capnp-C++",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 99, 0, 1, 0},
+    {"capability in the params of an onlyPromisePipeline call, Finish alone",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+    {"capability in the params of a pipelined call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 1, 1},
+      {VF_CALL, 3, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 3, 0, 0, 0},
+    {"capability in the params of a call on a reused question",
+     {{VF_CALL, 0, VT_IMPORT, 0, 0, 0, 0, 1}}, 1, 99, 0, 0, 0},
+    {"capability in the params of a call to an unknown export",
+     {{VF_CALL, 1, VT_IMPORT, 99, 0, 0, 0, 1}}, 1, 99, 0, 0, 0},
+    {"capability in the params of a call on a missing answer",
+     {{VF_CALL, 1, VT_PROMISED, 50, 0, 0, 0, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of a call sent to a third party",
+     {{VF_CALL, 1, VT_IMPORT, 0, 2, 0, 0, 1}}, 1, 99, 0, 0, 0},
+    {"Resolve of an import a call's params carry",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
+      {VF_RESOLVE, 5, 0, 8, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+    {"Resolve of an import a call's params carry to that import",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
+      {VF_RESOLVE, 5, 0, 5, 0, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Resolve of a promise a call's params carry to itself",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 5, 4, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Resolve of a promise a call's params carry to a capability under its id",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 5, 0, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Resolve of a promise a call's params carry",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 8, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"Resolve of a promise a call's params carry, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 8, 0, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"two Resolves of a promise a call's params carry",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 8, 0, 0, 0, 0},
+      {VF_RESOLVE, 5, 0, 9, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Resolve to an exception of a promise a call's params carry",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 0, 1, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"three capabilities in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u << 24},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"repeated capabilities in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 2u << 24},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"two capabilities in the params of a call returning one, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 3u << 24},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"Finish releasing a released result with a capability in the params",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
+      {VF_RELEASE, 0, 0, 0, 0, 0, 2, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
     {"Bootstrap of a vat with no bootstrap capability",
-     {{VF_BOOT, 0, 0, 0, 0, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0, 1},
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 1},
     {"Disembargo senderLoopback to a missing bootstrap",
-     {{VF_BOOT, 0, 0, 0, 0, 0, 0},
-      {VF_DISEMBARGO, 0, VT_IMPORT, 0, 0, 0, 0}}, 2, 99, 0, 0, 1},
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_DISEMBARGO, 0, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 1},
     {"Disembargo senderLoopback pipelined on a missing bootstrap",
-     {{VF_BOOT, 0, 0, 0, 0, 0, 0},
-      {VF_DISEMBARGO, 0, VT_PROMISED, 0, 0, 0, 0}}, 2, 99, 0, 0, 1},
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_DISEMBARGO, 0, VT_PROMISED, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 1},
     {"call pipelined on a missing bootstrap",
-     {{VF_BOOT, 0, 0, 0, 0, 0, 0},
-      {VF_CALL, 1, VT_PROMISED, 0, 0, 0, 0}}, 2, 1, 0, 0, 1},
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_PROMISED, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 1},
     {"Release of a missing bootstrap",
-     {{VF_BOOT, 0, 0, 0, 0, 0, 0},
-      {VF_RELEASE, 0, 0, 0, 0, 0, 1},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 3, 1, 0, 0, 1},
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_RELEASE, 0, 0, 0, 0, 0, 1, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 1, 0, 0, 1},
     {"two Bootstraps with no bootstrap capability",
-     {{VF_BOOT, 0, 0, 0, 0, 0, 0},
-      {VF_BOOT, 1, 0, 0, 0, 0, 0},
-      {VF_CALL, 2, VT_IMPORT, 1, 0, 0, 0}}, 3, 2, 0, 0, 1},
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_BOOT, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 1, 0, 0, 0, 0}}, 3, 2, 0, 0, 1},
     {"Finish of a missing bootstrap",
-     {{VF_BOOT, 0, 0, 0, 0, 0, 0},
-      {VF_FINISH, 0, 0, 0, 0, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 3, 1, 0, 0, 1},
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_FINISH, 0, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 1, 0, 0, 1},
 };
 #define N_VAT_DIFFS (sizeof vat_diffs / sizeof vat_diffs[0])
 
-/* Method 0 adds; any other method fails as the generated C++ server
- * fails an unknown one. */
+/* Method 0 adds and method 2 returns the bootstrap capability; any
+ * other method fails as the generated C++ server fails an unknown one. */
 static int vd_dispatch(void *server, uint64_t interface_id, uint16_t method_id,
                        const capnp_ptr_t *params, const capnp_bptr_t *results) {
+  if (method_id == 2) {
+    capnp_rpc_cap_ref_t self = {CAPNP_RPC_CAP_EXPORT, 0};
+    capnp_bptr_t body;
+    int idx = capnp_rpc_result_cap(&self);
+    if (idx < 0 || capnp_builder_struct(results, 0, 1, &body))
+      return CAPNP_ERR_ALLOC;
+    return capnp_builder_set_cap(&body, 0, 0, (uint32_t)idx);
+  }
   if (method_id != 0) {
     (void)capnp_rpc_unimplemented("adder.capnp:Adder", interface_id,
                                   method_id);
@@ -1300,25 +1411,49 @@ static int build_target(const capnp_bptr_t *call, const vframe_t *f) {
   }
 }
 
+/* Export lists a call's capTable can name, picked by bits 24 to 27 of
+ * `pcaps`; the first entry of each is its length. */
+static const uint32_t vf_id_lists[][6] = {
+    {0},
+    {3, 5, 6, 7},
+    {5, 5, 6, 5, 7, 6},
+    {2, 5, 6},
+};
+
 static int build_vcall(const capnp_bptr_t *slot0, const vframe_t *f) {
-  capnp_bptr_t call, slot, payload, content;
+  capnp_bptr_t call, slot, payload, content, table, e;
   /* For a call on an import, `count` bit 1 sets onlyPromisePipeline and
    * bit 2 noPromisePipelining. */
   uint32_t hints = f->target == VT_PROMISED ? 0 : f->count;
-  return capnp_builder_struct(slot0, 3, 3, &call) ||
-         capnp_builder_set_bool(&call, 130, (hints & 1) != 0) ||
-         capnp_builder_set_bool(&call, 129, (hints & 2) != 0) ||
-         capnp_builder_set_u32(&call, 0, f->qid) ||
-         capnp_builder_set_u16(&call, 4, f->method) ||
-         capnp_builder_set_u16(&call, 6, f->send_to) ||
-         capnp_builder_set_u64(&call, 8, ADDER_IFACE) ||
-         build_target(&call, f) ||
-         capnp_builder_slot(&call, 3, 1, &slot) ||
-         capnp_builder_struct(&slot, 0, 2, &payload) ||
-         capnp_builder_slot(&payload, 0, 0, &slot) ||
-         capnp_builder_struct(&slot, 2, 0, &content) ||
-         capnp_builder_set_u64(&content, 0, 20) ||
-         capnp_builder_set_u64(&content, 8, 22);
+  uint32_t list = (f->pcaps >> 24) & 0xf;
+  uint32_t i, n = list ? vf_id_lists[list][0] : f->pcaps & 0xff;
+  if (capnp_builder_struct(slot0, 3, 3, &call) ||
+      capnp_builder_set_bool(&call, 130, (hints & 1) != 0) ||
+      capnp_builder_set_bool(&call, 129, (hints & 2) != 0) ||
+      capnp_builder_set_u32(&call, 0, f->qid) ||
+      capnp_builder_set_u16(&call, 4, f->method) ||
+      capnp_builder_set_u16(&call, 6, f->send_to) ||
+      capnp_builder_set_u64(&call, 8, ADDER_IFACE) ||
+      build_target(&call, f) ||
+      capnp_builder_slot(&call, 3, 1, &slot) ||
+      capnp_builder_struct(&slot, 0, 2, &payload) ||
+      capnp_builder_slot(&payload, 0, 0, &slot) ||
+      capnp_builder_struct(&slot, 2, 0, &content) ||
+      capnp_builder_set_u64(&content, 0, 20) ||
+      capnp_builder_set_u64(&content, 8, 22))
+    return -1;
+  if (n == 0)
+    return 0;
+  if (capnp_builder_set_list_struct(&payload, 1, 0, n, 1, 1, &table))
+    return -1;
+  for (i = 0; i < n; i++) {
+    e = table;
+    e.word += (size_t)i * 2;
+    if (capnp_builder_set_u16(&e, 0, (f->pcaps & 0x100) ? 2 : 1) ||
+        capnp_builder_set_u32(&e, 4, list ? vf_id_lists[list][i + 1] : 5))
+      return -1;
+  }
+  return 0;
 }
 
 static int build_dis_promised(const capnp_bptr_t *target, const vframe_t *f) {
@@ -1541,6 +1676,9 @@ static int describe_reply(const uint8_t *frame, size_t n, uint32_t until,
         snprintf(ev, sizeof ev, "return %u arm %u", (unsigned)aid,
                  (unsigned)arm);
       }
+      /* Stored inverted: a clear bit is the default, true. */
+      if (!capnp_get_bool(&body, 32, 0))
+        strncat(ev, " releaseParamCaps", sizeof ev - strlen(ev) - 1);
       end = aid == until;
     } else if (tag == CAPNP_RPC_MSG_UNIMPLEMENTED) {
       snprintf(ev, sizeof ev, "unimplemented %u",
@@ -1641,7 +1779,7 @@ static void vd_local(const vscenario_t *s, char *out, size_t cap) {
   uint8_t *f = NULL;
   size_t n = 0;
   int i, end = 0;
-  vframe_t boot = {VF_BOOT, 0, 0, 0, 0, 0, 0};
+  vframe_t boot = {VF_BOOT, 0, 0, 0, 0, 0, 0, 0};
   out[0] = 0;
   capnp_rpc_init(&c, vd_capture, NULL);
   if (!s->noboot) {
@@ -1680,7 +1818,7 @@ static void vd_remote(uint16_t port, const vscenario_t *s, char *out,
   uint8_t *f = NULL;
   size_t n = 0;
   int fd, i, end = 0, got_boot = 0;
-  vframe_t boot = {VF_BOOT, 0, 0, 0, 0, 0, 0};
+  vframe_t boot = {VF_BOOT, 0, 0, 0, 0, 0, 0, 0};
   out[0] = 0;
   fd = socket(AF_INET, SOCK_STREAM, 0);
   memset(&addr, 0, sizeof addr);
@@ -1807,6 +1945,20 @@ static const struct {
     {"call pipelined on results that are no capability",
      "return 1 results 42 | return 2 exception: Pipeline call on a request "
      "that returned no capabilities or was already closed."},
+    {"three capabilities in the params of a call",
+     "return 1 results 42 | release 7 x1 | release 6 x1 | release 5 "
+     "x1 | return 2 results 42"},
+    {"repeated capabilities in the params of a call",
+     "return 1 results 42 | release 7 x1 | release 6 x2 | release 5 "
+     "x2 | return 2 results 42"},
+    {"two capabilities in the params of a call returning one, then "
+     "Finish",
+     "return 1 results 0 | release 6 x1 | release 5 x1 | return 2 "
+     "results 42"},
+    {"Finish releasing a released result with a capability in the "
+     "params",
+     "return 1 results 0 | release 5 x1 | abort: Tried to release "
+     "invalid export ID."},
 };
 
 static void test_vat_recorded(void) {

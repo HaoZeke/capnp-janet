@@ -116,6 +116,12 @@ Pre-1.0 minor releases may include breaking API changes.
   rpc.c++ answers it: a `senderPromise` that a Resolve then breaks with
   `This vat does not expose any public/bootstrap interfaces.`. A
   `senderLoopback` Disembargo to it aborts with that reason.
+- Capabilities in a call's params are released as rpc.c++ releases
+  them, and the call's Return says `releaseParamCaps` false. They used
+  to stay imported for the life of the connection.
+- A call's params capabilities are released last to first, as rpc.c++
+  destroys its capability array, and a Finish releases them before the
+  answer's result exports. They used to go first to last, and after.
 - The JSON encoder follows every pointer under a `Json.Value`, as the
   copy in `JsonValueHandler` does, and fails on one it cannot read. A
   corrupt pointer the active member never reads used to pass, where

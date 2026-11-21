@@ -253,6 +253,85 @@ static int feed_resolve(capnp_rpc_conn_t *c, uint32_t pid, uint16_t arm,
   return rc;
 }
 
+/* A Call `qid` of method `mid` to import 0 whose params carry one
+ * capability, capTable arm `arm` naming `id`. `flags` bit 1 sets
+ * onlyPromisePipeline and bit 2 sends the results to the callee. */
+static int feed_cap_call(capnp_rpc_conn_t *c, uint32_t qid, uint16_t mid,
+                         int flags, uint16_t arm, uint32_t id)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, call, target, payload, params, table;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  int rc = CAPNP_ERR_ALLOC;
+  capnp_builder_init(&b);
+  if (capnp_builder_root(&b, &root) == CAPNP_OK &&
+      capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK &&
+      capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_CALL) == CAPNP_OK &&
+      capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 3, 3, &call) == CAPNP_OK &&
+      capnp_builder_set_u32(&call, 0, qid) == CAPNP_OK &&
+      capnp_builder_set_u16(&call, 4, mid) == CAPNP_OK &&
+      capnp_builder_set_u16(&call, 6, (flags & 2) ? 1 : 0) == CAPNP_OK &&
+      capnp_builder_set_u64(&call, 8, 0x1234) == CAPNP_OK &&
+      capnp_builder_set_bool(&call, 130, (flags & 1) != 0) == CAPNP_OK &&
+      capnp_builder_slot(&call, 3, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 1, 1, &target) == CAPNP_OK &&
+      capnp_builder_slot(&call, 3, 1, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 0, 2, &payload) == CAPNP_OK &&
+      capnp_builder_slot(&payload, 0, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 1, 0, &params) == CAPNP_OK &&
+      capnp_builder_set_list_struct(&payload, 1, 0, 1, 1, 1, &table) ==
+          CAPNP_OK &&
+      capnp_builder_set_u16(&table, 0, arm) == CAPNP_OK &&
+      capnp_builder_set_u32(&table, 4, id) == CAPNP_OK &&
+      capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK)
+    rc = capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+/* A Finish of question `qid`. */
+static int feed_finish(capnp_rpc_conn_t *c, uint32_t qid)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, fin;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  int rc = CAPNP_ERR_ALLOC;
+  capnp_builder_init(&b);
+  if (capnp_builder_root(&b, &root) == CAPNP_OK &&
+      capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK &&
+      capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_FINISH) == CAPNP_OK &&
+      capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 1, 0, &fin) == CAPNP_OK &&
+      capnp_builder_set_u32(&fin, 0, qid) == CAPNP_OK &&
+      capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK)
+    rc = capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+/* Frame `i` of `q` is a Return for `qid` with arm `arm` and
+ * releaseParamCaps false, which is stored inverted at bit 32. */
+static int frame_call_return(queue_t *q, int i, uint32_t qid, uint16_t arm)
+{
+  capnp_message_t m = {0};
+  capnp_ptr_t r, ret;
+  int ok = i < q->tail &&
+           capnp_message_from_flat(&m, q->data[i], q->len[i]) == CAPNP_OK &&
+           capnp_root(&m, &r) == CAPNP_OK &&
+           capnp_get_u16(&r, 0, 0) == CAPNP_RPC_MSG_RETURN &&
+           capnp_getp(&r, 0, &ret) == CAPNP_OK &&
+           capnp_get_u32(&ret, 0, 0) == qid &&
+           capnp_get_u16(&ret, 6, 0) == arm &&
+           capnp_get_bool(&ret, 32, 0);
+  capnp_message_free(&m);
+  return ok;
+}
+
 /* A Return of results for `answer` whose content is the capability
  * capTable entry 0 describes: arm `arm` naming `id`. */
 static int feed_cap_return(capnp_rpc_conn_t *c, uint32_t answer, uint16_t arm,
@@ -1015,6 +1094,74 @@ int main(void)
               sent_release(&g_to_vat, 6, 2),
           "import: the last release gives that reference back");
     capnp_rpc_free(&h);
+  }
+
+  /* Capabilities in a call's params stay imported for as long as
+   * rpc.c++ keeps the call's context: until the Return when it leaves
+   * nothing to pipeline on, and otherwise until Finish. The Return says
+   * releaseParamCaps false. */
+  {
+    static capnp_rpc_conn_t v, boot;
+    capnp_rpc_init(&v, send_to_client, NULL);
+    capnp_rpc_set_bootstrap(&v, &doubler_calls, doubler_dispatch);
+    capnp_rpc_init(&boot, send_to_vat, NULL);
+    (void)capnp_rpc_send_bootstrap(&boot);
+    pump(&v, &g_to_vat);
+    capnp_rpc_free(&boot);
+    q_drop(&g_to_client);
+    CHECK(feed_cap_call(&v, 1, 0, 0, 1, 5) == CAPNP_OK &&
+              g_to_client.tail == 2 && frame_call_return(&g_to_client, 0, 1, 0) &&
+              frame_release(&g_to_client, 1, 5, 1),
+          "params: released after a Return with no capability");
+    q_drop(&g_to_client);
+    CHECK(feed_cap_call(&v, 2, 7, 0, 2, 5) == CAPNP_OK &&
+              g_to_client.tail == 1 && frame_call_return(&g_to_client, 0, 2, 0),
+          "params: a promise stays while results can be pipelined on");
+    q_drop(&g_to_client);
+    CHECK(feed_cap_call(&v, 3, 12, 0, 1, 7) == CAPNP_OK &&
+              g_to_client.tail == 2 && frame_call_return(&g_to_client, 0, 3, 1) &&
+              frame_release(&g_to_client, 1, 7, 1),
+          "params: released after an exception");
+    q_drop(&g_to_client);
+    CHECK(feed_finish(&v, 3) == CAPNP_OK && g_to_client.tail == 0,
+          "params: Finish of a failed call releases nothing more");
+    CHECK(feed_finish(&v, 2) == CAPNP_OK && sent_release(&g_to_client, 5, 1),
+          "params: Finish releases the promise");
+    CHECK(feed_cap_call(&v, 4, 0, 1, 1, 6) == CAPNP_OK &&
+              g_to_client.tail == 0,
+          "params: a quiet call keeps them");
+    CHECK(feed_cap_call(&v, 5, 0, 2, 1, 6) == CAPNP_OK &&
+              g_to_client.tail == 0,
+          "params: a redirected call keeps them");
+    CHECK(feed_finish(&v, 4) == CAPNP_OK && g_to_client.tail == 0,
+          "params: one import, two calls, one Finish");
+    CHECK(feed_finish(&v, 5) == CAPNP_OK && g_to_client.tail == 2 &&
+              frame_call_return(&g_to_client, 0, 5, 3) &&
+              frame_release(&g_to_client, 1, 6, 2),
+          "params: the last Finish releases every reference");
+    q_drop(&g_to_client);
+
+    /* A promise only calls hold is settled by its Resolve: released at
+     * once, with the replacement taking its place until Finish. */
+    CHECK(feed_cap_call(&v, 6, 7, 0, 2, 8) == CAPNP_OK, "params: promise 8");
+    q_drop(&g_to_client);
+    CHECK(feed_resolve(&v, 8, 1, 9) == CAPNP_OK &&
+              sent_release(&g_to_client, 8, 1),
+          "params: a Resolve releases the promise");
+    CHECK(feed_resolve(&v, 8, 1, 10) == CAPNP_OK &&
+              sent_release(&g_to_client, 10, 1),
+          "params: a second Resolve names an unknown promise");
+    CHECK(feed_finish(&v, 6) == CAPNP_OK && sent_release(&g_to_client, 9, 1),
+          "params: Finish releases the replacement");
+    CHECK(feed_cap_call(&v, 7, 7, 0, 1, 11) == CAPNP_OK, "params: import 11");
+    q_drop(&g_to_client);
+    CHECK(feed_resolve(&v, 11, 1, 12) == CAPNP_ERR_KIND &&
+              g_to_client.tail == 2 && frame_release(&g_to_client, 0, 12, 1) &&
+              frame_abort(&g_to_client, 1,
+                          "Got 'Resolve' for a non-promise import.", 0),
+          "params: a Resolve of a hosted import aborts");
+    q_drop(&g_to_client);
+    capnp_rpc_free(&v);
   }
 
   /* Kept results nobody takes are answered resultsSentElsewhere when the

@@ -68,7 +68,10 @@ struct capnp_rpc_conn;
 /* Handle one call on an exported capability. `results` is the empty
  * content pointer in the return Payload. Allocate the result struct
  * with capnp_builder_struct at whatever size the method returns, then
- * fill that body. Return 0 to answer, non-zero for an exception. */
+ * fill that body. Return 0 to answer, non-zero for an exception.
+ * Capabilities the caller put in the params are released as rpc.c++
+ * releases them: after a Return with no capability in it, after an
+ * exception, and otherwise when the caller finishes the call. */
 typedef int (*capnp_rpc_dispatch_fn)(void *server, uint64_t interface_id,
                                      uint16_t method_id,
                                      const capnp_ptr_t *params,
@@ -253,7 +256,8 @@ CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
  * exports no promise for one to name. A Disembargo with any other
  * context aborts too, unless it is a provide naming a Provide this vat
  * holds, which lifts that Accept's embargo. So does a Resolve naming an
- * import a Return handed us as senderHosted and not yet released. */
+ * import that a Return or a running call's params handed us as
+ * senderHosted, and that is not yet released. */
 CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
 
 /* --- client side -------------------------------------------------- */

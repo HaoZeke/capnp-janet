@@ -221,15 +221,32 @@ static void question_drop(capnp_rpc_question_t *q)
  * on first use and freed by capnp_rpc_free or the next capnp_rpc_init at
  * that address. A connection is used by one thread at a time; the lock
  * covers only the list. */
+/* An import rpc.c++ would keep in its import table. */
 typedef struct {
+  /* Unique for the connection: a call's holds name the entry by key, as
+   * its id may be reused once released. */
+  uint64_t key;
   uint32_t id;
+  /* References from Returns, which the application releases itself. */
+  uint32_t app;
+  /* References from call params, released together once no call holds
+   * the import. */
   uint32_t refs;
-  /* References a Resolve added, given back with the last of `refs`. */
-  uint32_t extra;
+  uint32_t holds;
   /* The first descriptor naming it was senderPromise, which rpc.c++
    * gives a fulfiller that a Resolve may settle. */
   int promise;
+  /* A Resolve settled this promise: it is off the table under `id`, and
+   * its holders now hold the import keyed `to`, or nothing when 0. */
+  int settled;
+  uint64_t to;
 } rpc_import_t;
+
+/* A call that keeps the import keyed `key` until it is finished. */
+typedef struct {
+  uint32_t qid;
+  uint64_t key;
+} rpc_hold_t;
 
 typedef struct rpc_side {
   const capnp_rpc_conn_t *conn;
@@ -237,9 +254,11 @@ typedef struct rpc_side {
   /* This vat has sent Abort. rpc.c++ reads nothing after that, so the
    * peer's Abort in reply goes unanswered. */
   int aborted;
-  /* Imports the peer's Returns handed us that are not yet released. */
   rpc_import_t *imports;
   size_t nimports, cimports;
+  uint64_t next_key;
+  rpc_hold_t *holds;
+  size_t nholds, cholds;
 } rpc_side_t;
 
 static pthread_mutex_t side_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -275,8 +294,10 @@ static void side_drop(const capnp_rpc_conn_t *c)
     }
   }
   pthread_mutex_unlock(&side_lock);
-  if (s != NULL)
+  if (s != NULL) {
     free(s->imports);
+    free(s->holds);
+  }
   free(s);
 }
 
@@ -284,54 +305,172 @@ static rpc_import_t *import_find(rpc_side_t *s, uint32_t id)
 {
   size_t i;
   for (i = 0; s != NULL && i < s->nimports; i++)
-    if (s->imports[i].id == id)
+    if (s->imports[i].id == id && !s->imports[i].settled)
       return &s->imports[i];
   return NULL;
 }
 
-/* One more reference to import `id`, as rpc.c++ counts each descriptor
- * that names it. */
-static void import_add(capnp_rpc_conn_t *c, uint32_t id, int promise)
+static rpc_import_t *import_by_key(rpc_side_t *s, uint64_t key)
 {
-  rpc_side_t *s = side_get(c, 1);
-  rpc_import_t *im = import_find(s, id);
-  if (s == NULL)
-    return;
-  if (im == NULL) {
-    if (s->nimports == s->cimports) {
-      size_t n = s->cimports ? s->cimports * 2 : 8;
-      rpc_import_t *grown =
-          (rpc_import_t *)realloc(s->imports, n * sizeof *grown);
-      if (grown == NULL)
-        return;
-      s->imports = grown;
-      s->cimports = n;
-    }
-    im = &s->imports[s->nimports++];
-    im->id = id;
-    im->refs = 0;
-    im->extra = 0;
-    im->promise = promise;
-  }
-  im->refs++;
+  size_t i;
+  for (i = 0; s != NULL && i < s->nimports; i++)
+    if (s->imports[i].key == key)
+      return &s->imports[i];
+  return NULL;
 }
 
-/* Drop `count` references; the last one also gives back those a
- * Resolve added, which it returns. */
+/* The entry for import `id`, made if new. A new entry can move the
+ * others. */
+static rpc_import_t *import_get(rpc_side_t *s, uint32_t id, int promise)
+{
+  rpc_import_t *im = import_find(s, id);
+  if (s == NULL || im != NULL)
+    return im;
+  if (s->nimports == s->cimports) {
+    size_t n = s->cimports ? s->cimports * 2 : 8;
+    rpc_import_t *grown =
+        (rpc_import_t *)realloc(s->imports, n * sizeof *grown);
+    if (grown == NULL)
+      return NULL;
+    s->imports = grown;
+    s->cimports = n;
+  }
+  im = &s->imports[s->nimports++];
+  memset(im, 0, sizeof *im);
+  im->key = ++s->next_key;
+  im->id = id;
+  im->promise = promise;
+  return im;
+}
+
+static void import_remove(rpc_side_t *s, rpc_import_t *im)
+{
+  *im = s->imports[--s->nimports];
+}
+
+/* One more reference a Return handed the application, as rpc.c++ counts
+ * each descriptor that names an import. */
+static void import_add(capnp_rpc_conn_t *c, uint32_t id, int promise)
+{
+  rpc_import_t *im = import_get(side_get(c, 1), id, promise);
+  if (im != NULL)
+    im->app++;
+}
+
+/* The application drops `count` references; the last one also gives
+ * back those a Resolve added, which it returns. */
 static uint32_t import_drop(capnp_rpc_conn_t *c, uint32_t id, uint32_t count)
 {
   rpc_side_t *s = side_get(c, 0);
   rpc_import_t *im = import_find(s, id);
-  uint32_t extra;
+  uint32_t refs;
   if (im == NULL)
     return 0;
-  if (count < im->refs) {
-    im->refs -= count;
+  im->app = count < im->app ? im->app - count : 0;
+  if (im->app > 0 || im->holds > 0)
     return 0;
+  refs = im->refs;
+  import_remove(s, im);
+  return refs;
+}
+
+/* A reference a call's params hold; the key names the hold, 0 when none
+ * could be recorded. */
+static uint64_t import_hold(capnp_rpc_conn_t *c, uint32_t id, int promise)
+{
+  rpc_import_t *im = import_get(side_get(c, 1), id, promise);
+  if (im == NULL)
+    return 0;
+  im->refs++;
+  im->holds++;
+  return im->key;
+}
+
+static int send_release(capnp_rpc_conn_t *c, uint32_t import_id,
+                        uint32_t count);
+
+/* Drop one hold. The last one releases every reference params took, in
+ * one Release, as rpc.c++ drops an ImportClient. */
+static int hold_drop(capnp_rpc_conn_t *c, uint64_t key)
+{
+  rpc_side_t *s = side_get(c, 0);
+  rpc_import_t *im = import_by_key(s, key);
+  uint32_t id, refs;
+  uint64_t to;
+  if (im == NULL || im->holds == 0 || --im->holds > 0)
+    return CAPNP_OK;
+  if (im->settled) {
+    to = im->to;
+    import_remove(s, im);
+    return to ? hold_drop(c, to) : CAPNP_OK;
   }
-  extra = im->extra;
-  *im = s->imports[--s->nimports];
-  return extra;
+  id = im->id;
+  refs = im->refs;
+  im->refs = 0;
+  if (im->app == 0)
+    import_remove(s, im);
+  return refs ? send_release(c, id, refs) : CAPNP_OK;
+}
+
+/* rpc.c++ keeps a call's capabilities in a kj::Array, which destroys its
+ * elements last to first. */
+static int holds_drop(capnp_rpc_conn_t *c, const uint64_t *keys, size_t n)
+{
+  size_t i;
+  int rc = CAPNP_OK;
+  for (i = n; i-- > 0;) {
+    int r = hold_drop(c, keys[i]);
+    if (rc == CAPNP_OK)
+      rc = r;
+  }
+  return rc;
+}
+
+/* Keep a call's holds until its answer is finished. */
+static void holds_keep(capnp_rpc_conn_t *c, uint32_t qid, const uint64_t *keys,
+                       size_t n)
+{
+  rpc_side_t *s = side_get(c, 1);
+  size_t i;
+  if (s == NULL || n == 0)
+    return;
+  if (s->nholds + n > s->cholds) {
+    size_t cap = (s->nholds + n) * 2;
+    rpc_hold_t *grown = (rpc_hold_t *)realloc(s->holds, cap * sizeof *grown);
+    if (grown == NULL)
+      return;
+    s->holds = grown;
+    s->cholds = cap;
+  }
+  for (i = 0; i < n; i++) {
+    s->holds[s->nholds].qid = qid;
+    s->holds[s->nholds].key = keys[i];
+    s->nholds++;
+  }
+}
+
+/* The answer to question `qid` is finished: the call's params go. */
+static int holds_finish(capnp_rpc_conn_t *c, uint32_t qid)
+{
+  rpc_side_t *s = side_get(c, 0);
+  uint64_t *keys;
+  size_t i, j = 0, n = 0;
+  int rc;
+  if (s == NULL || s->nholds == 0)
+    return CAPNP_OK;
+  keys = (uint64_t *)malloc(s->nholds * sizeof *keys);
+  if (keys == NULL)
+    return CAPNP_ERR_ALLOC;
+  for (i = 0; i < s->nholds; i++) {
+    if (s->holds[i].qid == qid)
+      keys[n++] = s->holds[i].key;
+    else
+      s->holds[j++] = s->holds[i];
+  }
+  s->nholds = j;
+  rc = holds_drop(c, keys, n);
+  free(keys);
+  return rc;
 }
 
 void capnp_rpc_init(capnp_rpc_conn_t *c, capnp_rpc_send_fn send, void *send_ctx)
@@ -840,6 +979,9 @@ static int send_results_sent_elsewhere(capnp_rpc_conn_t *c, uint32_t qid)
   int rc;
   capnp_builder_init(&b);
   rc = build_return_tag(&b, qid, RETURN_TAG_RESULTS_SENT_ELSEWHERE, &ret);
+  if (rc == CAPNP_OK &&
+      capnp_builder_set_bool(&ret, RETURN_RELEASE_PARAMS_BIT, 1) != CAPNP_OK)
+    rc = CAPNP_ERR_ALLOC;
   if (rc == CAPNP_OK)
     rc = flush(c, &b);
   capnp_builder_free(&b);
@@ -873,13 +1015,16 @@ static int write_exception(const capnp_bptr_t *body, uint16_t dwords,
  * sendResultsTo.yourself keeps it for takeFromOtherQuestion. */
 static int answer_exception_typed(capnp_rpc_conn_t *c, uint32_t qid,
                                   const char *reason, size_t len,
-                                  uint16_t type, int mode)
+                                  uint16_t type, int mode, int call)
 {
   capnp_builder_t b;
   capnp_bptr_t ret;
   int rc;
   capnp_builder_init(&b);
   rc = build_return_tag(&b, qid, RETURN_TAG_EXCEPTION, &ret);
+  if (rc == CAPNP_OK && call &&
+      capnp_builder_set_bool(&ret, RETURN_RELEASE_PARAMS_BIT, 1) != CAPNP_OK)
+    rc = CAPNP_ERR_ALLOC;
   if (rc == CAPNP_OK)
     rc = write_exception_typed(&ret, RETURN_DW, 0, reason, len, type);
   if (rc == CAPNP_OK)
@@ -892,7 +1037,7 @@ static int answer_exception(capnp_rpc_conn_t *c, uint32_t qid,
                             const char *reason, int mode)
 {
   return answer_exception_typed(c, qid, reason, strlen(reason),
-                                EXCEPTION_TYPE_FAILED, mode);
+                                EXCEPTION_TYPE_FAILED, mode, 0);
 }
 
 /* Abort with rpc.c++'s reason for refusing a message: the connection is
@@ -1290,16 +1435,56 @@ static int message_target(capnp_rpc_conn_t *c, const capnp_ptr_t *body,
   return CAPNP_OK;
 }
 
+/* Each senderHosted or senderPromise entry of a call's capTable is an
+ * import the call holds, as rpc.c++ receives every capability of the
+ * params before it runs the call. */
+static uint64_t *param_holds(capnp_rpc_conn_t *c, const capnp_ptr_t *payload,
+                             size_t *n)
+{
+  capnp_ptr_t table, desc;
+  uint32_t i, len;
+  uint64_t *keys;
+  uint16_t tag;
+  *n = 0;
+  if (payload->kind != CAPNP_PK_STRUCT ||
+      capnp_getp(payload, 1, &table) != CAPNP_OK ||
+      (len = capnp_list_len(&table)) == 0)
+    return NULL;
+  keys = (uint64_t *)malloc(len * sizeof *keys);
+  if (keys == NULL)
+    return NULL;
+  for (i = 0; i < len; i++) {
+    if (capnp_list_get_struct(&table, i, &desc) != CAPNP_OK)
+      continue;
+    tag = capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0);
+    if (tag == CAPDESC_TAG_SENDERHOSTED || tag == CAPDESC_TAG_SENDERPROMISE) {
+      uint64_t key = import_hold(c, capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0),
+                                 tag == CAPDESC_TAG_SENDERPROMISE);
+      if (key != 0)
+        keys[(*n)++] = key;
+    }
+  }
+  return keys;
+}
+
+static int call_answer(capnp_rpc_conn_t *c, const capnp_ptr_t *call,
+                       uint32_t qid, int eid, const char *failure,
+                       uint16_t ftype, int mode, const capnp_ptr_t *params,
+                       int *kept);
+
+/* rpc.c++ releases a call's params when its context goes: right after a
+ * Return that leaves nothing to pipeline on, or that is an exception,
+ * and otherwise at Finish. */
 static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
 {
-  capnp_builder_t b;
-  capnp_bptr_t ret, payload, results;
   capnp_ptr_t params_payload, params;
   uint32_t qid = capnp_get_u32(call, QUESTIONID_OFF, 0);
   uint16_t send_to, ftype = EXCEPTION_TYPE_FAILED;
   const char *failure = NULL;
   char reason[1024];
-  int eid = -1, rc, yourself, mode;
+  int eid = -1, rc, yourself, mode, kept = 0;
+  uint64_t *keys = NULL;
+  size_t nkeys = 0;
 
   /* The checks and their order are rpc.c++ handleCall's: the target,
    * then sendResultsTo, then the question id. */
@@ -1324,6 +1509,7 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   if (capnp_getp(call, 1, &params_payload) == CAPNP_OK) {
     (void)capnp_getp(&params_payload, 0, &params);
     note_introductions(c, &params_payload);
+    keys = param_holds(c, &params_payload, &nkeys);
   }
 
   if (answer_find(c, qid) != NULL) {
@@ -1338,18 +1524,50 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
         build_return_tag(&b, qid,
                          yourself ? RETURN_TAG_RESULTS_SENT_ELSEWHERE
                                   : RETURN_TAG_CANCELED,
-                         &ret) == CAPNP_OK)
+                         &ret) == CAPNP_OK &&
+        capnp_builder_set_bool(&ret, RETURN_RELEASE_PARAMS_BIT, 1) ==
+            CAPNP_OK)
       (void)flush(c, &b);
     capnp_builder_free(&b);
+    (void)holds_drop(c, keys, nkeys);
+    free(keys);
     return protocol_abort(c, "expected !answer.active; questionId is "
                              "already in use");
   }
+  rc = call_answer(c, call, qid, eid, failure, ftype, mode, &params, &kept);
+  if (kept && answer_find(c, qid) != NULL) {
+    holds_keep(c, qid, keys, nkeys);
+  } else {
+    int r = holds_drop(c, keys, nkeys);
+    if (rc == CAPNP_OK)
+      rc = r;
+  }
+  free(keys);
+  return rc;
+}
+
+/* Answer a call that passed rpc.c++'s checks. `*kept` says whether its
+ * params stay until Finish. */
+static int call_answer(capnp_rpc_conn_t *c, const capnp_ptr_t *call,
+                       uint32_t qid, int eid, const char *failure,
+                       uint16_t ftype, int mode, const capnp_ptr_t *params,
+                       int *kept)
+{
+  capnp_builder_t b;
+  capnp_bptr_t ret, payload, results;
+  int rc;
+  *kept = mode != KEEP_SEND;
   if (failure != NULL)
     return answer_exception_typed(c, qid, failure, strlen(failure), ftype,
-                                  mode);
+                                  mode, 1);
 
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
+  /* rpc.c++ releases a call's params itself; only a bootstrap's Return
+   * leaves releaseParamCaps true. */
+  if (rc == CAPNP_OK &&
+      capnp_builder_set_bool(&ret, RETURN_RELEASE_PARAMS_BIT, 1) != CAPNP_OK)
+    rc = CAPNP_ERR_ALLOC;
   if (rc == CAPNP_OK) {
     /* The server allocates the result struct. A fixed 1-word body would
      * drop every field past that, which C++ does not do. */
@@ -1367,7 +1585,7 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
       current_results = &caps;
       failed = c->exports[eid].dispatch(c->exports[eid].server,
                                         capnp_get_u64(call, 8, 0),
-                                        capnp_get_u16(call, 4, 0), &params,
+                                        capnp_get_u16(call, 4, 0), params,
                                         &results) != 0;
       current_results = outer;
       if (failed) {
@@ -1377,7 +1595,7 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
             caps.fail_reason != NULL ? caps.fail_reason : "method failed";
         capnp_builder_free(&b);
         rc = answer_exception_typed(c, qid, why, strlen(why), caps.fail_type,
-                                    mode);
+                                    mode, 1);
         free(caps.fail_reason);
         return rc;
       }
@@ -1393,6 +1611,7 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
     /* With no capability in the results nothing can be pipelined on
      * them, so rpc.c++ says no Finish is needed and forgets the answer,
      * which frees its question id. */
+    *kept = mode != KEEP_SEND || caps.n > 0;
     if (rc == CAPNP_OK && mode == KEEP_SEND && caps.n == 0) {
       if (capnp_builder_set_bool(&ret, RETURN_NO_FINISH_BIT, 1))
         rc = CAPNP_ERR_ALLOC;
@@ -1678,40 +1897,31 @@ static int handle_disembargo(capnp_rpc_conn_t *c, const capnp_ptr_t *dis)
   return protocol_abort(c, reason);
 }
 
-static int send_release(capnp_rpc_conn_t *c, uint32_t import_id,
-                        uint32_t count);
-
-/* Drop one reference to import `id`: at once when it is new, and with
- * the last release when it is still on the table, as rpc.c++ counts it
- * on the import it already has. */
-static int resolve_drop_id(capnp_rpc_conn_t *c, uint32_t id)
-{
-  rpc_import_t *im = import_find(side_get(c, 0), id);
-  if (im == NULL)
-    return send_release(c, id, 1);
-  im->extra++;
-  return CAPNP_OK;
-}
-
-/* Take the capability a Resolve names and drop it, as rpc.c++ does when
- * nothing on this side waits for it: one the peer hosts is released.
+/* Take the capability a Resolve names. With `keep` null it is dropped,
+ * as rpc.c++ does when nothing on this side waits for it: one the peer
+ * hosts is released at once, unless it names an import still on the
+ * table, whose last release then counts it. Otherwise an import it names
+ * is held, and `*keep` is the hold's key, or 0 for a capability of ours.
  * `hosted` gets the id of a senderHosted capability or vine, or -1. */
-static int resolve_drop_cap(capnp_rpc_conn_t *c, const capnp_ptr_t *res,
-                            int64_t *hosted)
+static int resolve_take_cap(capnp_rpc_conn_t *c, const capnp_ptr_t *res,
+                            uint64_t *keep, int64_t *hosted)
 {
   capnp_ptr_t desc, tpcd;
+  rpc_import_t *im;
+  uint16_t tag;
+  uint32_t id;
   *hosted = -1;
   if (capnp_getp(res, 0, &desc) != CAPNP_OK)
     memset(&desc, 0, sizeof desc);
-  switch (desc.kind == CAPNP_PK_STRUCT ? capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0)
-                                       : 0) {
+  tag = desc.kind == CAPNP_PK_STRUCT ? capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0)
+                                     : 0;
+  switch (tag) {
   case 0:
     return protocol_abort(c, "'Resolve' contained 'CapDescriptor.none'.");
   case CAPDESC_TAG_SENDERHOSTED:
-    *hosted = capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0);
-    return resolve_drop_id(c, (uint32_t)*hosted);
   case CAPDESC_TAG_SENDERPROMISE:
-    return resolve_drop_id(c, capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0));
+    id = capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0);
+    break;
   case CAPDESC_TAG_RECEIVERHOSTED:
   case CAPDESC_TAG_RECEIVERANSWER:
     return CAPNP_OK;
@@ -1719,22 +1929,65 @@ static int resolve_drop_cap(capnp_rpc_conn_t *c, const capnp_ptr_t *res,
     /* rpc.c++ imports the vine in place of the third party. */
     if (capnp_getp(&desc, 0, &tpcd) != CAPNP_OK)
       memset(&tpcd, 0, sizeof tpcd);
-    *hosted = tpcd.kind == CAPNP_PK_STRUCT
-                  ? capnp_get_u32(&tpcd, TPCD_VINEID_OFF, 0)
-                  : 0;
-    return resolve_drop_id(c, (uint32_t)*hosted);
+    id = tpcd.kind == CAPNP_PK_STRUCT ? capnp_get_u32(&tpcd, TPCD_VINEID_OFF, 0)
+                                      : 0;
+    tag = CAPDESC_TAG_SENDERHOSTED;
+    break;
   default:
     return protocol_abort(c, "unknown CapDescriptor type");
   }
+  if (tag == CAPDESC_TAG_SENDERHOSTED)
+    *hosted = id;
+  if (keep == NULL) {
+    im = import_find(side_get(c, 0), id);
+    if (im == NULL)
+      return send_release(c, id, 1);
+    im->refs++;
+    return CAPNP_OK;
+  }
+  *keep = import_hold(c, id, tag == CAPDESC_TAG_SENDERPROMISE);
+  return CAPNP_OK;
 }
 
-/* A Resolve as rpc.c++ handleResolve treats it. The new capability is
- * taken first. A promise import, or an id this vat does not hold, then
- * drops it; a held import that was not a promise ends the connection,
- * as does a new one the peer hosts under the promise's own id.
- * The promise import itself stays until the application releases it, so
- * its id keeps naming one capability; rpc.c++ releases it here and
- * forwards to the replacement. */
+/* rpc.c++ fulfils a promise that only calls hold: the replacement takes
+ * its place for as long as they hold it, and the promise import is
+ * released at once. */
+static int resolve_settle(capnp_rpc_conn_t *c, const capnp_ptr_t *res,
+                          uint16_t tag, uint64_t key)
+{
+  rpc_import_t *im;
+  uint64_t to = 0;
+  int64_t hosted;
+  uint32_t id, refs;
+  int rc = CAPNP_OK;
+  if (tag == RESOLVE_TAG_CAP)
+    rc = resolve_take_cap(c, res, &to, &hosted);
+  if (rc != CAPNP_OK)
+    return rc;
+  im = import_by_key(side_get(c, 0), key);
+  if (im == NULL)
+    return CAPNP_OK;
+  if (to == key) {
+    /* Resolved to itself: the one import stays, with one more reference
+     * to release. */
+    im->holds--;
+    return CAPNP_OK;
+  }
+  id = im->id;
+  refs = im->refs;
+  im->refs = 0;
+  im->settled = 1;
+  im->to = to;
+  return refs ? send_release(c, id, refs) : CAPNP_OK;
+}
+
+/* A Resolve as rpc.c++ handleResolve treats it. A promise import only
+ * calls hold is settled. Otherwise the new capability is taken and
+ * dropped, and then a held import that was not a promise ends the
+ * connection, as does a new one the peer hosts under the promise's own
+ * id. A promise import the application holds stays until the
+ * application releases it, so its id keeps naming one capability;
+ * rpc.c++ releases it here and forwards to the replacement. */
 static int handle_resolve(capnp_rpc_conn_t *c, const capnp_ptr_t *res)
 {
   rpc_import_t *im;
@@ -1747,11 +2000,14 @@ static int handle_resolve(capnp_rpc_conn_t *c, const capnp_ptr_t *res)
   tag = capnp_get_u16(res, RESOLVE_TAG_OFF, 0);
   if (tag != RESOLVE_TAG_CAP && tag != RESOLVE_TAG_EXCEPTION)
     return protocol_abort(c, "Unknown 'Resolve' type.");
+  pid = capnp_get_u32(res, RESOLVE_PROMISEID_OFF, 0);
+  im = import_find(side_get(c, 0), pid);
+  if (im != NULL && im->promise && im->app == 0)
+    return resolve_settle(c, res, tag, im->key);
   if (tag == RESOLVE_TAG_CAP)
-    rc = resolve_drop_cap(c, res, &hosted);
+    rc = resolve_take_cap(c, res, NULL, &hosted);
   if (rc != CAPNP_OK)
     return rc;
-  pid = capnp_get_u32(res, RESOLVE_PROMISEID_OFF, 0);
   im = import_find(side_get(c, 0), pid);
   if (im != NULL ? !im->promise : hosted == (int64_t)pid)
     return protocol_abort(c, "Got 'Resolve' for a non-promise import.");
@@ -2751,12 +3007,16 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
     {
       uint32_t qid = capnp_get_u32(&body, QUESTIONID_OFF, 0);
       capnp_rpc_answer_t *a = answer_find(c, qid);
-      if (!capnp_get_bool(&body, FINISH_RELEASE_CAPS_BIT, 0))
-        rc = answer_release_caps(c, qid);
       /* Redirected results nobody took: rpc.c++ answers the call as it
-       * tears it down. */
-      if (rc == CAPNP_OK && a != NULL && a->used == SLOT_MARKED)
+       * tears it down. The call's params go with it, and only then are
+       * the results' exports released, which aborts on one that is not
+       * there. */
+      if (a != NULL && a->used == SLOT_MARKED)
         rc = send_results_sent_elsewhere(c, qid);
+      if (rc == CAPNP_OK)
+        rc = holds_finish(c, qid);
+      if (rc == CAPNP_OK && !capnp_get_bool(&body, FINISH_RELEASE_CAPS_BIT, 0))
+        rc = answer_release_caps(c, qid);
       answer_drop(c, qid);
     }
     break;
