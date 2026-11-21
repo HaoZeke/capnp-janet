@@ -84,9 +84,13 @@ static int doubler_dispatch(void *server, uint64_t iid, uint16_t mid,
   if (doubler_calls >= doubler_fail_from)
     return CAPNP_ERR_ARG;
   if (mid == 7) {
+    /* The capability keeps the answer for pipelining. */
     static uint8_t big[10000];
+    capnp_rpc_cap_ref_t self = {CAPNP_RPC_CAP_EXPORT, 0};
+    int idx = capnp_rpc_result_cap(&self);
     memset(big, 0xab, sizeof big);
-    if (capnp_builder_struct(results, 0, 1, &body))
+    if (idx < 0 || capnp_builder_struct(results, 0, 2, &body) ||
+        capnp_builder_set_cap(&body, 0, 1, (uint32_t)idx))
       return CAPNP_ERR_ALLOC;
     return capnp_builder_set_data(&body, 0, 0, big, sizeof big);
   }
@@ -383,6 +387,7 @@ int main(void)
     size_t n = 0;
     int i, kept = 0;
     q = capnp_rpc_send_call(&client, 0, 0x1234, 7, 1, 1, fill_u32, &arg);
+    CHECK(q != (uint32_t)-1, "large call sent");
     pump(&vat, &g_to_vat);
     for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++)
       kept |= vat.answers[i].used && vat.answers[i].question_id == q &&
@@ -777,6 +782,17 @@ int main(void)
     CHECK(feed_return(&client, qn, 2, 0) == CAPNP_OK && g_to_vat.tail == 0,
           "canceled after Finish is quiet");
     qn = capnp_rpc_send_call(&client, 0, 0x1234, 1, 1, 1, fill_u32, &arg);
+    pump(&vat, &g_to_vat);
+    q_drop(&g_to_client);
+    vq = capnp_rpc_send_bootstrap(&vat);
+    q_drop(&g_to_client);
+    CHECK(feed_return(&vat, vq, 4, qn) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_client,
+                         "`Return.takeFromOtherQuestion` had invalid answer "
+                         "ID."),
+          "results without capabilities are forgotten at once");
+    arg = 0;
+    qn = capnp_rpc_send_call(&client, 0, 0x1234, 9, 1, 1, fill_u32, &arg);
     pump(&vat, &g_to_vat);
     q_drop(&g_to_client);
     vq = capnp_rpc_send_bootstrap(&vat);

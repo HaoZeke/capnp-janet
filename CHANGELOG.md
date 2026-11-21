@@ -85,6 +85,9 @@ Pre-1.0 minor releases may include breaking API changes.
 - A Return with `releaseParamCaps` gives back the reference each export
   in the call's params took, as rpc.c++ releases a question's
   paramExports. Those references used to stay taken.
+- Results without capabilities are returned with `noFinishNeeded` and
+  forgotten at once, as rpc.c++ does, so their question id is free for
+  the caller to reuse. They used to wait for `Finish`.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

@@ -96,6 +96,7 @@ static void questions_fail_all(capnp_rpc_conn_t *c);
 #define FINISH_RELEASE_CAPS_BIT 32
 /* Return.releaseParamCaps, stored inverted: its default is true. */
 #define RETURN_RELEASE_PARAMS_BIT 32
+#define RETURN_NO_FINISH_BIT 33
 #define RELEASE_DW 1
 #define RELEASE_PW 0
 #define TARGET_DW 1
@@ -1128,6 +1129,17 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
     for (i = 0; rc == CAPNP_OK && !yourself && i < caps.n; i++)
       if (caps.caps[i].kind == CAPNP_RPC_CAP_EXPORT)
         c->exports[caps.caps[i].id].refcount++;
+    /* With no capability in the results nothing can be pipelined on
+     * them, so rpc.c++ says no Finish is needed and forgets the answer,
+     * which frees its question id. */
+    if (rc == CAPNP_OK && !yourself && caps.n == 0) {
+      if (capnp_builder_set_bool(&ret, RETURN_NO_FINISH_BIT, 1))
+        rc = CAPNP_ERR_ALLOC;
+      else
+        rc = flush(c, &b);
+      capnp_builder_free(&b);
+      return rc;
+    }
   }
   if (rc == CAPNP_OK)
     rc = keep_answer(c, &b, qid, yourself);
