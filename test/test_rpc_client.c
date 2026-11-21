@@ -90,6 +90,18 @@ static int doubler_dispatch(void *server, uint64_t iid, uint16_t mid,
       return CAPNP_ERR_ALLOC;
     return capnp_builder_set_data(&body, 0, 0, big, sizeof big);
   }
+  if (mid == 9) {
+    /* Returns export `n`, or import `n - 100` from 100 on. */
+    uint32_t n = capnp_get_u32(params, 0, 0);
+    capnp_rpc_cap_ref_t ref;
+    int idx;
+    ref.kind = n < 100 ? CAPNP_RPC_CAP_EXPORT : CAPNP_RPC_CAP_IMPORT;
+    ref.id = n < 100 ? n : n - 100;
+    idx = capnp_rpc_result_cap(&ref);
+    if (idx < 0 || capnp_builder_struct(results, 0, 1, &body))
+      return CAPNP_ERR_ARG;
+    return capnp_builder_set_cap(&body, 0, 0, (uint32_t)idx);
+  }
   if (capnp_builder_struct(results, 1, 0, &body))
     return CAPNP_ERR_ALLOC;
   {
@@ -504,6 +516,68 @@ int main(void)
           "kept results are taken once");
     capnp_rpc_send_finish(&client, qy);
     pump(&vat, &g_to_vat);
+  }
+
+  /* A method returns capabilities: its own export as senderHosted, and
+   * one of the caller's handed back as receiverHosted. */
+  {
+    capnp_rpc_call_t call;
+    capnp_rpc_cap_ref_t ref, out;
+    uint32_t qc;
+    int before = vat.exports[0].refcount;
+    memset(&call, 0, sizeof call);
+    call.interface_id = 0x1234;
+    call.method_id = 9;
+    call.params_dwords = 1;
+    call.fill = fill_u32;
+    call.fill_ctx = &arg;
+    ref.kind = CAPNP_RPC_CAP_EXPORT;
+    ref.id = 0;
+    CHECK(capnp_rpc_result_cap(&ref) == -1,
+          "no result capability outside a method");
+    arg = 0;
+    qc = capnp_rpc_send_call_ex(&client, &call);
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_answer_cap(&client, qc, 0, &out) == 0 &&
+              out.kind == CAPNP_RPC_CAP_IMPORT && out.id == 0 &&
+              capnp_rpc_answer_cap(&client, qc, 1, &out) == -1,
+          "a returned export arrives as an import");
+    CHECK(vat.exports[0].refcount == before + 1,
+          "a returned export takes a reference");
+    capnp_rpc_send_finish(&client, qc);
+    pump(&vat, &g_to_vat);
+    arg = 105;
+    qc = capnp_rpc_send_call_ex(&client, &call);
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_answer_cap(&client, qc, 0, &out) == 0 &&
+              out.kind == CAPNP_RPC_CAP_EXPORT && out.id == 5,
+          "a capability handed back arrives as our export");
+    capnp_rpc_send_finish(&client, qc);
+    pump(&vat, &g_to_vat);
+    arg = 50;
+    qc = capnp_rpc_send_call_ex(&client, &call);
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_is_failed(&client, qc),
+          "an export the vat lacks is no result capability");
+    capnp_rpc_send_finish(&client, qc);
+    pump(&vat, &g_to_vat);
+    arg = 0;
+    call.results_to_yourself = 1;
+    qc = capnp_rpc_send_call_ex(&client, &call);
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(vat.exports[0].refcount == before + 1,
+          "redirected results take no reference");
+    capnp_rpc_send_finish(&client, qc);
+    pump(&vat, &g_to_vat);
+    CHECK(vat.exports[0].refcount == before + 1,
+          "finishing redirected results releases nothing");
+    CHECK(feed_release(&vat, 0, 1) == CAPNP_OK &&
+              vat.exports[0].refcount == before,
+          "the returned reference comes back with Release");
   }
 
   /* A tail call back to us whose question we already finished frees the

@@ -41,6 +41,8 @@ extern "C" {
 /* Long enough for a hostname; a longer one is refused, not truncated. */
 #define CAPNP_RPC_MAX_HOST 64
 #define CAPNP_RPC_MAX_JOINS 8
+/* Capabilities one method may put in its results. */
+#define CAPNP_RPC_MAX_RESULT_CAPS 16
 /* Outstanding unacknowledged calls a stream may hold. */
 #define CAPNP_RPC_STREAM_MAX_WINDOW 64
 #define CAPNP_RPC_MAX_JOIN_PARTS 16
@@ -277,6 +279,13 @@ typedef struct capnp_rpc_cap_ref {
   uint32_t id;
 } capnp_rpc_cap_ref_t;
 
+/* From inside a dispatch function: list `cap` in the capTable of the
+ * results being built, and return its index for capnp_builder_set_cap.
+ * Returns -1 outside a dispatch, for an export this connection lacks,
+ * or past CAPNP_RPC_MAX_RESULT_CAPS. Each export sent takes a reference
+ * the peer gives back with Release or Finish.releaseResultCaps. */
+CAPNP_JANET_EXPORT int capnp_rpc_result_cap(const capnp_rpc_cap_ref_t *cap);
+
 /* A call, addressed to an imported capability or, for promise
  * pipelining, to the capability that question `target`'s results hold
  * at the end of `transform`. Each transform entry is a getPointerField
@@ -328,6 +337,14 @@ CAPNP_JANET_EXPORT int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t questio
  * the answer's capTable; calling it needs the id the descriptor beside
  * it names, which is what this reads. */
 CAPNP_JANET_EXPORT int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id);
+
+/* Entry `index` of an answer's capTable, the index a capability pointer
+ * in its results names: an import for a capability the peer hosts, or
+ * an export of ours the peer handed back. Returns 0 and fills `out`, or
+ * -1 when there is no such entry. */
+CAPNP_JANET_EXPORT int capnp_rpc_answer_cap(capnp_rpc_conn_t *c, uint32_t question_id,
+                                            uint32_t index,
+                                            capnp_rpc_cap_ref_t *out);
 
 CAPNP_JANET_EXPORT int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
                              capnp_message_t *msg_out, capnp_ptr_t *out);

@@ -10,6 +10,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Added
 
+- `capnp_rpc_result_cap` lets a method put capabilities in its results:
+  its exports as `senderHosted`, the peer's handed back as
+  `receiverHosted`. `capnp_rpc_answer_cap` reads an answer's capTable
+  entry as an import or an export of ours.
 - `random_parity` test: seeded random `Parity` messages encoded and
   converted by `capnp` and `capnp-eval` (binary, packed, canonical, flat,
   text, JSON and random `--segment-size`), byte-compared.

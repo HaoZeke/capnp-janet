@@ -42,6 +42,18 @@ public:
 
 	kj::Promise<void> hang(HangContext) override { return kj::NEVER_DONE; }
 
+	kj::Promise<void> callSelf(CallSelfContext ctx) override {
+		auto req = ctx.getParams().getCb().selfRequest();
+		return req.send().then([ctx](auto self) mutable {
+			auto add = self.getAdder().addRequest();
+			add.setA(1);
+			add.setB(2);
+			return add.send().then([ctx](auto resp) mutable {
+				ctx.getResults().setSum(resp.getSum());
+			});
+		});
+	}
+
 	kj::Promise<void> relay(RelayContext ctx) override {
 		auto p = ctx.getParams();
 		auto req = p.getTarget().relayRequest();

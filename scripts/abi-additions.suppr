@@ -12,3 +12,11 @@
 [suppress_function]
   change_kind = added-function
   name = capnp_rpc_send_call_ex
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_result_cap
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_answer_cap

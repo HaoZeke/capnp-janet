@@ -30,6 +30,8 @@ static void questions_fail_all(capnp_rpc_conn_t *c);
 
 /* `used` value of an answer in a tail call; see capnp_rpc.h. */
 #define SLOT_MARKED 2
+/* A redirected answer whose results a takeFromOtherQuestion collected. */
+#define SLOT_TAKEN 3
 /* Bits of a question's `used`: asked, sent with sendResultsTo.yourself,
  * and finished by us before its Return arrived. */
 #define Q_USED 1
@@ -465,6 +467,54 @@ out:
   return reason;
 }
 
+/* Payload.capTable naming `caps`: our exports as senderHosted, and the
+ * peer's own capabilities handed back as receiverHosted. */
+static int write_cap_refs(const capnp_bptr_t *payload,
+                          const capnp_rpc_cap_ref_t *caps, uint32_t ncaps)
+{
+  capnp_bptr_t cd;
+  uint32_t i;
+  if (ncaps == 0)
+    return CAPNP_OK;
+  if (capnp_builder_set_list_struct(payload, PAYLOAD_DW, 1, ncaps,
+                                    CAPDESC_DW, CAPDESC_PW, &cd))
+    return CAPNP_ERR_ALLOC;
+  for (i = 0; i < ncaps; i++) {
+    capnp_bptr_t e = cd;
+    uint16_t tag = caps[i].kind == CAPNP_RPC_CAP_EXPORT
+                       ? CAPDESC_TAG_SENDERHOSTED
+                       : CAPDESC_TAG_RECEIVERHOSTED;
+    e.word += (size_t)i * (CAPDESC_DW + CAPDESC_PW);
+    if (capnp_builder_set_u16(&e, CAPDESC_TAG_OFF, tag) ||
+        capnp_builder_set_u32(&e, CAPDESC_SENDERHOSTED_OFF, caps[i].id))
+      return CAPNP_ERR_ALLOC;
+  }
+  return CAPNP_OK;
+}
+
+/* The capabilities the method `handle_call` is running has put in its
+ * results so far. */
+typedef struct result_caps {
+  capnp_rpc_conn_t *c;
+  capnp_rpc_cap_ref_t caps[CAPNP_RPC_MAX_RESULT_CAPS];
+  uint32_t n;
+} result_caps_t;
+
+static _Thread_local result_caps_t *current_results;
+
+int capnp_rpc_result_cap(const capnp_rpc_cap_ref_t *cap)
+{
+  result_caps_t *r = current_results;
+  if (r == NULL || cap == NULL || r->n >= CAPNP_RPC_MAX_RESULT_CAPS)
+    return -1;
+  if (cap->kind == CAPNP_RPC_CAP_EXPORT
+          ? cap->id >= CAPNP_RPC_MAX_EXPORTS || !r->c->exports[cap->id].used
+          : cap->kind != CAPNP_RPC_CAP_IMPORT)
+    return -1;
+  r->caps[r->n] = *cap;
+  return (int)r->n++;
+}
+
 /* Start a Return message: root Message, its Return, and its Payload. */
 static int begin_return(capnp_builder_t *b, uint32_t answer_id,
                         capnp_bptr_t *ret_out, capnp_bptr_t *payload_out)
@@ -560,7 +610,10 @@ static int answer_release_caps(capnp_rpc_conn_t *c, uint32_t qid)
   capnp_ptr_t root, ret, payload, table;
   uint32_t i, n;
   int rc = CAPNP_OK;
-  if (a == NULL || capnp_message_from_flat(&stored, frame_bytes(a->frame, a->len), a->len) != CAPNP_OK)
+  /* Redirected results never reached the peer, so their capabilities
+   * took no references. */
+  if (a == NULL || a->used != 1 ||
+      capnp_message_from_flat(&stored, frame_bytes(a->frame, a->len), a->len) != CAPNP_OK)
     return CAPNP_OK;
   if (capnp_root(&stored, &root) == CAPNP_OK &&
       capnp_get_u16(&root, MESSAGE_TAG_OFF, 0) == CAPNP_RPC_MSG_RETURN &&
@@ -1044,17 +1097,35 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   if (rc == CAPNP_OK) {
     /* The server allocates the result struct. A fixed 1-word body would
      * drop every field past that, which C++ does not do. */
-    if (capnp_builder_slot(&payload, PAYLOAD_DW, 0, &results))
+    result_caps_t caps;
+    result_caps_t *outer = current_results;
+    uint32_t i;
+    caps.c = c;
+    caps.n = 0;
+    if (capnp_builder_slot(&payload, PAYLOAD_DW, 0, &results)) {
       rc = CAPNP_ERR_ALLOC;
-    else if (c->exports[eid].dispatch(c->exports[eid].server,
-                                      capnp_get_u64(call, 8, 0),
-                                      capnp_get_u16(call, 4, 0), &params,
-                                      &results) != 0) {
-      /* A method that fails is answered with an exception, as rpc.c++
-       * does when one throws; otherwise the caller waits forever. */
-      capnp_builder_free(&b);
-      return answer_exception(c, qid, "method failed", yourself);
+    } else {
+      int failed;
+      current_results = &caps;
+      failed = c->exports[eid].dispatch(c->exports[eid].server,
+                                        capnp_get_u64(call, 8, 0),
+                                        capnp_get_u16(call, 4, 0), &params,
+                                        &results) != 0;
+      current_results = outer;
+      if (failed) {
+        /* A method that fails is answered with an exception, as rpc.c++
+         * does when one throws; otherwise the caller waits forever. */
+        capnp_builder_free(&b);
+        return answer_exception(c, qid, "method failed", yourself);
+      }
+      rc = write_cap_refs(&payload, caps.caps, caps.n);
     }
+    /* Each export sent takes a reference the peer gives back with
+     * Release. Redirected results stay here, as in rpc.c++, where they
+     * are never written out and export nothing. */
+    for (i = 0; rc == CAPNP_OK && !yourself && i < caps.n; i++)
+      if (caps.caps[i].kind == CAPNP_RPC_CAP_EXPORT)
+        c->exports[caps.caps[i].id].refcount++;
   }
   if (rc == CAPNP_OK)
     rc = keep_answer(c, &b, qid, yourself);
@@ -1469,29 +1540,6 @@ static int write_promised_target(const capnp_bptr_t *target,
   return CAPNP_OK;
 }
 
-/* Payload.capTable for the capabilities a call passes. */
-static int write_param_caps(const capnp_bptr_t *payload,
-                            const capnp_rpc_call_t *call)
-{
-  capnp_bptr_t cd;
-  uint32_t i;
-  if (call->ncaps == 0)
-    return CAPNP_OK;
-  if (capnp_builder_set_list_struct(payload, PAYLOAD_DW, 1, call->ncaps,
-                                    CAPDESC_DW, CAPDESC_PW, &cd))
-    return CAPNP_ERR_ALLOC;
-  for (i = 0; i < call->ncaps; i++) {
-    capnp_bptr_t e = cd;
-    uint16_t tag = call->caps[i].kind == CAPNP_RPC_CAP_EXPORT
-                       ? CAPDESC_TAG_SENDERHOSTED
-                       : CAPDESC_TAG_RECEIVERHOSTED;
-    e.word += (size_t)i * (CAPDESC_DW + CAPDESC_PW);
-    if (capnp_builder_set_u16(&e, CAPDESC_TAG_OFF, tag) ||
-        capnp_builder_set_u32(&e, CAPDESC_SENDERHOSTED_OFF, call->caps[i].id))
-      return CAPNP_ERR_ALLOC;
-  }
-  return CAPNP_OK;
-}
 
 uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c, const capnp_rpc_call_t *call)
 {
@@ -1551,7 +1599,7 @@ uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c, const capnp_rpc_call_t *cal
   if (rc == CAPNP_OK && call->fill && call->fill(call->fill_ctx, &params) != 0)
     rc = CAPNP_ERR_KIND;
   if (rc == CAPNP_OK)
-    rc = write_param_caps(&payload, call);
+    rc = write_cap_refs(&payload, call->caps, call->ncaps);
   if (rc == CAPNP_OK)
     rc = flush(c, &b);
   capnp_builder_free(&b);
@@ -1642,35 +1690,66 @@ int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id)
   return q && q->answered && q->failed;
 }
 
-int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id)
+/* The descriptor for capTable entry `index` of an answered question's
+ * results, or for the entry its content points at when `index` is
+ * negative. */
+static int answer_desc(capnp_rpc_conn_t *c, uint32_t question_id,
+                       int64_t index, capnp_rpc_cap_ref_t *out)
 {
   capnp_rpc_question_t *q = question_live(c, question_id);
   capnp_message_t m = {0};
   capnp_ptr_t root, ret, payload, content, table, desc;
-  int id = -1;
+  int rc = -1;
 
-  if (q == NULL || !q->answered || q->failed)
+  if (q == NULL || out == NULL || !q->answered || q->failed)
     return -1;
   if (capnp_message_from_flat(&m, frame_bytes(q->reply, q->reply_len), q->reply_len) != CAPNP_OK)
     return -1;
-  if (capnp_root(&m, &root) == CAPNP_OK &&
-      capnp_get_u16(&root, MESSAGE_TAG_OFF, 0) == CAPNP_RPC_MSG_RETURN &&
-      capnp_getp(&root, 0, &ret) == CAPNP_OK &&
-      capnp_get_u16(&ret, RETURN_TAG_OFF, 0) == RETURN_TAG_RESULTS &&
-      capnp_getp(&ret, 0, &payload) == CAPNP_OK &&
-      capnp_getp(&payload, 0, &content) == CAPNP_OK &&
-      content.kind == CAPNP_PK_CAP &&
-      capnp_getp(&payload, 1, &table) == CAPNP_OK &&
-      content.count < capnp_list_len(&table) &&
-      capnp_list_get_struct(&table, content.count, &desc) == CAPNP_OK) {
+  if (capnp_root(&m, &root) != CAPNP_OK ||
+      capnp_get_u16(&root, MESSAGE_TAG_OFF, 0) != CAPNP_RPC_MSG_RETURN ||
+      capnp_getp(&root, 0, &ret) != CAPNP_OK ||
+      capnp_get_u16(&ret, RETURN_TAG_OFF, 0) != RETURN_TAG_RESULTS ||
+      capnp_getp(&ret, 0, &payload) != CAPNP_OK)
+    goto out;
+  if (index < 0) {
+    if (capnp_getp(&payload, 0, &content) != CAPNP_OK ||
+        content.kind != CAPNP_PK_CAP)
+      goto out;
+    index = content.count;
+  }
+  if (capnp_getp(&payload, 1, &table) == CAPNP_OK &&
+      (uint64_t)index < capnp_list_len(&table) &&
+      capnp_list_get_struct(&table, (uint32_t)index, &desc) == CAPNP_OK) {
     /* senderPromise names an export like senderHosted does; the peer
      * queues calls on it until the promise resolves. */
     uint16_t tag = capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0);
-    if (tag == CAPDESC_TAG_SENDERHOSTED || tag == CAPDESC_TAG_SENDERPROMISE)
-      id = (int)capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0);
+    out->id = capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0);
+    if (tag == CAPDESC_TAG_SENDERHOSTED || tag == CAPDESC_TAG_SENDERPROMISE) {
+      out->kind = CAPNP_RPC_CAP_IMPORT;
+      rc = 0;
+    } else if (tag == CAPDESC_TAG_RECEIVERHOSTED) {
+      out->kind = CAPNP_RPC_CAP_EXPORT;
+      rc = 0;
+    }
   }
+out:
   capnp_message_free(&m);
-  return id;
+  return rc;
+}
+
+int capnp_rpc_answer_cap(capnp_rpc_conn_t *c, uint32_t question_id,
+                         uint32_t index, capnp_rpc_cap_ref_t *out)
+{
+  return answer_desc(c, question_id, index, out);
+}
+
+int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id)
+{
+  capnp_rpc_cap_ref_t ref;
+  if (answer_desc(c, question_id, -1, &ref) != 0 ||
+      ref.kind != CAPNP_RPC_CAP_IMPORT)
+    return -1;
+  return (int)ref.id;
 }
 
 int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
@@ -1720,7 +1799,7 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
       capnp_rpc_answer_t *a =
           answer_find(c, capnp_get_u32(ret, RETURN_TAKEFROM_OFF, 0));
       if (a != NULL && a->used == SLOT_MARKED)
-        a->used = 1;
+        a->used = SLOT_TAKEN;
     }
     question_drop(q);
     return CAPNP_OK;
@@ -1762,7 +1841,7 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
                                "call that did not use `sendResultsTo.yourself`.");
     /* The results go to this question, once; the answer itself stays
      * until Finish for anything pipelined on it. */
-    a->used = 1;
+    a->used = SLOT_TAKEN;
     q->answered = 1;
     q->failed = 1;
     if (capnp_message_from_flat(&kept, frame_bytes(a->frame, a->len), a->len) ==

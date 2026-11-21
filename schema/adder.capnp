@@ -17,4 +17,6 @@ interface Adder @0xea01e10cbc414411 {
   relay @4 (target :Adder, a :Int64, b :Int64) -> (sum :Int64);
   # Never returns; a Finish cancels it, and capnp-C++ answers canceled.
   hang @5 () -> () $Cxx.allowCancellation;
+  # The sum `cb.self().add(1, 2)` returns, for a capability in results.
+  callSelf @6 (cb :Adder) -> (sum :Int64);
 }

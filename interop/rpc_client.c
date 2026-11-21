@@ -202,6 +202,27 @@ static int local_add(void *server, uint64_t iid, uint16_t mid,
 	                                 capnp_get_u64(params, 8, 0) + 1000);
 }
 
+/* self() answers with this export, or with the peer's own bootstrap
+ * when the server is `&g_hand_back`. */
+static int g_self_eid = -1, g_hand_back;
+
+static int local_self(void *server, uint64_t iid, uint16_t mid,
+		      const capnp_ptr_t *params, const capnp_bptr_t *results)
+{
+	capnp_rpc_cap_ref_t ref;
+	capnp_bptr_t body;
+	int idx;
+	if (iid != ADDER_IFACE || mid != 2)
+		return local_add(server, iid, mid, params, results);
+	ref.kind = server == &g_hand_back ? CAPNP_RPC_CAP_IMPORT
+	                                  : CAPNP_RPC_CAP_EXPORT;
+	ref.id = server == &g_hand_back ? 0 : (uint32_t)g_self_eid;
+	idx = capnp_rpc_result_cap(&ref);
+	if (idx < 0 || capnp_builder_struct(results, 0, 1, &body))
+		return 1;
+	return capnp_builder_set_cap(&body, 0, 0, (uint32_t)idx);
+}
+
 static int fill_cb(void *ctx, const capnp_bptr_t *params)
 {
 	(void)ctx;
@@ -301,6 +322,53 @@ static int fill_relay(void *ctx, const capnp_bptr_t *params)
  * resultsSentElsewhere, which the vat takes quietly. relay(target) tail-calls target.relay(), and
  * with this vat's export as target capnp-C++ sends that call here with
  * sendResultsTo.yourself, then answers ours with takeFromOtherQuestion. */
+/* callSelf(cb) calls cb.self().add(1, 2). Our self() returns its own
+ * export, which capnp-C++ calls back; or the peer's bootstrap handed
+ * back, which it calls locally. */
+static int check_result_caps(capnp_rpc_conn_t *conn, uint8_t *buf,
+                             size_t cap)
+{
+	static int self;
+	capnp_rpc_cap_ref_t ref;
+	capnp_rpc_call_t call;
+	int pass;
+	g_self_eid = capnp_rpc_export(conn, &self, local_self);
+	ref.kind = CAPNP_RPC_CAP_EXPORT;
+	for (pass = 0; pass < 2; pass++) {
+		int64_t want = pass == 0 ? 1003 : 3, sum;
+		capnp_message_t m = {0};
+		capnp_ptr_t content;
+		int eid = pass == 0 ? g_self_eid
+		                    : capnp_rpc_export(conn, &g_hand_back, local_self);
+		uint32_t q;
+		if (eid < 0)
+			return 1;
+		ref.id = (uint32_t)eid;
+		memset(&call, 0, sizeof call);
+		call.interface_id = ADDER_IFACE;
+		call.method_id = 6;
+		call.params_pwords = 1;
+		call.fill = fill_cb;
+		call.caps = &ref;
+		call.ncaps = 1;
+		q = capnp_rpc_send_call_ex(conn, &call);
+		if (q == (uint32_t)-1 || wait_answer(conn, q, buf, cap) ||
+		    capnp_rpc_answer_content(conn, q, &m, &content) != CAPNP_OK) {
+			fprintf(stderr, "callSelf() pass %d failed\n", pass);
+			return 1;
+		}
+		sum = (int64_t)capnp_get_u64(&content, 0, 0);
+		capnp_message_free(&m);
+		if (sum != want) {
+			fprintf(stderr, "callSelf() pass %d returned %lld, want %lld\n",
+			        pass, (long long)sum, (long long)want);
+			return 1;
+		}
+		capnp_rpc_send_finish(conn, q);
+	}
+	return 0;
+}
+
 static int check_tail(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 {
 	static int self;
@@ -753,6 +821,8 @@ int main(int argc, char **argv)
 	if (check_pipeline(&conn, buf, sizeof buf))
 		return 1;
 	if (check_cap_params(&conn, buf, sizeof buf))
+		return 1;
+	if (check_result_caps(&conn, buf, sizeof buf))
 		return 1;
 	if (check_tail(&conn, buf, sizeof buf))
 		return 1;
