@@ -30,6 +30,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp_link_close` frees the large answers and returns its connection
+  kept, which leaked when no Finish arrived.
 - An RPC answer or Return longer than `CAPNP_RPC_MAX_ANSWER_BYTES` is
   kept on the heap. A vat used to drop such answers and a client failed
   such Returns, though C++ allows any size. `capnp_rpc_free` releases

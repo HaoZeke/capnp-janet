@@ -12,6 +12,13 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#if !defined(CAPNP_HAS_MALLINFO2) && defined(__GLIBC__) &&                   \
+    (__GLIBC__ > 2 || __GLIBC_MINOR__ >= 33)
+#define CAPNP_HAS_MALLINFO2 1
+#endif
+#ifdef CAPNP_HAS_MALLINFO2
+#include <malloc.h>
+#endif
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -100,6 +107,83 @@ static void client_add(capnp_link_t *link, const char *what) {
     capnp_message_free(&m);
   }
   (void)i;
+}
+
+static int big_dispatch(void *server, uint64_t interface_id, uint16_t method_id,
+                        const capnp_ptr_t *params, const capnp_bptr_t *results) {
+  capnp_bptr_t body;
+  uint32_t n = capnp_get_u32(params, 0, 0);
+  uint8_t *big = (uint8_t *)malloc(n ? n : 1);
+  int rc;
+  (void)server;
+  (void)interface_id;
+  (void)method_id;
+  if (!big)
+    return CAPNP_ERR_ALLOC;
+  memset(big, 0xab, n);
+  rc = capnp_builder_struct(results, 0, 1, &body);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_data(&body, 0, 0, big, n);
+  free(big);
+  return rc;
+}
+
+static int fill_len(void *ctx, const capnp_bptr_t *params) {
+  return capnp_builder_set_u32(params, 0, *(uint32_t *)ctx);
+}
+
+static size_t heap_in_use(void) {
+#ifdef CAPNP_HAS_MALLINFO2
+  return mallinfo2().uordblks;
+#else
+  return 0;
+#endif
+}
+
+/* A call whose result is @n bytes of Data, over two links on a socket
+ * pair. Neither side sends Finish, so closing each link has to free the
+ * answer and the return it keeps. */
+static void test_link_large_result(uint32_t n, const char *what) {
+  capnp_link_t *srv = (capnp_link_t *)calloc(1, sizeof(*srv));
+  capnp_link_t *cli = (capnp_link_t *)calloc(1, sizeof(*cli));
+  int sv[2], bufsz = 1 << 21, cap, i;
+  uint32_t qb, qc;
+  size_t before = heap_in_use(), after;
+  check(srv && cli && socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0,
+        "large link pair");
+  for (i = 0; i < 2; i++) {
+    setsockopt(sv[i], SOL_SOCKET, SO_SNDBUF, &bufsz, sizeof(bufsz));
+    setsockopt(sv[i], SOL_SOCKET, SO_RCVBUF, &bufsz, sizeof(bufsz));
+  }
+  check(capnp_link_from_fd(srv, sv[0]) == CAPNP_OK &&
+            capnp_link_from_fd(cli, sv[1]) == CAPNP_OK,
+        "large link setup");
+  capnp_rpc_set_bootstrap(&srv->conn, &g_server_obj, big_dispatch);
+  qb = capnp_rpc_send_bootstrap(&cli->conn);
+  check(capnp_link_recv(srv) == CAPNP_OK, "large bootstrap served");
+  check(capnp_link_recv(cli) == CAPNP_OK, "large bootstrap reply");
+  cap = capnp_rpc_answer_cap_id(&cli->conn, qb);
+  qc = capnp_rpc_send_call(&cli->conn, (uint32_t)cap, ADDER_IFACE, 0, 1, 0,
+                           fill_len, &n);
+  check(capnp_link_recv(srv) == CAPNP_OK, "large call served");
+  check(capnp_link_recv(cli) == CAPNP_OK, what);
+  {
+    capnp_message_t m = {0};
+    capnp_ptr_t content;
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    check(capnp_rpc_answer_content(&cli->conn, qc, &m, &content) == CAPNP_OK &&
+              capnp_get_data(&content, 0, &data, &len) == CAPNP_OK &&
+              len == n && data[n - 1] == 0xab,
+          "large link result content");
+    capnp_message_free(&m);
+  }
+  capnp_link_close(srv);
+  capnp_link_close(cli);
+  free(srv);
+  free(cli);
+  after = heap_in_use();
+  check(after <= before + 4096, "closed links free their large frames");
 }
 
 static int count_fds(void) {
@@ -728,6 +812,7 @@ int main(int argc, char **argv) {
   test_unix_replaces_only_socket();
   test_unix_keeps_live_socket();
   test_link_setup_closes_fd();
+  test_link_large_result(10000, "large link result");
   loopback(1);
   loopback(0);
   if (g_fail) {

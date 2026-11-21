@@ -395,4 +395,5 @@ void capnp_link_close(capnp_link_t *link) {
   if (link->fd >= 0)
     close(link->fd);
   link->fd = -1;
+  capnp_rpc_free(&link->conn);
 }

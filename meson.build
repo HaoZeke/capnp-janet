@@ -379,7 +379,7 @@ test_transport = executable(
   'test_transport',
   'test/test_transport.c',
   dependencies: [capnp_janet_dep, threads],
-  c_args: ['-D_POSIX_C_SOURCE=200809L'],
+  c_args: ['-D_POSIX_C_SOURCE=200809L'] + robust_c_args,
 )
 test('transport', test_transport)
 
