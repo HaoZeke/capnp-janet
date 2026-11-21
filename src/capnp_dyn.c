@@ -1723,6 +1723,204 @@ static int delimit_text(buf_t *b, const piece_list_t *pl, int indent, int mode,
   return buf_ch(b, ' ');
 }
 
+/* First reader error met while encoding. A corrupt pointer reads as
+ * null so the walk can go on, and the public encoder then fails with
+ * this code, as `capnp convert` fails after printing defaults. */
+static _Thread_local int encode_wire_err;
+
+static void note_wire(int rc) {
+  if (rc != CAPNP_OK && encode_wire_err == CAPNP_OK)
+    encode_wire_err = rc;
+}
+
+static void null_ptr(capnp_ptr_t *p) {
+  memset(p, 0, sizeof(*p));
+  p->kind = CAPNP_PK_NULL;
+}
+
+static void enc_getp(const capnp_ptr_t *s, uint16_t idx, capnp_ptr_t *out) {
+  int rc;
+  null_ptr(out);
+  if (!s || s->kind != CAPNP_PK_STRUCT)
+    return;
+  rc = capnp_getp(s, idx, out);
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    null_ptr(out);
+  }
+}
+
+static void enc_expect_struct(capnp_ptr_t *p) {
+  if (p->kind != CAPNP_PK_NULL && p->kind != CAPNP_PK_STRUCT) {
+    note_wire(CAPNP_ERR_KIND);
+    null_ptr(p);
+  }
+}
+
+static int elem_esize(const rtype_t *elem) {
+  if (elem->list_depth > 0)
+    return CAPNP_SZ_PTR;
+  switch (elem->which) {
+  case TY_VOID:
+    return CAPNP_SZ_VOID;
+  case TY_BOOL:
+    return CAPNP_SZ_BIT;
+  case TY_I8:
+  case TY_U8:
+    return CAPNP_SZ_BYTE;
+  case TY_I16:
+  case TY_U16:
+  case TY_ENUM:
+    return CAPNP_SZ_TWO;
+  case TY_I32:
+  case TY_U32:
+  case TY_F32:
+    return CAPNP_SZ_FOUR;
+  case TY_I64:
+  case TY_U64:
+  case TY_F64:
+    return CAPNP_SZ_EIGHT;
+  case TY_STRUCT:
+    return CAPNP_SZ_COMPOSITE;
+  default:
+    return CAPNP_SZ_PTR;
+  }
+}
+
+static uint32_t esize_data_bits(int es) {
+  static const uint32_t bits[] = {0, 1, 8, 16, 32, 64, 0, 0};
+  return bits[es & 7];
+}
+
+/* readListPointer's element checks: a wider element reads as its low
+ * bytes, a narrower one or a bit list read as anything else fails. */
+static int list_fits(const capnp_ptr_t *l, int want) {
+  if (l->esize == CAPNP_SZ_COMPOSITE) {
+    if (want == CAPNP_SZ_BIT)
+      return 0;
+    if (want == CAPNP_SZ_PTR)
+      return l->pwords > 0;
+    if (want != CAPNP_SZ_VOID && want != CAPNP_SZ_COMPOSITE)
+      return l->dwords > 0;
+    return 1;
+  }
+  if (l->esize == CAPNP_SZ_BIT && want != CAPNP_SZ_BIT)
+    return 0;
+  if (want == CAPNP_SZ_COMPOSITE)
+    return 1;
+  if (esize_data_bits(want) > esize_data_bits(l->esize))
+    return 0;
+  return want != CAPNP_SZ_PTR || l->esize == CAPNP_SZ_PTR;
+}
+
+static void enc_expect_cap(capnp_ptr_t *p) {
+  if (p->kind != CAPNP_PK_NULL && p->kind != CAPNP_PK_CAP) {
+    note_wire(CAPNP_ERR_KIND);
+    null_ptr(p);
+  }
+}
+
+static void enc_expect_list(capnp_ptr_t *p, const rtype_t *elem) {
+  if (p->kind == CAPNP_PK_NULL)
+    return;
+  if (p->kind != CAPNP_PK_LIST || !list_fits(p, elem_esize(elem))) {
+    note_wire(CAPNP_ERR_KIND);
+    null_ptr(p);
+  }
+}
+
+static void enc_expect_struct_list(capnp_ptr_t *p) {
+  if (p->kind == CAPNP_PK_NULL)
+    return;
+  if (p->kind != CAPNP_PK_LIST || !list_fits(p, CAPNP_SZ_COMPOSITE)) {
+    note_wire(CAPNP_ERR_KIND);
+    null_ptr(p);
+  }
+}
+
+static void enc_get_text(const capnp_ptr_t *s, uint16_t idx, const char **t,
+                         size_t *tn) {
+  int rc;
+  *t = "";
+  *tn = 0;
+  if (!s || s->kind != CAPNP_PK_STRUCT)
+    return;
+  rc = capnp_get_text(s, idx, t, tn);
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    *t = "";
+    *tn = 0;
+  }
+}
+
+static void enc_get_data(const capnp_ptr_t *s, uint16_t idx,
+                         const uint8_t **p, size_t *pn) {
+  int rc;
+  *p = NULL;
+  *pn = 0;
+  if (!s || s->kind != CAPNP_PK_STRUCT)
+    return;
+  rc = capnp_get_data(s, idx, p, pn);
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    *p = NULL;
+    *pn = 0;
+  }
+}
+
+/* Pointer element of a list. A struct list reads its first pointer. */
+static void enc_list_ptr(const capnp_ptr_t *list, uint32_t i,
+                         capnp_ptr_t *out) {
+  capnp_ptr_t el;
+  int rc;
+  null_ptr(out);
+  if (list->esize == CAPNP_SZ_COMPOSITE) {
+    rc = capnp_list_get_struct(list, i, &el);
+    if (rc == CAPNP_OK)
+      rc = capnp_getp(&el, 0, out);
+  } else {
+    rc = capnp_list_getp(list, i, out);
+  }
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    null_ptr(out);
+  }
+}
+
+static void enc_list_struct(const capnp_ptr_t *list, uint32_t i,
+                            capnp_ptr_t *out) {
+  int rc = capnp_list_get_struct(list, i, out);
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    null_ptr(out);
+  }
+}
+
+static void enc_list_text(const capnp_ptr_t *list, uint32_t i, const char **t,
+                          size_t *tn) {
+  int rc = capnp_list_get_text(list, i, t, tn);
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    *t = "";
+    *tn = 0;
+  }
+}
+
+static void enc_list_data(const capnp_ptr_t *list, uint32_t i,
+                          const uint8_t **p, size_t *pn) {
+  capnp_ptr_t el;
+  int rc = capnp_list_get_struct(list, i, &el);
+  *p = NULL;
+  *pn = 0;
+  if (rc == CAPNP_OK)
+    rc = capnp_get_data(&el, 0, p, pn);
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    *p = NULL;
+    *pn = 0;
+  }
+}
+
 static int field_has_wire(capnp_dyn_t *d, const capnp_ptr_t *s,
                           const dyn_field_t *f, const brand_env_t *env,
                           int non_null) {
@@ -1736,8 +1934,7 @@ static int field_has_wire(capnp_dyn_t *d, const capnp_ptr_t *s,
   if (ft.list_depth > 0 || is_ptr_type(ft.which)) {
     capnp_ptr_t p;
     free_rtype(&ft);
-    if (capnp_getp(s, (uint16_t)f->offset, &p) != CAPNP_OK)
-      return 0;
+    enc_getp(s, (uint16_t)f->offset, &p);
     return p.kind != CAPNP_PK_NULL;
   }
   if (non_null) {
@@ -1817,8 +2014,9 @@ static int encode_text_list(buf_t *b, capnp_dyn_t *d,
       capnp_ptr_t sub;
       rtype_t inner = *elem_rt;
       inner.list_depth--;
-      if (capnp_list_getp(list, i, &sub) != CAPNP_OK ||
-          encode_text_list(&eb, d, &inner, &sub, next_ind, TMODE_BARE,
+      enc_list_ptr(list, i, &sub);
+      enc_expect_list(&sub, &inner);
+      if (encode_text_list(&eb, d, &inner, &sub, next_ind, TMODE_BARE,
                            depth + 1)) {
         free(eb.data);
         free_pieces(&pl);
@@ -1927,8 +2125,8 @@ static int encode_text_list(buf_t *b, capnp_dyn_t *d,
       case TY_TEXT: {
         const char *t = "";
         size_t tn = 0;
-        if (capnp_list_get_text(list, i, &t, &tn) != CAPNP_OK ||
-            quote_text_capnp(&eb, (const uint8_t *)t, tn, 0)) {
+        enc_list_text(list, i, &t, &tn);
+        if (quote_text_capnp(&eb, (const uint8_t *)t, tn, 0)) {
           free(eb.data);
           free_pieces(&pl);
           return -1;
@@ -1936,12 +2134,10 @@ static int encode_text_list(buf_t *b, capnp_dyn_t *d,
         break;
       }
       case TY_DATA: {
-        capnp_ptr_t el;
         const uint8_t *p = NULL;
         size_t pn = 0;
-        if (capnp_list_get_struct(list, i, &el) != CAPNP_OK ||
-            capnp_get_data(&el, 0, &p, &pn) != CAPNP_OK ||
-            quote_text_capnp(&eb, p, pn, 1)) {
+        enc_list_data(list, i, &p, &pn);
+        if (quote_text_capnp(&eb, p, pn, 1)) {
           free(eb.data);
           free_pieces(&pl);
           return -1;
@@ -1951,22 +2147,27 @@ static int encode_text_list(buf_t *b, capnp_dyn_t *d,
       case TY_STRUCT: {
         capnp_ptr_t el;
         dyn_struct_t *es = find_struct_id(d, elem_rt->type_id);
-        if (!es || capnp_list_get_struct(list, i, &el) != CAPNP_OK ||
-            encode_text_struct(&eb, d, es, &elem_rt->brand, &el, next_ind,
-                               TMODE_BARE, depth + 1)) {
+        if (es)
+          enc_list_struct(list, i, &el);
+        if (!es || encode_text_struct(&eb, d, es, &elem_rt->brand, &el,
+                                      next_ind, TMODE_BARE, depth + 1)) {
           free(eb.data);
           free_pieces(&pl);
           return -1;
         }
         break;
       }
-      case TY_IFACE:
+      case TY_IFACE: {
+        capnp_ptr_t c;
+        enc_list_ptr(list, i, &c);
+        enc_expect_cap(&c);
         if (buf_str(&eb, "<external capability>")) {
           free(eb.data);
           free_pieces(&pl);
           return -1;
         }
         break;
+      }
       case TY_ANY:
         if (buf_str(&eb, "<opaque pointer>")) {
           free(eb.data);
@@ -2016,9 +2217,8 @@ static int encode_text_field_value(buf_t *b, capnp_dyn_t *d,
     capnp_ptr_t list;
     rtype_t elem = ft;
     elem.list_depth--;
-    memset(&list, 0, sizeof(list));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &list);
+    enc_getp(s, (uint16_t)f->offset, &list);
+    enc_expect_list(&list, &elem);
     if (list.kind == CAPNP_PK_NULL && f->has_def_val)
       capnp_getp(&f->def_val, 0, &list);
     rc = encode_text_list(b, d, &elem, &list, indent, TMODE_PREFIXED,
@@ -2086,18 +2286,12 @@ static int encode_text_field_value(buf_t *b, capnp_dyn_t *d,
     const char *t = "";
     size_t tn = 0;
     capnp_ptr_t p;
-    memset(&p, 0, sizeof(p));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &p);
-    if (p.kind != CAPNP_PK_NULL) {
-      if (capnp_get_text(s, (uint16_t)f->offset, &t, &tn) != CAPNP_OK) {
-        free_rtype(&ft);
-        return -1;
-      }
-    } else if (f->has_def_val &&
-               capnp_get_u16(&f->def_val, 0, 0xffff) == TY_TEXT) {
+    enc_getp(s, (uint16_t)f->offset, &p);
+    if (p.kind != CAPNP_PK_NULL)
+      enc_get_text(s, (uint16_t)f->offset, &t, &tn);
+    else if (f->has_def_val &&
+             capnp_get_u16(&f->def_val, 0, 0xffff) == TY_TEXT)
       capnp_get_text(&f->def_val, 0, &t, &tn);
-    }
     rc = quote_text_capnp(b, (const uint8_t *)t, tn, 0);
     break;
   }
@@ -2105,18 +2299,12 @@ static int encode_text_field_value(buf_t *b, capnp_dyn_t *d,
     const uint8_t *p = NULL;
     size_t pn = 0;
     capnp_ptr_t q;
-    memset(&q, 0, sizeof(q));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &q);
-    if (q.kind != CAPNP_PK_NULL) {
-      if (capnp_get_data(s, (uint16_t)f->offset, &p, &pn) != CAPNP_OK) {
-        free_rtype(&ft);
-        return -1;
-      }
-    } else if (f->has_def_val &&
-               capnp_get_u16(&f->def_val, 0, 0xffff) == TY_DATA) {
+    enc_getp(s, (uint16_t)f->offset, &q);
+    if (q.kind != CAPNP_PK_NULL)
+      enc_get_data(s, (uint16_t)f->offset, &p, &pn);
+    else if (f->has_def_val &&
+             capnp_get_u16(&f->def_val, 0, 0xffff) == TY_DATA)
       capnp_get_data(&f->def_val, 0, &p, &pn);
-    }
     rc = quote_text_capnp(b, p, pn, 1);
     break;
   }
@@ -2128,17 +2316,21 @@ static int encode_text_field_value(buf_t *b, capnp_dyn_t *d,
       free_rtype(&ft);
       return -1;
     }
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &child);
+    enc_getp(s, (uint16_t)f->offset, &child);
+    enc_expect_struct(&child);
     if (child.kind == CAPNP_PK_NULL && f->has_def_val)
       capnp_getp(&f->def_val, 0, &child);
     rc = encode_text_struct(b, d, cs, &ft.brand, &child, indent,
                             TMODE_PREFIXED, depth + 1);
     break;
   }
-  case TY_IFACE:
+  case TY_IFACE: {
+    capnp_ptr_t c;
+    enc_getp(s, (uint16_t)f->offset, &c);
+    enc_expect_cap(&c);
     rc = buf_str(b, "<external capability>");
     break;
+  }
   case TY_ANY:
     rc = buf_str(b, "<opaque pointer>");
     break;
@@ -2409,9 +2601,8 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
         if (resolve_field_type(d, f, env, &ft))
           return -1;
         cs = find_struct_id(d, ft.type_id);
-        memset(&child, 0, sizeof(child));
-        if (s && s->kind == CAPNP_PK_STRUCT)
-          capnp_getp(s, (uint16_t)f->offset, &child);
+        enc_getp(s, (uint16_t)f->offset, &child);
+        enc_expect_struct(&child);
         if (!cs ||
             gather_json_fields(d, cs, &ft.brand, &child, NULL, NULL,
                                next_prefix, out, depth + 1)) {
@@ -2474,9 +2665,8 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
           if (resolve_field_type(d, uf, env, &ft))
             return -1;
           cs = find_struct_id(d, ft.type_id);
-          memset(&child, 0, sizeof(child));
-          if (s && s->kind == CAPNP_PK_STRUCT)
-            capnp_getp(s, (uint16_t)uf->offset, &child);
+          enc_getp(s, (uint16_t)uf->offset, &child);
+          enc_expect_struct(&child);
           if (!cs ||
               gather_json_fields(d, cs, &ft.brand, &child, NULL, NULL,
                                  next_prefix, out, depth + 1)) {
@@ -2592,8 +2782,7 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
   case 3: { /* string */
     const char *t = "";
     size_t tn = 0;
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_get_text(s, 0, &t, &tn);
+    enc_get_text(s, 0, &t, &tn);
     return quote_json_string(b, t, tn);
   }
   case 4: { /* array @0 :List(Value) */
@@ -2603,9 +2792,8 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
     int sub_indent;
     if (buf_ch(b, '['))
       return -1;
-    memset(&arr, 0, sizeof(arr));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, 0, &arr);
+    enc_getp(s, 0, &arr);
+    enc_expect_struct_list(&arr);
     if (arr.kind == CAPNP_PK_LIST)
       n = capnp_list_len(&arr);
     sub_indent = indent + (n > 1 ? 1 : 0);
@@ -2615,8 +2803,8 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
       buf_t eb;
       int cm = 0;
       memset(&eb, 0, sizeof(eb));
-      if (capnp_list_get_struct(&arr, i, &el) != CAPNP_OK ||
-          encode_json_value_struct(&eb, &el, sub_indent, &cm, 0, pretty,
+      enc_list_struct(&arr, i, &el);
+      if (encode_json_value_struct(&eb, &el, sub_indent, &cm, 0, pretty,
                                    depth + 1) ||
           add_json_item(&jl, eb.data, eb.n, cm)) {
         free(eb.data);
@@ -2638,9 +2826,8 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
     int sub_indent;
     if (buf_ch(b, '{'))
       return -1;
-    memset(&obj, 0, sizeof(obj));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, 0, &obj);
+    enc_getp(s, 0, &obj);
+    enc_expect_struct_list(&obj);
     if (obj.kind == CAPNP_PK_LIST)
       n = capnp_list_len(&obj);
     sub_indent = indent + (n > 1 ? 1 : 0);
@@ -2652,13 +2839,10 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
       buf_t eb;
       int cm = 0;
       memset(&eb, 0, sizeof(eb));
-      memset(&fval, 0, sizeof(fval));
-      if (capnp_list_get_struct(&obj, i, &fld) != CAPNP_OK) {
-        free_json_list(&jl);
-        return -1;
-      }
-      capnp_get_text(&fld, 0, &fn, &fn_len);
-      capnp_getp(&fld, 1, &fval);
+      enc_list_struct(&obj, i, &fld);
+      enc_get_text(&fld, 0, &fn, &fn_len);
+      enc_getp(&fld, 1, &fval);
+      enc_expect_struct(&fval);
       if (quote_json_string(&eb, fn, fn_len) ||
           buf_str(&eb, pretty ? ": " : ":") ||
           encode_json_value_struct(&eb, &fval, sub_indent, &cm, 1, pretty,
@@ -2683,14 +2867,11 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
     json_list_t jl;
     uint32_t i, n = 0;
     int sub_indent;
-    memset(&call, 0, sizeof(call));
-    memset(&params, 0, sizeof(params));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, 0, &call);
-    if (call.kind == CAPNP_PK_STRUCT) {
-      capnp_get_text(&call, 0, &fn, &fn_len);
-      capnp_getp(&call, 1, &params);
-    }
+    enc_getp(s, 0, &call);
+    enc_expect_struct(&call);
+    enc_get_text(&call, 0, &fn, &fn_len);
+    enc_getp(&call, 1, &params);
+    enc_expect_struct_list(&params);
     if (buf_add(b, fn, fn_len) || buf_ch(b, '('))
       return -1;
     if (params.kind == CAPNP_PK_LIST)
@@ -2702,8 +2883,8 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
       buf_t eb;
       int cm = 0;
       memset(&eb, 0, sizeof(eb));
-      if (capnp_list_get_struct(&params, i, &el) != CAPNP_OK ||
-          encode_json_value_struct(&eb, &el, sub_indent, &cm, 1, pretty,
+      enc_list_struct(&params, i, &el);
+      if (encode_json_value_struct(&eb, &el, sub_indent, &cm, 1, pretty,
                                    depth + 1) ||
           add_json_item(&jl, eb.data, eb.n, cm)) {
         free(eb.data);
@@ -2721,8 +2902,7 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
   case 7: { /* raw @0 :Text */
     const char *t = "";
     size_t tn = 0;
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_get_text(s, 0, &t, &tn);
+    enc_get_text(s, 0, &t, &tn);
     return buf_add(b, t, tn);
   }
   default:
@@ -2755,8 +2935,9 @@ static int encode_json_list(buf_t *b, capnp_dyn_t *d,
       capnp_ptr_t sub;
       rtype_t inner = *elem_rt;
       inner.list_depth--;
-      if (capnp_list_getp(list, i, &sub) != CAPNP_OK ||
-          encode_json_list(&eb, d, &inner, &sub, sub_indent, &cm, 0, pretty,
+      enc_list_ptr(list, i, &sub);
+      enc_expect_list(&sub, &inner);
+      if (encode_json_list(&eb, d, &inner, &sub, sub_indent, &cm, 0, pretty,
                            depth + 1)) {
         free(eb.data);
         free_json_list(&jl);
@@ -2810,28 +2991,23 @@ static int encode_json_list(buf_t *b, capnp_dyn_t *d,
       case TY_TEXT: {
         const char *t = "";
         size_t tn = 0;
-        if (capnp_list_get_text(list, i, &t, &tn) != CAPNP_OK)
-          rc = -1;
-        else
-          rc = quote_json_string(&eb, t, tn);
+        enc_list_text(list, i, &t, &tn);
+        rc = quote_json_string(&eb, t, tn);
         break;
       }
       case TY_DATA: {
-        capnp_ptr_t el;
         const uint8_t *p = NULL;
         size_t pn = 0;
-        if (capnp_list_get_struct(list, i, &el) != CAPNP_OK ||
-            capnp_get_data(&el, 0, &p, &pn) != CAPNP_OK)
-          rc = -1;
-        else
-          rc = encode_json_data_bytes(&eb, p, pn, 0, sub_indent, &cm, 0,
-                                      pretty);
+        enc_list_data(list, i, &p, &pn);
+        rc = encode_json_data_bytes(&eb, p, pn, 0, sub_indent, &cm, 0, pretty);
         break;
       }
       case TY_STRUCT: {
         capnp_ptr_t el;
         dyn_struct_t *es = find_struct_id(d, elem_rt->type_id);
-        if (!es || capnp_list_get_struct(list, i, &el) != CAPNP_OK)
+        if (es)
+          enc_list_struct(list, i, &el);
+        if (!es)
           rc = -1;
         else if (es->id == JSON_VALUE_TYPE_ID)
           rc = encode_json_value_struct(&eb, &el, sub_indent, &cm, 0, pretty,
@@ -2891,9 +3067,8 @@ static int encode_json_field_item(buf_t *b, capnp_dyn_t *d,
     capnp_ptr_t list;
     rtype_t elem = ft;
     elem.list_depth--;
-    memset(&list, 0, sizeof(list));
-    if (s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &list);
+    enc_getp(s, (uint16_t)f->offset, &list);
+    enc_expect_list(&list, &elem);
     if (list.kind == CAPNP_PK_NULL && f->has_def_val)
       capnp_getp(&f->def_val, 0, &list);
     rc = encode_json_list(b, d, &elem, &list, indent, multiline, 1, pretty,
@@ -2967,18 +3142,12 @@ static int encode_json_field_item(buf_t *b, capnp_dyn_t *d,
     const char *t = "";
     size_t tn = 0;
     capnp_ptr_t p;
-    memset(&p, 0, sizeof(p));
-    if (s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &p);
-    if (p.kind != CAPNP_PK_NULL) {
-      if (capnp_get_text(s, (uint16_t)f->offset, &t, &tn) != CAPNP_OK) {
-        free_rtype(&ft);
-        return -1;
-      }
-    } else if (f->has_def_val &&
-               capnp_get_u16(&f->def_val, 0, 0xffff) == TY_TEXT) {
+    enc_getp(s, (uint16_t)f->offset, &p);
+    if (p.kind != CAPNP_PK_NULL)
+      enc_get_text(s, (uint16_t)f->offset, &t, &tn);
+    else if (f->has_def_val &&
+             capnp_get_u16(&f->def_val, 0, 0xffff) == TY_TEXT)
       capnp_get_text(&f->def_val, 0, &t, &tn);
-    }
     rc = quote_json_string(b, t, tn);
     break;
   }
@@ -2986,18 +3155,12 @@ static int encode_json_field_item(buf_t *b, capnp_dyn_t *d,
     const uint8_t *p = NULL;
     size_t pn = 0;
     capnp_ptr_t q;
-    memset(&q, 0, sizeof(q));
-    if (s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &q);
-    if (q.kind != CAPNP_PK_NULL) {
-      if (capnp_get_data(s, (uint16_t)f->offset, &p, &pn) != CAPNP_OK) {
-        free_rtype(&ft);
-        return -1;
-      }
-    } else if (f->has_def_val &&
-               capnp_get_u16(&f->def_val, 0, 0xffff) == TY_DATA) {
+    enc_getp(s, (uint16_t)f->offset, &q);
+    if (q.kind != CAPNP_PK_NULL)
+      enc_get_data(s, (uint16_t)f->offset, &p, &pn);
+    else if (f->has_def_val &&
+             capnp_get_u16(&f->def_val, 0, 0xffff) == TY_DATA)
       capnp_get_data(&f->def_val, 0, &p, &pn);
-    }
     rc = encode_json_data_bytes(b, p, pn, f->json_data_mode, indent, multiline,
                                 1, pretty);
     break;
@@ -3010,8 +3173,8 @@ static int encode_json_field_item(buf_t *b, capnp_dyn_t *d,
       free_rtype(&ft);
       return -1;
     }
-    if (s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &child);
+    enc_getp(s, (uint16_t)f->offset, &child);
+    enc_expect_struct(&child);
     if (child.kind == CAPNP_PK_NULL && f->has_def_val)
       capnp_getp(&f->def_val, 0, &child);
     if (cs->id == JSON_VALUE_TYPE_ID)
@@ -3094,6 +3257,9 @@ static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
   *out = NULL;
   *len = 0;
   encode_oom = 0;
+  encode_wire_err = CAPNP_OK;
+  if (s->kind != CAPNP_PK_STRUCT && s->kind != CAPNP_PK_NULL)
+    return CAPNP_ERR_KIND;
   if (resolve_root_type_name(d, type_name, &rt, &st) != CAPNP_OK)
     return CAPNP_ERR_KIND;
   memset(&b, 0, sizeof(b));
@@ -3106,10 +3272,12 @@ static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
                             0);
   }
   free_rtype(&rt);
-  if (rc || !b.data) {
+  if (rc || !b.data || encode_wire_err) {
     free(b.data);
     if (encode_oom)
       return CAPNP_ERR_ALLOC;
+    if (encode_wire_err)
+      return encode_wire_err;
     return CAPNP_ERR_KIND;
   }
   *out = b.data;

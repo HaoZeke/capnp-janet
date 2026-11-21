@@ -302,6 +302,16 @@ if bash.found()
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
   )
+  test(
+    'convert_parity',
+    bash,
+    args: [meson.project_source_root() / 'test/test_convert_parity.sh'],
+    depends: [capnp_eval],
+    workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
 else
   message('codegen smoke: skipped (no bash).')
 endif
