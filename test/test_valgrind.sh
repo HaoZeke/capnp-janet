@@ -9,8 +9,11 @@ if ! command -v valgrind >/dev/null 2>&1; then
 fi
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${CAPNP_JANET_BUILD:-$ROOT/build}"
-# Valgrind and AddressSanitizer cannot instrument the same binary.
-if ldd "$BUILD/test_wire" 2>/dev/null | grep -q libasan; then
+# Valgrind and AddressSanitizer cannot instrument the same binary. A
+# pipe into `grep -q` could end `ldd` with SIGPIPE, which pipefail
+# reports as a miss.
+deps=$(ldd "$BUILD/test_wire" 2>/dev/null || true)
+if [[ "$deps" == *libasan* ]]; then
   echo "SKIP: address sanitizer build" >&2
   exit 77
 fi

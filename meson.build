@@ -494,29 +494,42 @@ else
 endif
 
 if bash.found()
+  valgrind_bins = [
+    test_wire,
+    test_robust,
+    test_orphan,
+    test_list_text,
+    test_addressbook,
+    test_calculator,
+    test_packed,
+    test_lists,
+    test_list_evolution,
+    test_multiseg,
+    test_canonical,
+    test_copy,
+    test_rpc_join,
+    test_rpc_handoff,
+    test_rpc_client,
+    test_transport,
+    test_abi_layout,
+  ]
   test(
     'valgrind_c',
     bash,
     args: [meson.project_source_root() / 'test/test_valgrind.sh'],
-    depends: [
-      test_wire,
-      test_robust,
-      test_orphan,
-      test_list_text,
-      test_addressbook,
-      test_calculator,
-      test_packed,
-      test_lists,
-      test_list_evolution,
-      test_multiseg,
-      test_canonical,
-      test_copy,
-      test_rpc_join,
-      test_rpc_handoff,
-      test_rpc_client,
-      test_transport,
-      test_abi_layout,
-    ],
+    depends: valgrind_bins,
+    workdir: meson.project_source_root(),
+    timeout: 600,
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+      'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root(),
+    },
+  )
+  test(
+    'valgrind_guard',
+    bash,
+    args: [meson.project_source_root() / 'test/test_valgrind_guard.sh'],
+    depends: valgrind_bins,
     workdir: meson.project_source_root(),
     timeout: 600,
     env: {
