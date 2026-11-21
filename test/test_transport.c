@@ -71,9 +71,10 @@ static int fill_add(void *ctx, const capnp_bptr_t *params) {
   return 0;
 }
 
-static void child_serve(int lfd) {
+static void child_serve(int lfd, capnp_link_t *parent_client) {
   capnp_link_t *link = (capnp_link_t *)calloc(1, sizeof(*link));
   int i;
+  free(parent_client);
   if (!link || capnp_link_accept(lfd, link))
     _exit(1);
   capnp_rpc_set_bootstrap(&link->conn, &g_server_obj, adder_dispatch);
@@ -343,7 +344,7 @@ static void loopback(int unix_sock) {
   }
   pid = fork();
   if (pid == 0)
-    child_serve(lfd);
+    child_serve(lfd, client);
   if (unix_sock)
     check(have_dir && capnp_link_dial_unix(client, path) == CAPNP_OK, "dial unix");
   else
