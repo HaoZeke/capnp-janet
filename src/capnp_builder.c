@@ -1130,19 +1130,14 @@ static void walk_list_body(capnp_builder_t *b, uint32_t seg, size_t start,
     uint64_t tag = load_w(b, seg, start);
     uint16_t dw, pw;
     size_t step, i, elems;
-    int32_t off;
     if (capnp_wp_kind(tag) != CAPNP_WK_STRUCT)
       return;
     dw = capnp_wp_struct_dwords(tag);
     pw = capnp_wp_struct_pwords(tag);
     step = (size_t)dw + pw;
-    off = capnp_wp_offset(tag);
-    if (off > 0)
-      elems = (size_t)off;
-    else if (step)
-      elems = (size_t)count / step;
-    else
-      elems = 0;
+    elems = ((uint32_t)tag >> 2) & 0x1fffffffu;
+    if (elems == 0)
+      elems = step ? (size_t)count / step : 0;
     for (i = 0; i < elems; i++) {
       size_t base = start + 1u + i * step;
       walk_struct_ptrs(b, seg, base, dw, pw, depth, watch, pin);

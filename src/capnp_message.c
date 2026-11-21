@@ -305,7 +305,7 @@ static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
   out->count = count;
   if (esize == CAPNP_SZ_COMPOSITE) {
     uint64_t tag, need;
-    int32_t elems;
+    uint32_t elems;
     uint16_t dw, pw;
     uint32_t step;
     if (bounds_word(m, seg, start))
@@ -315,15 +315,13 @@ static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
     tag = read_word(m, seg, start);
     if (capnp_wp_kind(tag) != CAPNP_WK_STRUCT)
       return CAPNP_ERR_KIND;
-    elems = capnp_wp_offset(tag);
-    if (elems < 0)
-      return CAPNP_ERR_BOUNDS;
+    elems = ((uint32_t)tag >> 2) & 0x1fffffffu;
     dw = capnp_wp_struct_dwords(tag);
     pw = capnp_wp_struct_pwords(tag);
     step = (uint32_t)dw + (uint32_t)pw;
     if ((uint64_t)elems * (uint64_t)step > (uint64_t)count)
       return CAPNP_ERR_BOUNDS;
-    out->count = (uint32_t)elems;
+    out->count = elems;
     out->dwords = dw;
     out->pwords = pw;
     out->step_words = step;

@@ -121,6 +121,10 @@ check_framed tag-with-offset "$PARITY" Parity "text json binary" -- \
 check_framed pad-not-far "$PARITY" Parity "text json binary" -- \
   0000000100000001 3 0000000100000006 0000000100000010 0000000100000014 2a
 
+# Bit 31 of a composite list tag word is ignored, as C++ masks to 29 bits.
+check composite-tag-bit31 "$PARITY" Parity "text json binary canonical" -- \
+  $(parity_ptr 18 0000000f00000035 0000000180000004 0)
+
 # A null root reads as an empty struct; any other non-struct root fails.
 check null-root "$PARITY" Parity "text json binary packed flat canonical" -- 0
 check list-root "$PARITY" Parity "text json binary packed flat canonical" -- \
