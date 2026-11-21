@@ -171,6 +171,32 @@ capnp decode "$ROOT/schema/defaults.capnp" Point <"$TMP/origin.bin" >"$TMP/origi
 grep -q 'x = 4' "$TMP/origin.txt"
 grep -q 'y = 5' "$TMP/origin.txt"
 
+# Each output holds only its own file's nodes, as with capnpc-c++: not
+# those of another requested file, nor of an import.
+mkdir "$TMP/multi"
+cat >"$TMP/multi/one.capnp" <<'EOF'
+@0xa1b2c3d4e5f60001;
+struct Alpha { x @0 :UInt32; }
+EOF
+cat >"$TMP/multi/two.capnp" <<'EOF'
+@0xa1b2c3d4e5f60002;
+using One = import "one.capnp";
+struct Beta { a @0 :One.Alpha; }
+EOF
+(cd "$TMP/multi" && capnp compile "-o$PLUGIN" one.capnp two.capnp >/dev/null)
+grep -q '(def Alpha-data-words' "$TMP/multi/one.janet"
+grep -q '(def Beta-data-words' "$TMP/multi/two.janet"
+if grep -q Beta "$TMP/multi/one.janet" || grep -q Alpha-data "$TMP/multi/two.janet"; then
+  echo "FAIL: generated module holds another file's nodes" >&2
+  exit 1
+fi
+(cd "$TMP/multi" && rm -f one.janet && capnp compile "-o$PLUGIN" two.capnp >/dev/null)
+test ! -e "$TMP/multi/one.janet"
+if grep -q Alpha-data "$TMP/multi/two.janet"; then
+  echo "FAIL: generated module holds an imported file's nodes" >&2
+  exit 1
+fi
+
 MODULE=${CAPNP_JANET_MODULE:-$BUILD/capnp.so}
 if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then
   cp "$MODULE" "$TMP/capnp.so"

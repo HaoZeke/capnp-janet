@@ -1560,20 +1560,29 @@ static int write_module(const char *filename, const capnp_ptr_t *nodes,
   fprintf(out, "(def file-id (int/u64 \"0x%llx\"))\n",
           (unsigned long long)file_id);
 
+  /* Every node's display name starts with its file's name and a colon,
+   * including method parameter structs whose scopeId is 0. */
+  capnp_ptr_t file_node;
+  const char *file_name = NULL;
+  size_t file_name_len = 0;
+  if (node_by_id(nodes, file_id, &file_node)) {
+    file_name = get_text(&file_node, 0);
+    file_name_len = strlen(file_name);
+  }
+
   uint32_t nn = capnp_list_len(nodes);
   for (uint32_t i = 0; i < nn; i++) {
     capnp_ptr_t node;
+    const char *display;
     if (capnp_list_getp(nodes, i, &node) != CAPNP_OK)
       continue;
-    uint64_t scope = capnp_get_u64(&node, 16, 0); /* scopeId bits[128,192) */
-    /* Emit nodes scoped to this file (scopeId == file_id) or nested. */
     uint16_t which = capnp_get_u16(&node, 12, 0xffff);
     if (which == NODE_FILE)
       continue;
-    /* Heuristic: emit all structs/enums whose displayName mentions the stem
-     * or whose scopeId matches file or a nested id we do not track yet —
-     * for v1 emit every struct/enum in the request (small schemas). */
-    (void)scope;
+    display = get_text(&node, 0);
+    if (!file_name || strncmp(display, file_name, file_name_len) != 0 ||
+        display[file_name_len] != ':')
+      continue;
     if (which == NODE_STRUCT)
       emit_struct(out, &node, nodes);
     else if (which == NODE_ENUM)

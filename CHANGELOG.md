@@ -27,6 +27,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnpc-janet` writes only a file's own nodes into its module. Every
+  module used to repeat the nodes of every other requested or imported file.
 - Generated getters return the schema default for a null Text, Data, struct
   or list field. Text and Data defaults were not emitted, and the struct and
   list default check never matched because it took `(v :kind)` for a call.
