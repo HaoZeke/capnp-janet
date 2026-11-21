@@ -184,6 +184,10 @@ for spec in 0000000000000000 000000000000000000 00000000000000000000000000000000
 done
 in_fmt=binary
 full=0
+# A root union discriminant of 0xffff names no member, so C++ prints
+# the non-union fields and no union.
+check union-ffff "$PARITY" Parity "$ALL" -- \
+  0020000a00000000 0 0 0 0 0 0 0 0 0000ffff00000000 $(printf '0 %.0s' {1..33})
 check list-root "$PARITY" Parity "$ALL" -- \
   0000000100000001 0000000000000005
 full=0

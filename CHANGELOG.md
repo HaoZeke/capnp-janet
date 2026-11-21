@@ -32,6 +32,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- A union discriminant of 0xffff names no member. JSON output used to
+  print the first non-union field a second time, and `capnp_dyn_which`
+  named that field; it now returns `CAPNP_ERR_KIND`.
 - A text float with an empty exponent, such as `1e`, `1.e` or `-1E-`,
   reads as 0 or -0 after a recoverable error, in fields, lists and a
   `Json.Value`, as `capnp` does.

@@ -1202,7 +1202,7 @@ int capnp_dyn_which(const capnp_dyn_t *d, const capnp_ptr_t *s,
     return CAPNP_ERR_KIND;
   struct_which(s, st, &active);
   for (i = 0; i < st->nfields; i++) {
-    if (st->fields[i].disc == active) {
+    if (st->fields[i].disc != 0xffff && st->fields[i].disc == active) {
       *out = st->fields[i].name;
       return CAPNP_OK;
     }
@@ -2782,7 +2782,7 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
     const dyn_field_t *uf = NULL;
     struct_which(s, st, &which);
     for (i = 0; i < st->nfields; i++) {
-      if (st->fields[i].disc == which) {
+      if (st->fields[i].disc != 0xffff && st->fields[i].disc == which) {
         uf = &st->fields[i];
         break;
       }
@@ -5889,7 +5889,7 @@ static int adopt_group_fields(capnp_dyn_t *d, const dyn_struct_t *g,
     const dyn_field_t *af = NULL;
     struct_which(src, g, &which);
     for (i = 0; i < g->nfields; i++) {
-      if (g->fields[i].disc == which) {
+      if (g->fields[i].disc != 0xffff && g->fields[i].disc == which) {
         af = &g->fields[i];
         break;
       }
@@ -6367,7 +6367,7 @@ static int decode_json_field_entry(
     if (read_disc(body, st->disc_byte, st->dwords, &active))
       return -1;
     for (i = 0; i < st->nfields; i++) {
-      if (st->fields[i].disc == active) {
+      if (st->fields[i].disc != 0xffff && st->fields[i].disc == active) {
         if (build_field_from_vnode(d, st, &st->fields[i], env, val, body, 1,
                                    depth + 1))
           return -1;
@@ -6472,7 +6472,7 @@ static int decode_json_field_entry(
       if (read_disc(body, st->disc_byte, st->dwords, &active))
         return -1;
       for (j = 0; j < st->nfields; j++) {
-        if (st->fields[j].disc == active) {
+        if (st->fields[j].disc != 0xffff && st->fields[j].disc == active) {
           af = &st->fields[j];
           break;
         }

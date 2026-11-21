@@ -266,6 +266,44 @@ static int cmd_read(const char *req, const char *msg) {
         "inactive union arm rejected");
   capnp_message_free(&em);
 
+  /* A discriminant of 0xffff names no member. It must not match the
+   * fields outside the union. */
+  {
+    uint8_t *a = NULL, *b = NULL;
+    size_t an = 0, bn = 0, k, at = 0;
+    capnp_message_t um = {0};
+    capnp_ptr_t uroot;
+    CHECK(capnp_dyn_decode_text(d, "Conform", "()", 2, &a, &an) == CAPNP_OK &&
+              capnp_dyn_decode_text(d, "Conform", "(note = \"\")", 11, &b,
+                                    &bn) == CAPNP_OK,
+          "decode union pair");
+    /* Past the first word, which holds the segment size, the data
+     * section comes first, so the first byte that differs is the
+     * discriminant. */
+    for (k = 8; a && b && k < an && k < bn; k++)
+      if (a[k] != b[k]) {
+        at = k & ~(size_t)1;
+        break;
+      }
+    CHECK(at > 0, "find discriminant");
+    if (at > 0) {
+      a[at] = 0xff;
+      a[at + 1] = 0xff;
+      CHECK(capnp_message_from_flat(&um, a, an) == CAPNP_OK &&
+                capnp_root(&um, &uroot) == CAPNP_OK,
+            "open 0xffff union");
+      wname = NULL;
+      CHECK(capnp_dyn_which(d, &uroot, "Conform", &wname) == CAPNP_ERR_KIND,
+            "0xffff names no member");
+      CHECK(capnp_dyn_get_bool(d, &uroot, "Conform", "flag", &flag) ==
+                CAPNP_OK,
+            "non-union field beside 0xffff");
+      capnp_message_free(&um);
+    }
+    free(a);
+    free(b);
+  }
+
   capnp_message_free(&m);
   capnp_dyn_free(d);
   return harness_finish();
