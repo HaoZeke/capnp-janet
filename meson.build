@@ -104,10 +104,15 @@ dump_request = executable(
   'app/dump_request.c',
 )
 
+# capnp-eval links the library objects so it can reach the hidden entry
+# points in src/capnp_internal.h, which the shared library does not export.
 capnp_eval = executable(
   'capnp-eval',
   'app/capnp_eval.c',
-  dependencies: capnp_janet_dep,
+  objects: capnp_janet_lib.extract_all_objects(recursive: true),
+  include_directories: [inc, include_directories('src')],
+  c_args: capnp_janet_consumer_args,
+  dependencies: threads,
   install: true,
 )
 

@@ -15,6 +15,8 @@
 #include <capnp-janet/capnp_packed.h>
 #include <capnp-janet/capnp_pointer.h>
 
+#include "capnp_internal.h"
+
 #include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -251,9 +253,8 @@ static int copy_list_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
       return capnp_builder_set_list_void(&body_bptr, 0, 0, n);
     case CAPNP_SZ_BIT: {
       size_t nbytes = ((size_t)n + 7u) / 8u;
-      capnp_orphan_t o;
       capnp_bptr_t start;
-      if (capnp_builder_new_orphan_list(b, CAPNP_SZ_BIT, n, &o, &start))
+      if (capnp_builder_init_list(&body_bptr, 0, 0, CAPNP_SZ_BIT, n, &start))
         return -1;
       if (nbytes) {
         uint8_t *dst =
@@ -262,42 +263,21 @@ static int copy_list_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
         if (n % 8u)
           dst[nbytes - 1] &= (uint8_t)((1u << (n % 8u)) - 1u);
       }
-      return capnp_builder_adopt(&body_bptr, &o);
+      return 0;
     }
     case CAPNP_SZ_BYTE:
-      return capnp_builder_set_list_u8(&body_bptr, 0, 0, srcb, n);
-    case CAPNP_SZ_TWO: {
-      size_t nbytes = (size_t)n * 2u;
-      capnp_orphan_t o;
-      capnp_bptr_t start;
-      if (capnp_builder_new_orphan_list(b, CAPNP_SZ_TWO, n, &o, &start))
-        return -1;
-      if (nbytes)
-        memcpy(b->segs[start.seg].data + start.word * CAPNP_WORD_BYTES, srcb,
-               nbytes);
-      return capnp_builder_adopt(&body_bptr, &o);
-    }
-    case CAPNP_SZ_FOUR: {
-      size_t nbytes = (size_t)n * 4u;
-      capnp_orphan_t o;
-      capnp_bptr_t start;
-      if (capnp_builder_new_orphan_list(b, CAPNP_SZ_FOUR, n, &o, &start))
-        return -1;
-      if (nbytes)
-        memcpy(b->segs[start.seg].data + start.word * CAPNP_WORD_BYTES, srcb,
-               nbytes);
-      return capnp_builder_adopt(&body_bptr, &o);
-    }
+    case CAPNP_SZ_TWO:
+    case CAPNP_SZ_FOUR:
     case CAPNP_SZ_EIGHT: {
-      size_t nbytes = (size_t)n * 8u;
-      capnp_orphan_t o;
+      static const size_t width[] = {0, 0, 1, 2, 4, 8};
+      size_t nbytes = (size_t)n * width[esize];
       capnp_bptr_t start;
-      if (capnp_builder_new_orphan_list(b, CAPNP_SZ_EIGHT, n, &o, &start))
+      if (capnp_builder_init_list(&body_bptr, 0, 0, esize, n, &start))
         return -1;
       if (nbytes)
         memcpy(b->segs[start.seg].data + start.word * CAPNP_WORD_BYTES, srcb,
                nbytes);
-      return capnp_builder_adopt(&body_bptr, &o);
+      return 0;
     }
     default:
       return -1;
@@ -368,11 +348,10 @@ static int rebuild_message(const capnp_message_t *src, size_t seg_words,
     capnp_builder_init_sized(&b, CAPNP_BUILDER_DEFAULT_FIRST_WORDS);
     b.force_single = 1;
   } else if (seg_words > 0) {
-    capnp_builder_init_sized(&b, seg_words);
-    capnp_builder_set_max_seg_words(&b, seg_words);
+    capnp_builder_init_malloc(&b, seg_words, CAPNP_ALLOC_FIXED_SIZE);
   } else {
-    capnp_builder_init_sized(&b, CAPNP_BUILDER_DEFAULT_FIRST_WORDS);
-    b.force_single = 1;
+    capnp_builder_init_malloc(&b, CAPNP_BUILDER_DEFAULT_FIRST_WORDS,
+                              CAPNP_ALLOC_GROW_HEURISTICALLY);
   }
   if (capnp_builder_root(&b, &broot)) {
     capnp_builder_free(&b);

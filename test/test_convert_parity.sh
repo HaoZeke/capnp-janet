@@ -26,17 +26,16 @@ sys.stdout.buffer.write(b"".join(struct.pack("<Q", x) for x in w))
 EOF
 }
 
-# check NAME SCHEMA ROOT FORMATS -- HEX...
-check() {
+# compare NAME SCHEMA ROOT FORMATS: converts $TMP/in.bin with "${extra[@]}"
+extra=()
+compare() {
   local name="$1" schema="$2" root="$3" fmts="$4" fmt ref_rc our_rc
-  shift 5
-  words "$@" >"$TMP/in.bin"
   for fmt in $fmts; do
     ref_rc=0
     our_rc=0
-    capnp convert -I"$INC" "binary:$fmt" "$schema" "$root" \
+    capnp convert -I"$INC" "binary:$fmt" "${extra[@]}" "$schema" "$root" \
       <"$TMP/in.bin" >"$TMP/ref.out" 2>/dev/null || ref_rc=$?
-    "$BIN" convert -I"$INC" "binary:$fmt" "$schema" "$root" \
+    "$BIN" convert -I"$INC" "binary:$fmt" "${extra[@]}" "$schema" "$root" \
       <"$TMP/in.bin" >"$TMP/our.out" 2>/dev/null || our_rc=$?
     if [[ $((ref_rc == 0)) -ne $((our_rc == 0)) ]]; then
       echo "FAIL $name $fmt: status capnp=$ref_rc capnp-eval=$our_rc" >&2
@@ -46,6 +45,20 @@ check() {
       fails=$((fails + 1))
     fi
   done
+}
+
+# check NAME SCHEMA ROOT FORMATS -- HEX...
+check() {
+  local name="$1" schema="$2" root="$3" fmts="$4"
+  shift 5
+  words "$@" >"$TMP/in.bin"
+  compare "$name" "$schema" "$root" "$fmts"
+}
+
+# check_text NAME SCHEMA ROOT FORMATS TEXT: input encoded by `capnp encode`
+check_text() {
+  printf '%s' "$5" | capnp encode -I"$INC" "$2" "$3" >"$TMP/in.bin"
+  compare "$1" "$2" "$3" "$4"
 }
 
 # Corrupt pointers read as defaults in C++ and then fail the conversion.
@@ -70,6 +83,17 @@ check struct-as-cap "$HOLDER" Holder "text" -- \
 check null-root "$PARITY" Parity "text json binary packed flat canonical" -- 0
 check list-root "$PARITY" Parity "text json binary packed flat canonical" -- \
   0000000100000001 0000000000000005
+
+# Binary output is a copy into C++'s MallocMessageBuilder: fixed-size
+# segments under --segment-size, growing ones from 1024 words otherwise.
+SMALL='(vText = "hello", lI32 = [1,2,3], vStruct = (x = 1, y = 2), lText = ["a","bb"], lBool = [true, false, true])'
+for ss in 1 2 3 5 8 16 64; do
+  extra=("--segment-size=$ss")
+  check_text "segment-size-$ss" "$PARITY" Parity "binary packed" "$SMALL"
+done
+extra=()
+BIG="(vData = 0x\"$(printf 'ab%.0s' $(seq 5000))\", lU16 = [$(seq -s, 1 3000)], lText = [\"x\", \"y\"])"
+check_text big-message "$PARITY" Parity "binary packed" "$BIG"
 
 if [[ $fails -ne 0 ]]; then
   echo "convert parity: $fails failure(s)" >&2

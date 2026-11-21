@@ -129,7 +129,7 @@ CAPNP_JANET_EXPORT int capnp_builder_set_list_bool(const capnp_bptr_t *body, uin
                                 uint32_t nitems);
 /* List(Void): length only; no element payload. */
 CAPNP_JANET_EXPORT int capnp_builder_set_list_void(const capnp_bptr_t *body, uint16_t dwords,
-                                uint16_t ptr_index, uint32_t nitems);
+                                 uint16_t ptr_index, uint32_t nitems);
 
 CAPNP_JANET_EXPORT int capnp_builder_set_list_struct(const capnp_bptr_t *body, uint16_t dwords,
                                   uint16_t ptr_index, uint32_t nitems,

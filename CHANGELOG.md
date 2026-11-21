@@ -21,9 +21,15 @@ Pre-1.0 minor releases may include breaking API changes.
 - `capnpc-janet` emits executable typed readers and builders for scalars,
   Text/Data, structs, primitive and struct lists, unions, groups, and interface
   metadata. Generated field names follow Janet's kebab-case convention.
+- The builder can lay out segments the way C++ `MallocMessageBuilder`
+  does. The entry points are internal to `capnp-eval`, so the shared
+  library ABI is unchanged.
 
 ### Fixed
 
+- `capnp-eval convert` to binary or packed matches `capnp convert` byte for
+  byte across segments. `--segment-size` up to 32 words used to fail, and a
+  message over 1024 words came out as one segment.
 - The text and JSON encoders fail on a corrupt pointer, a pointer of the
   wrong kind, or a list whose elements are too narrow for the field. They
   used to print the default and succeed; `capnp convert` 1.4.0 fails.
