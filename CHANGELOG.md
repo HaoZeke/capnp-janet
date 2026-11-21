@@ -27,6 +27,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- JSON `$Json.base64` and `$Json.hex` strings decode as `capnp convert`
+  does: characters outside the alphabet are skipped, a bad hex digit reads
+  as 0, and an odd hex character or partial base64 byte is dropped. These
+  inputs used to be rejected.
 - `capnpc-janet` writes only a file's own nodes into its module. Every
   module used to repeat the nodes of every other requested or imported file.
 - Generated getters return the schema default for a null Text, Data, struct

@@ -4502,80 +4502,42 @@ static int vnode_to_enum(capnp_dyn_t *d, uint64_t enum_id,
   return -1;
 }
 
+static int base64_sextet(unsigned char c) {
+  if (c >= 'A' && c <= 'Z')
+    return c - 'A';
+  if (c >= 'a' && c <= 'z')
+    return c - 'a' + 26;
+  if (c >= '0' && c <= '9')
+    return c - '0' + 52;
+  if (c == '+')
+    return 62;
+  if (c == '/')
+    return 63;
+  return -1;
+}
+
+/* `capnp convert` decodes with kj::decodeBase64 and drops its error flag:
+ * characters outside the alphabet are skipped, padding included, and a
+ * trailing partial byte is lost. */
 static int decode_base64_str(const char *s, size_t n, uint8_t **out,
                              size_t *out_len) {
   uint8_t *buf;
-  size_t w = 0, i = 0;
-  int vals[4];
-  int k = 0, pad = 0;
-  buf = (uint8_t *)malloc((n / 4 + 1) * 3 + 1);
+  size_t i, w = 0;
+  uint32_t acc = 0;
+  unsigned nbits = 0;
+  buf = (uint8_t *)malloc(n / 4 * 3 + 3);
   if (!buf)
     return -1;
   for (i = 0; i < n; i++) {
-    unsigned char c = (unsigned char)s[i];
-    int v = -1;
-    if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f')
+    int v = base64_sextet((unsigned char)s[i]);
+    if (v < 0)
       continue;
-    if (c == '=') {
-      pad++;
-      v = 0;
-    } else if (pad > 0) {
-      free(buf);
-      return -1;
-    } else if (c >= 'A' && c <= 'Z') {
-      v = c - 'A';
-    } else if (c >= 'a' && c <= 'z') {
-      v = c - 'a' + 26;
-    } else if (c >= '0' && c <= '9') {
-      v = c - '0' + 52;
-    } else if (c == '+') {
-      v = 62;
-    } else if (c == '/') {
-      v = 63;
-    } else {
-      free(buf);
-      return -1;
-    }
-    vals[k++] = v;
-    if (k == 4) {
-      uint32_t triple = ((uint32_t)vals[0] << 18) | ((uint32_t)vals[1] << 12) |
-                        ((uint32_t)vals[2] << 6) | (uint32_t)vals[3];
-      if (pad > 2) {
-        free(buf);
-        return -1;
-      }
-      buf[w++] = (uint8_t)((triple >> 16) & 0xff);
-      if (pad < 2)
-        buf[w++] = (uint8_t)((triple >> 8) & 0xff);
-      if (pad < 1)
-        buf[w++] = (uint8_t)(triple & 0xff);
-      k = 0;
-      if (pad > 0) {
-        while (i + 1 < n) {
-          unsigned char rem = (unsigned char)s[++i];
-          if (rem != ' ' && rem != '\t' && rem != '\r' && rem != '\n' &&
-              rem != '\f') {
-            free(buf);
-            return -1;
-          }
-        }
-        break;
-      }
-    }
-  }
-  if (k != 0) {
-    if (pad > 0 || k == 1) {
-      free(buf);
-      return -1;
-    }
-    if (k == 2) {
-      uint32_t triple = ((uint32_t)vals[0] << 18) | ((uint32_t)vals[1] << 12);
-      buf[w++] = (uint8_t)((triple >> 16) & 0xff);
-    } else if (k == 3) {
-      uint32_t triple = ((uint32_t)vals[0] << 18) | ((uint32_t)vals[1] << 12) |
-                        ((uint32_t)vals[2] << 6);
-      buf[w++] = (uint8_t)((triple >> 16) & 0xff);
-      buf[w++] = (uint8_t)((triple >> 8) & 0xff);
+    acc = (acc << 6) | (uint32_t)v;
+    nbits += 6;
+    if (nbits >= 8) {
+      nbits -= 8;
+      buf[w++] = (uint8_t)(acc >> nbits);
+      acc &= (1u << nbits) - 1u;
     }
   }
   *out = buf;
@@ -4583,23 +4545,19 @@ static int decode_base64_str(const char *s, size_t n, uint8_t **out,
   return 0;
 }
 
+/* kj::decodeHex with its error flag dropped: a bad digit reads as zero and
+ * an odd final character is ignored. */
 static int decode_hex_str(const char *s, size_t n, uint8_t **out,
                           size_t *out_len) {
   uint8_t *buf;
   size_t i;
-  if (n % 2 != 0)
-    return -1;
   buf = (uint8_t *)malloc(n / 2 + 1);
   if (!buf)
     return -1;
   for (i = 0; i < n / 2; i++) {
     int hi = hex_nibble((unsigned char)s[2 * i]);
     int lo = hex_nibble((unsigned char)s[2 * i + 1]);
-    if (hi < 0 || lo < 0) {
-      free(buf);
-      return -1;
-    }
-    buf[i] = (uint8_t)((hi << 4) | lo);
+    buf[i] = (uint8_t)(((hi < 0 ? 0 : hi) << 4) | (lo < 0 ? 0 : lo));
   }
   *out = buf;
   *out_len = n / 2;

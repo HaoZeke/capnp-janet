@@ -409,6 +409,40 @@ static int cmd_edges(const char *conform_req, const char *parity_req) {
   }
   capnp_message_free(&m);
 
+  /* 4b. base64 and hex strings decode as `capnp convert` does: stray
+   * characters skipped, bad hex digits read as 0, odd tails dropped. */
+  {
+    static const struct {
+      const char *in, *want;
+    } lenient[] = {
+        {"{\"b64Data\":\"not!base64!\"}", "\"b64Data\":\"notbase6\""},
+        {"{\"hexData\":\"123\"}", "\"hexData\":\"12\""},
+        {"{\"hexData\":\"12zz\"}", "\"hexData\":\"1200\""},
+    };
+    size_t k;
+    for (k = 0; k < sizeof(lenient) / sizeof(lenient[0]); k++) {
+      char *jout = NULL;
+      size_t jlen = 0;
+      capnp_message_t lm = {0};
+      capnp_ptr_t lroot;
+      msg = NULL;
+      CHECK(capnp_dyn_decode_json(dp, "Parity", lenient[k].in,
+                                  strlen(lenient[k].in), &msg,
+                                  &mn) == CAPNP_OK,
+            lenient[k].in);
+      if (msg && capnp_message_from_flat(&lm, msg, mn) == CAPNP_OK &&
+          capnp_root(&lm, &lroot) == CAPNP_OK &&
+          capnp_dyn_encode_json_short(dp, "Parity", &lroot, &jout, &jlen) ==
+              CAPNP_OK)
+        CHECK(strstr(jout, lenient[k].want) != NULL, lenient[k].want);
+      else
+        CHECK(0, lenient[k].in);
+      free(jout);
+      free(msg);
+      capnp_message_free(&lm);
+    }
+  }
+
   /* 5. Strict JSON grammar and trailing-token rejection + error-path leak
    * check (under ASan/LSan) */
   {
@@ -430,9 +464,6 @@ static int cmd_edges(const char *conform_req, const char *parity_req) {
         "{\"vU64\":\"18446744073709551616\"}",
         "{\"vI64\":\"9223372036854775808\"}",
         "{\"vI64\":\"177a\"}",
-        "{\"b64Data\":\"not!base64!\"}",
-        "{\"hexData\":\"123\"}",
-        "{\"hexData\":\"12zz\"}",
         "{\"vText\":\"unterminated",
     };
     const char *bad_text[] = {

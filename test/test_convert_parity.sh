@@ -26,16 +26,18 @@ sys.stdout.buffer.write(b"".join(struct.pack("<Q", x) for x in w))
 EOF
 }
 
-# compare NAME SCHEMA ROOT FORMATS: converts $TMP/in.bin with "${extra[@]}"
+# compare NAME SCHEMA ROOT FORMATS: converts $TMP/in.bin from $in_fmt with
+# "${extra[@]}"
 extra=()
+in_fmt=binary
 compare() {
   local name="$1" schema="$2" root="$3" fmts="$4" fmt ref_rc our_rc
   for fmt in $fmts; do
     ref_rc=0
     our_rc=0
-    capnp convert -I"$INC" "binary:$fmt" "${extra[@]}" "$schema" "$root" \
+    capnp convert -I"$INC" "$in_fmt:$fmt" "${extra[@]}" "$schema" "$root" \
       <"$TMP/in.bin" >"$TMP/ref.out" 2>/dev/null || ref_rc=$?
-    "$BIN" convert -I"$INC" "binary:$fmt" "${extra[@]}" "$schema" "$root" \
+    "$BIN" convert -I"$INC" "$in_fmt:$fmt" "${extra[@]}" "$schema" "$root" \
       <"$TMP/in.bin" >"$TMP/our.out" 2>/dev/null || our_rc=$?
     if [[ $((ref_rc == 0)) -ne $((our_rc == 0)) ]]; then
       echo "FAIL $name $fmt: status capnp=$ref_rc capnp-eval=$our_rc" >&2
@@ -140,6 +142,20 @@ done
 extra=()
 BIG="(vData = 0x\"$(printf 'ab%.0s' $(seq 5000))\", lU16 = [$(seq -s, 1 3000)], lText = [\"x\", \"y\"])"
 check_text big-message "$PARITY" Parity "binary packed" "$BIG"
+
+# JSON base64 and hex strings decode as kj does with its error flag
+# ignored: stray characters and padding skipped, bad hex digits read as 0.
+in_fmt=json
+i=0
+for v in '"QU"' '"Q"' '"QU=JD"' '"QU!JD"' '"=QUJD"' '"QUJDRA="' '"-_"'; do
+  printf '{"b64Data": %s}' "$v" >"$TMP/in.bin"
+  compare "json-base64-$((i++))" "$PARITY" Parity "text binary"
+done
+for v in '"0aF"' '"zz41"' '"4g"' '"g1"'; do
+  printf '{"hexData": %s}' "$v" >"$TMP/in.bin"
+  compare "json-hex-$((i++))" "$PARITY" Parity "text binary"
+done
+in_fmt=binary
 
 if [[ $fails -ne 0 ]]; then
   echo "convert parity: $fails failure(s)" >&2
