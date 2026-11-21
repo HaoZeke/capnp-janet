@@ -7,6 +7,7 @@
 
 #include <capnp-janet/capnp_rpc.h>
 
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -193,8 +194,58 @@ static void question_drop(capnp_rpc_question_t *q)
   q->used = 0;
 }
 
+/* State a connection needs beyond capnp_rpc_conn_t, whose layout is part
+ * of the ABI. It lives in a list keyed by the connection's address, made
+ * on first use and freed by capnp_rpc_free or the next capnp_rpc_init at
+ * that address. A connection is used by one thread at a time; the lock
+ * covers only the list. */
+typedef struct rpc_side {
+  const capnp_rpc_conn_t *conn;
+  struct rpc_side *next;
+  /* This vat has sent Abort. rpc.c++ reads nothing after that, so the
+   * peer's Abort in reply goes unanswered. */
+  int aborted;
+} rpc_side_t;
+
+static pthread_mutex_t side_lock = PTHREAD_MUTEX_INITIALIZER;
+static rpc_side_t *side_list;
+
+static rpc_side_t *side_get(const capnp_rpc_conn_t *c, int create)
+{
+  rpc_side_t *s;
+  pthread_mutex_lock(&side_lock);
+  for (s = side_list; s != NULL && s->conn != c; s = s->next)
+    ;
+  if (s == NULL && create) {
+    s = (rpc_side_t *)calloc(1, sizeof *s);
+    if (s != NULL) {
+      s->conn = c;
+      s->next = side_list;
+      side_list = s;
+    }
+  }
+  pthread_mutex_unlock(&side_lock);
+  return s;
+}
+
+static void side_drop(const capnp_rpc_conn_t *c)
+{
+  rpc_side_t **p, *s = NULL;
+  pthread_mutex_lock(&side_lock);
+  for (p = &side_list; *p != NULL; p = &(*p)->next) {
+    if ((*p)->conn == c) {
+      s = *p;
+      *p = s->next;
+      break;
+    }
+  }
+  pthread_mutex_unlock(&side_lock);
+  free(s);
+}
+
 void capnp_rpc_init(capnp_rpc_conn_t *c, capnp_rpc_send_fn send, void *send_ctx)
 {
+  side_drop(c);
   memset(c, 0, sizeof(*c));
   c->send = send;
   c->send_ctx = send_ctx;
@@ -206,6 +257,7 @@ void capnp_rpc_free(capnp_rpc_conn_t *c)
   int i;
   if (c == NULL)
     return;
+  side_drop(c);
   for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++)
     frame_clear(c->answers[i].frame, &c->answers[i].len);
   for (i = 0; i < CAPNP_RPC_MAX_QUESTIONS; i++)
@@ -582,17 +634,25 @@ static int send_results_sent_elsewhere(capnp_rpc_conn_t *c, uint32_t qid)
   return rc;
 }
 
-/* An Exception struct in slot `ptr` of `body`. */
-static int write_exception(const capnp_bptr_t *body, uint16_t dwords,
-                           uint16_t ptr, const char *reason)
+/* An Exception struct of `type` in slot `ptr` of `body`. */
+static int write_exception_typed(const capnp_bptr_t *body, uint16_t dwords,
+                                 uint16_t ptr, const char *reason,
+                                 size_t reason_len, uint16_t type)
 {
   capnp_bptr_t slot, exc;
   if (capnp_builder_slot(body, dwords, ptr, &slot) ||
       capnp_builder_struct(&slot, EXCEPTION_DW, EXCEPTION_PW, &exc) ||
-      capnp_builder_set_u16(&exc, EXCEPTION_TYPE_OFF, EXCEPTION_TYPE_FAILED) ||
-      capnp_builder_set_text(&exc, EXCEPTION_DW, 0, reason, strlen(reason)))
+      capnp_builder_set_u16(&exc, EXCEPTION_TYPE_OFF, type) ||
+      capnp_builder_set_text(&exc, EXCEPTION_DW, 0, reason, reason_len))
     return CAPNP_ERR_ALLOC;
   return CAPNP_OK;
+}
+
+static int write_exception(const capnp_bptr_t *body, uint16_t dwords,
+                           uint16_t ptr, const char *reason)
+{
+  return write_exception_typed(body, dwords, ptr, reason, strlen(reason),
+                               EXCEPTION_TYPE_FAILED);
 }
 
 /* Answer a call or bootstrap with an exception, kept until Finish as
@@ -621,6 +681,9 @@ static int protocol_abort(capnp_rpc_conn_t *c, const char *reason)
 {
   capnp_builder_t b;
   capnp_bptr_t root, msg;
+  rpc_side_t *s = side_get(c, 1);
+  if (s != NULL)
+    s->aborted = 1;
   capnp_builder_init(&b);
   if (capnp_builder_root(&b, &root) == CAPNP_OK &&
       capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK &&
@@ -631,6 +694,55 @@ static int protocol_abort(capnp_rpc_conn_t *c, const char *reason)
   capnp_builder_free(&b);
   questions_fail_all(c);
   return CAPNP_ERR_KIND;
+}
+
+#define REMOTE_PREFIX "remote exception: "
+
+/* rpc.c++ turns an Abort into a remote exception of the same type and
+ * disconnects, which sends that exception back as its own Abort. A
+ * reason that already carries the prefix keeps it, so the echo is the
+ * reason unchanged. A vat that has sent its own Abort is already
+ * disconnected and answers nothing. */
+static int handle_abort(capnp_rpc_conn_t *c, const capnp_ptr_t *exc)
+{
+  const char *text = NULL;
+  size_t n = 0, plen = strlen(REMOTE_PREFIX), skip;
+  uint16_t type = EXCEPTION_TYPE_FAILED;
+  capnp_builder_t b;
+  capnp_bptr_t root, msg;
+  char *reason;
+  rpc_side_t *s = side_get(c, 0);
+  questions_fail_all(c);
+  if (s != NULL && s->aborted)
+    return CAPNP_ERR_IO;
+  if (s == NULL)
+    s = side_get(c, 1);
+  if (s != NULL)
+    s->aborted = 1;
+  if (exc->kind == CAPNP_PK_STRUCT) {
+    type = capnp_get_u16(exc, EXCEPTION_TYPE_OFF, 0);
+    if (capnp_get_text(exc, 0, &text, &n) != CAPNP_OK || text == NULL)
+      n = 0;
+  }
+  skip = n >= plen && memcmp(text, REMOTE_PREFIX, plen) == 0 ? plen : 0;
+  reason = (char *)malloc(plen + n + 1);
+  if (reason == NULL)
+    return CAPNP_ERR_IO;
+  memcpy(reason, REMOTE_PREFIX, plen);
+  if (n > skip)
+    memcpy(reason + plen, text + skip, n - skip);
+  reason[plen + n - skip] = '\0';
+  capnp_builder_init(&b);
+  if (capnp_builder_root(&b, &root) == CAPNP_OK &&
+      capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK &&
+      capnp_builder_set_u16(&msg, MESSAGE_TAG_OFF, CAPNP_RPC_MSG_ABORT) ==
+          CAPNP_OK &&
+      write_exception_typed(&msg, MESSAGE_DW, 0, reason, plen + n - skip,
+                            type) == CAPNP_OK)
+    (void)flush(c, &b);
+  capnp_builder_free(&b);
+  free(reason);
+  return CAPNP_ERR_IO;
 }
 
 /* Answer a question with an exception. A call the vat cannot route still
@@ -1966,8 +2078,7 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
     rc = handle_unimplemented(c, &body);
     break;
   case CAPNP_RPC_MSG_ABORT:
-    questions_fail_all(c);
-    rc = CAPNP_ERR_IO;
+    rc = handle_abort(c, &body);
     break;
   case CAPNP_RPC_MSG_BOOTSTRAP:
     rc = handle_bootstrap(c, &body);

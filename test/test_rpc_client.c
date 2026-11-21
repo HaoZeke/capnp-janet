@@ -155,8 +155,9 @@ static int feed_release(capnp_rpc_conn_t *c, uint32_t id, uint32_t count)
   return rc;
 }
 
-/* The one frame queued is an Abort whose reason is `reason`. */
-static int sent_abort(queue_t *q, const char *reason)
+/* The one frame queued is an Abort whose reason is `reason` and whose
+ * Exception.type, at byte 4, is `type`. */
+static int sent_abort_typed(queue_t *q, const char *reason, uint16_t type)
 {
   capnp_message_t m = {0};
   capnp_ptr_t r, exc;
@@ -168,10 +169,40 @@ static int sent_abort(queue_t *q, const char *reason)
            capnp_get_u16(&r, 0, 0) == CAPNP_RPC_MSG_ABORT &&
            capnp_getp(&r, 0, &exc) == CAPNP_OK &&
            capnp_get_text(&exc, 0, &text, &n) == CAPNP_OK &&
-           n == strlen(reason) && memcmp(text, reason, n) == 0;
+           n == strlen(reason) && memcmp(text, reason, n) == 0 &&
+           capnp_get_u16(&exc, 4, 0) == type;
   capnp_message_free(&m);
   q_drop(q);
   return ok;
+}
+
+static int sent_abort(queue_t *q, const char *reason)
+{
+  return sent_abort_typed(q, reason, 0);
+}
+
+/* An Abort whose reason is `reason` and whose Exception.type is `type`. */
+static int feed_abort(capnp_rpc_conn_t *c, const char *reason, uint16_t type)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, exc;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  int rc = CAPNP_ERR_ALLOC;
+  capnp_builder_init(&b);
+  if (capnp_builder_root(&b, &root) == CAPNP_OK &&
+      capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK &&
+      capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_ABORT) == CAPNP_OK &&
+      capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 1, 2, &exc) == CAPNP_OK &&
+      capnp_builder_set_text(&exc, 1, 0, reason, strlen(reason)) ==
+          CAPNP_OK &&
+      capnp_builder_set_u16(&exc, 4, type) == CAPNP_OK &&
+      capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK)
+    rc = capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+  return rc;
 }
 
 int main(void)
@@ -695,14 +726,19 @@ int main(void)
           "releasing every reference drops the export");
   }
 
-  /* Abort ends the connection: unanswered questions fail and nothing
-   * goes back, or two vats would trade replies forever. */
+  /* Abort ends the connection: unanswered questions fail, and the
+   * Abort is answered once with a remote exception, as rpc.c++ does when
+   * it disconnects. A vat that has sent its own Abort reads nothing more
+   * in rpc.c++, so it leaves the answer to that Abort unanswered. */
   {
     capnp_builder_t b;
     capnp_bptr_t root, msg;
     uint8_t *flat = NULL;
     size_t len = 0;
-    uint32_t pending = capnp_rpc_send_bootstrap(&client);
+    uint32_t pending;
+    capnp_rpc_free(&client);
+    capnp_rpc_init(&client, send_to_vat, NULL);
+    pending = capnp_rpc_send_bootstrap(&client);
     CHECK(pending != (uint32_t)-1, "pending bootstrap");
     q_drop(&g_to_vat);
     capnp_builder_init(&b);
@@ -714,10 +750,41 @@ int main(void)
           "abort serialize");
     CHECK(capnp_rpc_handle(&client, flat, len) == CAPNP_ERR_IO,
           "abort reported");
-    CHECK(g_to_vat.tail == 0, "abort not answered");
+    CHECK(sent_abort(&g_to_vat, "remote exception: "),
+          "abort answered with a remote exception");
     CHECK(capnp_rpc_is_failed(&client, pending), "pending question failed");
     free(flat);
     capnp_builder_free(&b);
+
+    /* The vat refuses a Release; a client that has not yet seen an Abort
+     * answers it, and the vat leaves the answer unanswered. */
+    capnp_rpc_free(&client);
+    capnp_rpc_init(&client, send_to_vat, NULL);
+    CHECK(feed_release(&vat, 63, 1) == CAPNP_ERR_KIND, "vat aborts");
+    CHECK(g_to_client.tail == 1, "one Abort to the client");
+    pump(&client, &g_to_client);
+    CHECK(g_to_vat.tail == 1, "client answers once");
+    pump(&vat, &g_to_vat);
+    CHECK(g_to_client.tail == 0, "vat does not answer the answer");
+  }
+
+  /* rpc.c++ keeps the type of the Abort it echoes, and a reason that
+   * already carries the remote prefix is echoed unchanged. */
+  {
+    static capnp_rpc_conn_t fresh;
+    capnp_rpc_init(&fresh, send_to_client, NULL);
+    q_drop(&g_to_client);
+    CHECK(feed_abort(&fresh, "remote exception: gone", 2) == CAPNP_ERR_IO &&
+              sent_abort_typed(&g_to_client, "remote exception: gone", 2),
+          "prefixed abort echoed once with its type");
+    CHECK(feed_abort(&fresh, "remote exception: gone", 2) == CAPNP_ERR_IO &&
+              g_to_client.tail == 0,
+          "second abort unanswered");
+    capnp_rpc_init(&fresh, send_to_client, NULL);
+    CHECK(feed_abort(&fresh, "gone", 1) == CAPNP_ERR_IO &&
+              sent_abort_typed(&g_to_client, "remote exception: gone", 1),
+          "abort echoed with the remote prefix and its type");
+    capnp_rpc_free(&fresh);
   }
 
   capnp_rpc_free(&client);

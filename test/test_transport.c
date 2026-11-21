@@ -1014,7 +1014,8 @@ enum {
   VF_UNIMPL,
   VF_UNIMPL_RESOLVE,
   VF_FINISH,
-  VF_RETURN
+  VF_RETURN,
+  VF_ABORT
 };
 enum { VT_IMPORT, VT_PROMISED, VT_UNKNOWN, VT_NULL };
 #define NULL_ANSWER 0xffffffffu
@@ -1096,6 +1097,10 @@ static const vscenario_t vat_diffs[] = {
     {"Unimplemented for a Resolve to an exception",
      {{VF_UNIMPL_RESOLVE, 0, 0, 0, 1, 0, 0},
       {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Abort",
+     {{VF_ABORT, 0, 0, 0, 0, 0, 0}}, 1, 99, 0, 0},
+    {"Abort carrying a remote exception",
+     {{VF_ABORT, 0, 0, 0, 1, 0, 0}}, 1, 99, 0, 1},
     {"Release of an unknown export",
      {{VF_RELEASE, 99, 0, 0, 0, 0, 1}}, 1, 99, 0, 0},
     {"Release beyond the reference count",
@@ -1177,6 +1182,20 @@ static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
   int rc;
   if (f->kind == VF_RETURN)
     return build_return(f->qid, 0, 0, out, len);
+  if (f->kind == VF_ABORT) {
+    /* `send_to` nonzero sends what rpc.c++ answers an Abort with. */
+    const char *why = f->send_to ? "remote exception: gone" : "gone";
+    capnp_builder_init(&b);
+    rc = capnp_builder_root(&b, &root) ||
+         capnp_builder_struct(&root, 1, 1, &msg) ||
+         capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_ABORT) ||
+         capnp_builder_slot(&msg, 1, 0, &slot) ||
+         capnp_builder_struct(&slot, 1, 2, &body) ||
+         capnp_builder_set_text(&body, 1, 0, why, strlen(why)) ||
+         capnp_builder_serialize(&b, out, len);
+    capnp_builder_free(&b);
+    return rc;
+  }
   capnp_builder_init(&b);
   rc = capnp_builder_root(&b, &root) ||
        capnp_builder_struct(&root, 1, 1, &msg) ||

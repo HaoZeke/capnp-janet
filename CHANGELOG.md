@@ -65,6 +65,10 @@ Pre-1.0 minor releases may include breaking API changes.
   reason; it used to end the connection with nothing sent. An
   Unimplemented Resolve gives back the reference its descriptor carried,
   as rpc.c++ does.
+- An Abort is answered once with an Abort of the same type carrying
+  `remote exception: ` and the peer's reason, as rpc.c++ sends when it
+  disconnects. A reason that already has that prefix is echoed
+  unchanged, and a vat that has sent its own Abort does not answer.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.
