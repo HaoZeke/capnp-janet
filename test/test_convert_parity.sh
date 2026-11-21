@@ -200,6 +200,7 @@ done
 
 # Stream input takes at most 511 segments.
 in_fmt=binary
+full=1
 for n in 511 512; do
   python3 -c 'import struct, sys
 n = int(sys.argv[1])
@@ -209,6 +210,26 @@ body = struct.pack("<QQQQ", 0x0002000100000000, 7, 0, 0) + b"\0" * 8 * (n - 1)
 open(sys.argv[2], "wb").write(hdr + body)' "$n" "$TMP/in.bin"
   compare "segments-$n" "$NODE" Node "text binary"
 done
+
+# Streams read as kj reads them: a short read zero-fills, a packed stream
+# that ends inside a word fails at once, and later segments are read only
+# when a pointer reaches them.
+i=0
+for spec in binary:000000000400000000000000010000002a00000000000000 \
+  binary:0000000002000000000000000100000007000000000000000000000003000000 \
+  binary:01000000010000000000000000000000020000000100000000000000 \
+  binary:0100000001000000020000000000000002000000010000000000000001000000 \
+  binary:0100000002000000000000200000000000000000010000000700000000000000 \
+  packed:1001100101 packed:10011001 packed:10011001012a10011001 \
+  flat-packed:1001100101 flat-packed:10011001012a01 \
+  flat-packed:10011001012a00 flat-packed:10011001012a; do
+  in_fmt=${spec%%:*}
+  python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.argv[1]))' \
+    "${spec#*:}" >"$TMP/in.bin"
+  compare "stream-$((i++))" "$PARITY" Parity "text binary"
+done
+full=0
+in_fmt=binary
 
 # The C++ lexer joins adjacent operator characters into one token, so `=-5`
 # is a parse error while `= -5` and `= - 5` are fine.

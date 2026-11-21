@@ -109,6 +109,7 @@ dump_request = executable(
 capnp_eval = executable(
   'capnp-eval',
   'app/capnp_eval.c',
+  'app/kj_stream.c',
   objects: capnp_janet_lib.extract_all_objects(recursive: true),
   include_directories: [inc, include_directories('src')],
   c_args: capnp_janet_consumer_args,

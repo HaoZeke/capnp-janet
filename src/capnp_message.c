@@ -179,6 +179,13 @@ static int bounds_word(const capnp_message_t *m, uint32_t seg, size_t word) {
   return CAPNP_OK;
 }
 
+/* capnp-eval clears the data of a segment that a stream reader would
+ * read lazily and could not. ReaderArena::tryGetSegment fails there,
+ * before any bounds check, and so does following a far pointer here. */
+static int seg_unread(const capnp_message_t *m, uint32_t seg) {
+  return seg < m->nsegs && m->segs[seg].data == NULL;
+}
+
 static uint64_t read_word(const capnp_message_t *m, uint32_t seg, size_t word) {
   return capnp_load_le64(m->segs[seg].data + word * CAPNP_WORD_BYTES);
 }
@@ -422,6 +429,8 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
   if (kind == CAPNP_WK_FAR) {
     uint32_t tseg = capnp_wp_far_seg(w);
     uint32_t toff = capnp_wp_far_off(w);
+    if (seg_unread(m, tseg))
+      return CAPNP_ERR_IO;
     if (capnp_wp_far_two(w)) {
       uint64_t pad, tag;
       uint32_t cseg, coff;
@@ -435,11 +444,13 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
         return CAPNP_ERR_TRAVERSAL;
       pad = read_word(m, tseg, toff);
       tag = read_word(m, tseg, (size_t)toff + 1u);
+      cseg = capnp_wp_far_seg(pad);
+      coff = capnp_wp_far_off(pad);
+      if (seg_unread(m, cseg))
+        return CAPNP_ERR_IO;
       /* C++ ignores the pad's own double-far bit and the tag's offset. */
       if (capnp_wp_kind(pad) != CAPNP_WK_FAR)
         return CAPNP_ERR_KIND;
-      cseg = capnp_wp_far_seg(pad);
-      coff = capnp_wp_far_off(pad);
       if (capnp_wp_kind(tag) == CAPNP_WK_STRUCT)
         return land_struct(m, cseg, coff, capnp_wp_struct_dwords(tag),
                            capnp_wp_struct_pwords(tag), depth, out);

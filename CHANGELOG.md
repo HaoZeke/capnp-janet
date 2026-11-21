@@ -30,6 +30,11 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp-eval` reads binary and packed streams as kj does. A short read
+  is zero-filled with a recoverable error, a packed stream that ends
+  inside a word stops the run, and later segments are read only when a
+  pointer reaches them. A header of 512 or more segments reads segment 0
+  as empty and still consumes its declared size.
 - `capnp-eval convert` prints what `capnp` recovers from a corrupt
   message. A pointer it cannot follow reads as its default or copies as
   null, later messages are still converted, and the exit status is 1.
