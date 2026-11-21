@@ -30,6 +30,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- An RPC answer or Return longer than `CAPNP_RPC_MAX_ANSWER_BYTES` is
+  kept on the heap. A vat used to drop such answers and a client failed
+  such Returns, though C++ allows any size. `capnp_rpc_free` releases
+  the frames a connection still holds.
 - `capnpc-janet` emits struct and list constants as the root of an
   embedded canonical message, as `capnpc-c++` embeds their words. They
   used to be an `error` form, so modules with one could not be imported.

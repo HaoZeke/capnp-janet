@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Build libcapnp_janet.so at 40876e91 and at this tree, then compare
-# them with abidiff. Exit 77 when the tool or the base commit is absent.
+# them with abidiff. Functions listed in abi-additions.suppr may be added.
+# Exit 77 when the tool or the base commit is absent.
 set -euo pipefail
 
 BASE=40876e91a615b8bb9cbec6a91228a5af96f1ba11
@@ -53,7 +54,8 @@ if [[ -z "${oldso}" || -z "${newso}" ]]; then
 fi
 
 set +e
-abidiff --fail-no-debug-info "$oldso" "$newso"
+abidiff --fail-no-debug-info --suppressions "$ROOT/scripts/abi-additions.suppr" \
+  "$oldso" "$newso"
 rc=$?
 set -e
 if [[ "$rc" -ne 0 ]]; then

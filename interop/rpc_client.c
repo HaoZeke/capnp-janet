@@ -78,6 +78,23 @@ static int send_save(void)
 	return rc;
 }
 
+static int fill_u32(void *ctx, const capnp_bptr_t *params)
+{
+	return capnp_builder_set_u32(params, 0, *(const uint32_t *)ctx);
+}
+
+/* Handle frames until `q` is answered; a Resolve may come first. */
+static int wait_answer(capnp_rpc_conn_t *conn, uint32_t q, uint8_t *buf,
+		       size_t cap)
+{
+	while (!capnp_rpc_is_answered(conn, q)) {
+		ssize_t n = read_frame(g_fd, buf, cap);
+		if (n <= 0 || capnp_rpc_handle(conn, buf, (size_t)n) != 0)
+			return -1;
+	}
+	return capnp_rpc_is_failed(conn, q) ? -1 : 0;
+}
+
 static int call_add(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap,
 		    int64_t a, int64_t b, int64_t *sum)
 {
@@ -213,6 +230,30 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* A Return longer than CAPNP_RPC_MAX_ANSWER_BYTES is recorded like
+	 * any other. */
+	{
+		uint32_t len = 10000, q;
+		capnp_message_t m = {0};
+		capnp_ptr_t content;
+		const uint8_t *data = NULL;
+		size_t n = 0;
+		q = capnp_rpc_send_call(&conn, 0, ADDER_IFACE, 1, 1, 0, fill_u32,
+		                        &len);
+		if (q == (uint32_t)-1 || wait_answer(&conn, q, buf, sizeof buf) ||
+		    capnp_rpc_answer_content(&conn, q, &m, &content) != CAPNP_OK) {
+			fprintf(stderr, "echo(10000) not answered\n");
+			return 1;
+		}
+		if (capnp_get_data(&content, 0, &data, &n) != CAPNP_OK ||
+		    n != len || data[0] != 0xab || data[n - 1] != 0xab) {
+			fprintf(stderr, "echo(10000) returned %zu bytes\n", n);
+			return 1;
+		}
+		capnp_message_free(&m);
+		capnp_rpc_send_finish(&conn, q);
+	}
+
 	/* An Unimplemented reply ends the connection for capnp-C++, and
 	 * echoing it back would make the peer abort. */
 	{
@@ -241,6 +282,7 @@ int main(int argc, char **argv)
 		}
 	}
 
+	capnp_rpc_free(&conn);
 	close(g_fd);
 	printf("All rpc interop assertions passed.\n");
 	return 0;

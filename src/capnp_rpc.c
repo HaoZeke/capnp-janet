@@ -121,12 +121,68 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define JR_JOINID_OFF 0
 #define JR_SUCCEEDED_BIT 32
 
+/* A frame longer than the inline buffer lives on the heap with its
+ * address kept at the start of the buffer, so the public structs keep
+ * their layout. */
+static const uint8_t *frame_bytes(const uint8_t *buf, size_t len)
+{
+  const uint8_t *p;
+  if (len <= CAPNP_RPC_MAX_ANSWER_BYTES)
+    return buf;
+  memcpy(&p, buf, sizeof p);
+  return p;
+}
+
+static void frame_clear(uint8_t *buf, size_t *len)
+{
+  if (*len > CAPNP_RPC_MAX_ANSWER_BYTES) {
+    uint8_t *p;
+    memcpy(&p, buf, sizeof p);
+    free(p);
+  }
+  *len = 0;
+}
+
+static int frame_store(uint8_t *buf, size_t *len_out, const uint8_t *data,
+                       size_t len)
+{
+  frame_clear(buf, len_out);
+  if (len <= CAPNP_RPC_MAX_ANSWER_BYTES) {
+    memcpy(buf, data, len);
+  } else {
+    uint8_t *p = (uint8_t *)malloc(len);
+    if (p == NULL)
+      return CAPNP_ERR_ALLOC;
+    memcpy(p, data, len);
+    memcpy(buf, &p, sizeof p);
+  }
+  *len_out = len;
+  return CAPNP_OK;
+}
+
+static void question_drop(capnp_rpc_question_t *q)
+{
+  frame_clear(q->reply, &q->reply_len);
+  q->used = 0;
+}
+
 void capnp_rpc_init(capnp_rpc_conn_t *c, capnp_rpc_send_fn send, void *send_ctx)
 {
   memset(c, 0, sizeof(*c));
   c->send = send;
   c->send_ctx = send_ctx;
   c->vat = &c->own_vat;
+}
+
+void capnp_rpc_free(capnp_rpc_conn_t *c)
+{
+  int i;
+  if (c == NULL)
+    return;
+  for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++)
+    frame_clear(c->answers[i].frame, &c->answers[i].len);
+  for (i = 0; i < CAPNP_RPC_MAX_QUESTIONS; i++)
+    frame_clear(c->questions[i].reply, &c->questions[i].reply_len);
 }
 
 void capnp_rpc_set_vat(capnp_rpc_conn_t *c, capnp_rpc_vat_t *vat)
@@ -210,7 +266,7 @@ static int resolve_promised_answer(capnp_rpc_conn_t *c,
   a = answer_find(c, qid);
   if (a == NULL)
     return -1;
-  if (capnp_message_from_flat(&stored, a->frame, a->len) != CAPNP_OK)
+  if (capnp_message_from_flat(&stored, frame_bytes(a->frame, a->len), a->len) != CAPNP_OK)
     return -1;
 
   if (capnp_root(&stored, &root) != CAPNP_OK)
@@ -323,8 +379,10 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid)
 static void answer_drop(capnp_rpc_conn_t *c, uint32_t qid)
 {
   capnp_rpc_answer_t *a = answer_find(c, qid);
-  if (a)
+  if (a) {
+    frame_clear(a->frame, &a->len);
     a->used = 0;
+  }
 }
 
 static void export_release(capnp_rpc_conn_t *c, uint32_t id, uint32_t count)
@@ -347,7 +405,7 @@ static void answer_release_caps(capnp_rpc_conn_t *c, uint32_t qid)
   capnp_message_t stored = {0};
   capnp_ptr_t root, ret, payload, table;
   uint32_t i, n;
-  if (a == NULL || capnp_message_from_flat(&stored, a->frame, a->len) != CAPNP_OK)
+  if (a == NULL || capnp_message_from_flat(&stored, frame_bytes(a->frame, a->len), a->len) != CAPNP_OK)
     return;
   if (capnp_root(&stored, &root) == CAPNP_OK &&
       capnp_get_u16(&root, MESSAGE_TAG_OFF, 0) == CAPNP_RPC_MSG_RETURN &&
@@ -375,15 +433,14 @@ static int flush_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid)
   int rc, i;
   if (capnp_builder_serialize(b, &flat, &len))
     return CAPNP_ERR_ALLOC;
-  if (len <= CAPNP_RPC_MAX_ANSWER_BYTES) {
-    for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++) {
-      if (!c->answers[i].used) {
+  for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++) {
+    if (!c->answers[i].used) {
+      if (frame_store(c->answers[i].frame, &c->answers[i].len, flat, len) ==
+          CAPNP_OK) {
         c->answers[i].used = 1;
         c->answers[i].question_id = qid;
-        memcpy(c->answers[i].frame, flat, len);
-        c->answers[i].len = len;
-        break;
       }
+      break;
     }
   }
   rc = c->send(c->send_ctx, flat, len);
@@ -917,7 +974,7 @@ uint32_t capnp_rpc_send_provide(capnp_rpc_conn_t *c, uint32_t imported_cap,
     rc = flush(c, &b);
   capnp_builder_free(&b);
   if (rc != CAPNP_OK) {
-    q->used = 0;
+    question_drop(q);
     return (uint32_t)-1;
   }
   return qid;
@@ -950,7 +1007,7 @@ uint32_t capnp_rpc_send_accept(capnp_rpc_conn_t *c, uint64_t nonce, int embargo)
     rc = flush(c, &b);
   capnp_builder_free(&b);
   if (rc != CAPNP_OK) {
-    q->used = 0;
+    question_drop(q);
     return (uint32_t)-1;
   }
   return qid;
@@ -995,7 +1052,7 @@ uint32_t capnp_rpc_send_bootstrap(capnp_rpc_conn_t *c)
     rc = flush(c, &b);
   capnp_builder_free(&b);
   if (rc != CAPNP_OK) {
-    q->used = 0;
+    question_drop(q);
     return (uint32_t)-1;
   }
   return qid;
@@ -1045,7 +1102,7 @@ uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
     rc = flush(c, &b);
   capnp_builder_free(&b);
   if (rc != CAPNP_OK) {
-    q->used = 0;
+    question_drop(q);
     return (uint32_t)-1;
   }
   return qid;
@@ -1059,7 +1116,7 @@ int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id)
   int keep_caps = q && q->answered;
   int rc;
   if (q)
-    q->used = 0;
+    question_drop(q);
   capnp_builder_init(&b);
   rc = begin_message(&b, CAPNP_RPC_MSG_FINISH, FINISH_DW, FINISH_PW, &fin);
   if (rc == CAPNP_OK)
@@ -1114,7 +1171,7 @@ int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id)
 
   if (q == NULL || !q->answered || q->failed)
     return -1;
-  if (capnp_message_from_flat(&m, q->reply, q->reply_len) != CAPNP_OK)
+  if (capnp_message_from_flat(&m, frame_bytes(q->reply, q->reply_len), q->reply_len) != CAPNP_OK)
     return -1;
   if (capnp_root(&m, &root) == CAPNP_OK &&
       capnp_get_u16(&root, MESSAGE_TAG_OFF, 0) == CAPNP_RPC_MSG_RETURN &&
@@ -1141,7 +1198,8 @@ int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
 
   if (q == NULL || !q->answered || q->failed)
     return CAPNP_ERR_ARG;
-  if (capnp_message_from_flat(msg_out, q->reply, q->reply_len) != CAPNP_OK)
+  if (capnp_message_from_flat(msg_out, frame_bytes(q->reply, q->reply_len),
+                              q->reply_len) != CAPNP_OK)
     return CAPNP_ERR_FRAMING;
   if (capnp_root(msg_out, &root) != CAPNP_OK ||
       capnp_get_u16(&root, MESSAGE_TAG_OFF, 0) != CAPNP_RPC_MSG_RETURN ||
@@ -1165,7 +1223,7 @@ static void handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
   if (ret->kind != CAPNP_PK_STRUCT)
     return;
   q = question_find(c, capnp_get_u32(ret, RETURN_ANSWERID_OFF, 0));
-  if (q == NULL || len > CAPNP_RPC_MAX_ANSWER_BYTES)
+  if (q == NULL)
     return;
   q->answered = 1;
   q->failed = capnp_get_u16(ret, RETURN_TAG_OFF, 0) != RETURN_TAG_RESULTS;
@@ -1174,8 +1232,8 @@ static void handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
     if (capnp_getp(ret, 0, &results) == CAPNP_OK)
       note_introductions(c, &results);
   }
-  memcpy(q->reply, frame, len);
-  q->reply_len = len;
+  if (frame_store(q->reply, &q->reply_len, frame, len) != CAPNP_OK)
+    q->failed = 1;
 }
 
 /* --- stream flow control ------------------------------------------- */
@@ -1425,7 +1483,7 @@ static void questions_fail_all(capnp_rpc_conn_t *c)
     if (q->used && !q->answered) {
       q->answered = 1;
       q->failed = 1;
-      q->reply_len = 0;
+      frame_clear(q->reply, &q->reply_len);
     }
   }
 }

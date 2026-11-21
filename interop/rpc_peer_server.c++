@@ -6,6 +6,7 @@
 #include <capnp/ez-rpc.h>
 #include <kj/async.h>
 #include <stdio.h>
+#include <string.h>
 #include <string>
 
 class AdderImpl final : public Adder::Server {
@@ -13,6 +14,12 @@ public:
 	kj::Promise<void> add(AddContext ctx) override {
 		auto p = ctx.getParams();
 		ctx.getResults().setSum(p.getA() + p.getB());
+		return kj::READY_NOW;
+	}
+
+	kj::Promise<void> echo(EchoContext ctx) override {
+		auto data = ctx.getResults().initData(ctx.getParams().getN());
+		memset(data.begin(), 0xab, data.size());
 		return kj::READY_NOW;
 	}
 };

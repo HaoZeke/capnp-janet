@@ -1,0 +1,6 @@
+# Functions added to the public C API since the abi-diff.sh base commit.
+# Additions only: a removed or changed function still fails the check.
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_free

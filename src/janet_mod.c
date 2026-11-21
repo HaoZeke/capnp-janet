@@ -1490,6 +1490,7 @@ static int rpc_gc(void *p, size_t len) {
   (void)len;
   rpc_conn_wrap *w = (rpc_conn_wrap *)p;
   rpc_free_frames(w);
+  capnp_rpc_free(&w->conn);
   if (w->fd >= 0)
     close(w->fd);
   w->fd = -1;

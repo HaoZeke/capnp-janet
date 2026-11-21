@@ -83,6 +83,13 @@ static int doubler_dispatch(void *server, uint64_t iid, uint16_t mid,
   doubler_calls++;
   if (doubler_calls >= doubler_fail_from)
     return CAPNP_ERR_ARG;
+  if (mid == 7) {
+    static uint8_t big[10000];
+    memset(big, 0xab, sizeof big);
+    if (capnp_builder_struct(results, 0, 1, &body))
+      return CAPNP_ERR_ALLOC;
+    return capnp_builder_set_data(&body, 0, 0, big, sizeof big);
+  }
   if (capnp_builder_struct(results, 1, 0, &body))
     return CAPNP_ERR_ALLOC;
   {
@@ -155,6 +162,34 @@ int main(void)
   pump(&client, &g_to_client);
   CHECK(capnp_rpc_is_answered(&client, q), "unroutable call answered");
   CHECK(capnp_rpc_is_failed(&client, q), "unroutable call failed");
+
+  /* A Return of any size is recorded on the caller and kept by the vat
+   * until Finish, as C++ has no frame limit. */
+  {
+    capnp_message_t m = {0};
+    capnp_ptr_t content;
+    const uint8_t *data = NULL;
+    size_t n = 0;
+    int i, kept = 0;
+    q = capnp_rpc_send_call(&client, 0, 0x1234, 7, 1, 1, fill_u32, &arg);
+    pump(&vat, &g_to_vat);
+    for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++)
+      kept |= vat.answers[i].used && vat.answers[i].question_id == q &&
+              vat.answers[i].len > CAPNP_RPC_MAX_ANSWER_BYTES;
+    CHECK(kept, "large answer kept for pipelining");
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_is_answered(&client, q), "large return answered");
+    CHECK(capnp_rpc_answer_content(&client, q, &m, &content) == CAPNP_OK &&
+              capnp_get_data(&content, 0, &data, &n) == CAPNP_OK &&
+              n == 10000 && data[9999] == 0xab,
+          "large return content");
+    capnp_message_free(&m);
+    CHECK(capnp_rpc_send_finish(&client, q) == CAPNP_OK, "large finish");
+    pump(&vat, &g_to_vat);
+    for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++)
+      CHECK(!(vat.answers[i].used && vat.answers[i].question_id == q),
+            "large answer dropped at finish");
+  }
 
   /* A Return for a question we never asked is ignored. */
   {
@@ -314,6 +349,8 @@ int main(void)
     capnp_builder_free(&b);
   }
 
+  capnp_rpc_free(&client);
+  capnp_rpc_free(&vat);
   if (g_failures != 0) {
     fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;
