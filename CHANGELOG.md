@@ -27,6 +27,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- Text integer literals past 64 bits wrap modulo 2^64, as kj's
+  `ParseInteger` does, so `99999999999999999999` no longer fails to parse.
 - `capnp_message_from_flat`, `capnp_message_view_flat` and
   `capnp_message_from_segments` take any segment count, like
   `FlatArrayMessageReader` and `SegmentArrayMessageReader`.

@@ -4152,14 +4152,16 @@ static vnode_t *parse_text_number(scan_t *sc, int neg) {
        sc->s[sc->i] == '.'))
     return NULL;
   len = sc->i - start;
-  if (len == 0 || len >= sizeof(tmp))
+  if (len == 0)
     return NULL;
-  memcpy(tmp, sc->s + start, len);
-  tmp[len] = 0;
 
   if (is_flt) {
     char *endp = NULL;
     double dv;
+    if (len >= sizeof(tmp))
+      return NULL;
+    memcpy(tmp, sc->s + start, len);
+    tmp[len] = 0;
     errno = 0;
     dv = strtod(tmp, &endp);
     if (!endp || *endp != 0)
@@ -4170,12 +4172,14 @@ static vnode_t *parse_text_number(scan_t *sc, int neg) {
     v->fval = neg ? -dv : dv;
     return v;
   } else {
-    char *endp = NULL;
-    uint64_t uv;
-    errno = 0;
-    uv = strtoull(base == 16 ? tmp + 2 : tmp, &endp, base);
-    if (!endp || *endp != 0 || errno == ERANGE)
-      return NULL;
+    /* kj's ParseInteger wraps modulo 2^64 without complaint. */
+    uint64_t uv = 0;
+    size_t k;
+    for (k = start + (base == 16 ? 2u : 0u); k < sc->i; k++) {
+      int c = (unsigned char)sc->s[k];
+      uv = uv * (uint64_t)base +
+           (uint64_t)(isdigit(c) ? c - '0' : tolower(c) - 'a' + 10);
+    }
     if (neg) {
       if (uv > (uint64_t)INT64_MAX + 1ull)
         return NULL;

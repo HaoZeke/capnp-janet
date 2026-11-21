@@ -179,6 +179,14 @@ for v in '(vI32 =-5)' '(vI32 =- 5)' '(vF64 =-inf)' '(vF64 =.5)' '(vI32 =+5)' \
   printf '%s' "$v" >"$TMP/in.bin"
   compare "text-operator-$((i++))" "$PARITY" Parity "text binary"
 done
+
+# kj parses integer literals modulo 2^64.
+for v in '(vU64 = 99999999999999999999)' '(vU64 = 18446744073709551616)' \
+  '(vU64 = 0x1ffffffffffffffff)' '(vU64 = 02777777777777777777777)' \
+  '(vI64 = -99999999999999999999)' "(vU8 = 1$(printf '0%.0s' {1..200}))"; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-integer-$((i++))" "$PARITY" Parity "text binary"
+done
 in_fmt=binary
 
 # `capnp convert` lifts the nesting and traversal limits. A chain of 200
