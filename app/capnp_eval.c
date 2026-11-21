@@ -1,4 +1,4 @@
-#define _POSIX_C_SOURCE 200809L
+#define _XOPEN_SOURCE 700
 /*
  * capnp-eval: evaluate constants and convert messages between binary, packed,
  * flat, flat-packed, canonical, text, and json formats, matching the official
@@ -20,11 +20,13 @@
 
 #include <ctype.h>
 #include <limits.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 enum {
   FMT_BINARY = 0,
@@ -433,8 +435,12 @@ static int is_canonical(const uint8_t *can, size_t clen) {
   return ok;
 }
 
+/* kj writes stdout unbuffered, so output of earlier messages survives a
+ * crash in a later one. */
 static int write_bytes(const uint8_t *p, size_t n) {
-  return fwrite(p, 1, n, stdout) == n ? 0 : -1;
+  if (fwrite(p, 1, n, stdout) != n)
+    return -1;
+  return fflush(stdout) == 0 ? 0 : -1;
 }
 
 static int write_packed(const uint8_t *p, size_t n) {
@@ -500,7 +506,7 @@ static int convert_root(capnp_dyn_t *dyn, const char *type_name,
       conv_failed(e, werr);
     rc = write_bytes((const uint8_t *)text, len);
     if (rc == 0)
-      rc = fputc('\n', stdout) == EOF ? -1 : 0;
+      rc = write_bytes((const uint8_t *)"\n", 1);
     free(text);
     break;
   }
@@ -1097,6 +1103,76 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
   return 1;
 }
 
+static void put_stderr(const char *s) {
+  size_t n = strlen(s);
+  while (n > 0) {
+    ssize_t w = write(STDERR_FILENO, s, n);
+    if (w <= 0)
+      return;
+    s += w;
+    n -= (size_t)w;
+  }
+}
+
+static void crash_handler(int signo) {
+  char num[12];
+  int i = (int)sizeof(num) - 1;
+  int v = signo;
+  const char *name = "Unknown signal";
+  num[i] = 0;
+  do {
+    num[--i] = (char)('0' + v % 10);
+    v /= 10;
+  } while (v > 0 && i > 0);
+  switch (signo) {
+  case SIGSEGV:
+    name = "Segmentation fault";
+    break;
+  case SIGBUS:
+    name = "Bus error";
+    break;
+  case SIGFPE:
+    name = "Floating point exception";
+    break;
+  case SIGABRT:
+    name = "Aborted";
+    break;
+  case SIGILL:
+    name = "Illegal instruction";
+    break;
+  case SIGSYS:
+    name = "Bad system call";
+    break;
+  }
+  put_stderr("*** Received signal #");
+  put_stderr(num + i);
+  put_stderr(": ");
+  put_stderr(name);
+  put_stderr("\n");
+  _exit(1);
+}
+
+/* kj::TopLevelProcessContext reports these signals on an alternate stack,
+ * so a stack overflow exits with status 1. */
+static void catch_crashes(void) {
+  static char alt_stack[65536];
+  static const int sigs[] = {SIGSEGV, SIGBUS, SIGFPE, SIGABRT, SIGILL, SIGSYS};
+  stack_t st;
+  struct sigaction sa;
+  size_t i;
+  memset(&st, 0, sizeof(st));
+  st.ss_sp = alt_stack;
+  st.ss_size = sizeof(alt_stack);
+  if (sigaltstack(&st, NULL) != 0)
+    return;
+  memset(&sa, 0, sizeof(sa));
+  sa.sa_handler = crash_handler;
+  sa.sa_flags = SA_ONSTACK | SA_NODEFER | SA_RESETHAND;
+  sigemptyset(&sa.sa_mask);
+  for (i = 0; i < sizeof(sigs) / sizeof(sigs[0]); i++)
+    sigaction(sigs[i], &sa, NULL);
+}
+
 int main(int argc, char **argv) {
   const char *import_dirs[32];
   int nimports = 0;
@@ -1108,6 +1184,7 @@ int main(int argc, char **argv) {
   size_t seg_words = 0;
   int i;
 
+  catch_crashes();
   for (i = 1; i < argc; i++) {
     const char *a = argv[i];
     if (strcmp(a, "--short") == 0) {

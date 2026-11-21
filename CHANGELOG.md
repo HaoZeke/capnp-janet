@@ -30,6 +30,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp-eval` reports a crash signal on an alternate stack and exits
+  with status 1, as kj does, and writes each converted message at once.
+  A pointer cycle used to kill it with the signal and lose the output of
+  earlier messages.
 - Text and JSON encoders treat a pointer field as absent when its far
   pointer or pointer kind cannot be followed, as `DynamicStruct::has`
   does. A null or unreadable struct prints its default fields, union

@@ -312,6 +312,20 @@ out.write(struct.pack("<II", 0, len(w)) + b"".join(struct.pack("<Q", x) for x in
 EOF
 compare amplified-reads "$NODE" Node "binary"
 
+# A pointer cycle overflows the stack in both. kj reports the signal and
+# exits with status 1, keeping the output of earlier messages.
+python3 - "$TMP/in.bin" <<'EOF'
+import struct, sys
+ok = [0x0002000100000000, 7, 0, 0]
+cycle = [0x0002000100000000, 7, 0x00020001fffffff8, 0]
+out = open(sys.argv[1], "wb")
+for w in (ok, cycle):
+    out.write(struct.pack("<II", 0, len(w)) + b"".join(struct.pack("<Q", x) for x in w))
+EOF
+full=1
+compare pointer-cycle "$NODE" Node "text json binary packed canonical"
+full=0
+
 # Without --quiet, `capnp` refuses empty input and input whose first
 # bytes cannot be in the format; implausible input only warns.
 full=1
