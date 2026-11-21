@@ -3250,10 +3250,20 @@ static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
                             char **out, size_t *len) {
   rtype_t rt;
   dyn_struct_t *st = NULL;
+  capnp_ptr_t empty;
   buf_t b;
   int rc;
   if (!d || !s || !out || !len)
     return CAPNP_ERR_ARG;
+  if (s->kind == CAPNP_PK_NULL) {
+    empty = *s;
+    empty.kind = CAPNP_PK_STRUCT;
+    empty.dwords = 0;
+    empty.pwords = 0;
+    empty.data_bits = 0;
+    empty.body_byte = 0;
+    s = &empty;
+  }
   *out = NULL;
   *len = 0;
   encode_oom = 0;

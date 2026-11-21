@@ -27,6 +27,8 @@ Pre-1.0 minor releases may include breaking API changes.
 - The text and JSON encoders fail on a corrupt pointer, a pointer of the
   wrong kind, or a list whose elements are too narrow for the field. They
   used to print the default and succeed; `capnp convert` 1.4.0 fails.
+- The text and JSON encoders print a null root as an empty struct, with
+  every scalar default, as `capnp convert` does.
 - `capnp_builder_new_orphan_list` rejects an element count above `2^29 - 1`
   when the orphan is created. It used to accept a larger count for void,
   bit, byte, two-byte and four-byte elements and fail only at adopt. C++
