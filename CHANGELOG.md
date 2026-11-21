@@ -32,6 +32,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- Text encoding no longer follows the pointer of an inactive union
+  member, so a corrupt one there is not an error, as in `stringify.c++`.
 - A JSON number with an empty exponent, such as `1e` or `2E-`, reads as
   0 after a recoverable error, as kj lexes and parses it.
 - `capnp-eval convert` goes on after the text errors `capnp` recovers

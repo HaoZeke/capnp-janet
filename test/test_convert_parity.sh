@@ -128,6 +128,14 @@ check structs-from-void-list "$PARITY" Parity "text json" -- \
 # member 0 included, and a flattened one does the same in JSON.
 check far-unknown-segment "$PARITY" Parity "text json" -- \
   $(parity_ptr 8 0000000500000002)
+# An inactive union member is never asked `has`, so its pointer is not
+# followed.
+for extra in "" "--short"; do
+  extra=($extra)
+  check far-in-inactive-member "$PARITY" Parity "text json" -- \
+    $(parity_ptr 31 0000000500000002)
+done
+extra=()
 check other-not-cap "$PARITY" Parity "text json" -- \
   $(parity_ptr 8 0000000000000007)
 check struct-oob "$PARITY" Parity "text json" -- \

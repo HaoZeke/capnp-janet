@@ -2507,13 +2507,14 @@ static int encode_text_struct(buf_t *b, capnp_dyn_t *d,
   for (i = 0; i < st->nfields; i++) {
     const dyn_field_t *f = &st->fields[i];
     buf_t fb;
-    int has = field_has_wire(d, s, f, env, 1);
+    /* stringify.c++ asks `has` only of non-union fields and of an active
+     * member with discriminant 0. */
     if (f->disc != 0xffff && st->disc_count) {
       if (f->disc != which)
         continue;
-      if (f->disc == 0 && !has)
+      if (f->disc == 0 && !field_has_wire(d, s, f, env, 1))
         continue;
-    } else if (!has) {
+    } else if (!field_has_wire(d, s, f, env, 1)) {
       continue;
     }
     memset(&fb, 0, sizeof(fb));
