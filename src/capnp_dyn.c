@@ -3760,6 +3760,8 @@ static int strtod_n(const char *s, size_t len, double *out) {
   return rc;
 }
 
+static int soft_error(void);
+
 static vnode_t *parse_json_num(scan_t *sc) {
   size_t start = sc->i;
   size_t len;
@@ -3791,8 +3793,13 @@ static vnode_t *parse_json_num(scan_t *sc) {
       sc->i++;
   }
   len = sc->i - start;
-  if (len == 0 || strtod_n(sc->s + start, len, &dv))
-    return NULL;
+  /* kj lexes an exponent without digits; `parseAs<double>` then
+   * recovers with 0. */
+  if (strtod_n(sc->s + start, len, &dv)) {
+    if (soft_error())
+      return NULL;
+    dv = 0;
+  }
   v = new_vnode(VK_FLOAT);
   if (!v)
     return NULL;
@@ -4151,8 +4158,6 @@ static int parse_text_ident(scan_t *sc, char *out, size_t n) {
 static vnode_t *parse_text_expr(scan_t *sc);
 
 #define TEXT_OPS "!$%&*+-./:<=>?@^|~"
-
-static int soft_error(void);
 
 static char *dup_cstr(const char *src) {
   size_t n = strlen(src) + 1;

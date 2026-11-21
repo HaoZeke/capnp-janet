@@ -217,7 +217,8 @@ done
 
 # JsonCodec recovers from a number out of range, a bad numeric string
 # and a non-array list: it writes what kj substitutes, prints the
-# message and fails the run. Enum numbers are cast without a check.
+# message and fails the run. Enum numbers are cast without a check, and
+# a number with an empty exponent reads as 0.
 # Casting a double outside the target type is up to the CPU (x86 wraps,
 # s390x saturates), so these compare against C++ built for the same host.
 full=1
@@ -233,7 +234,8 @@ for v in '{"vU8": 300}' '{"vI8": -129}' '{"vI32": 1.5}' '{"vI32": "x"}' \
   '{"vEnum": 4294967296}' '{"vEnum": 2147483648}' '{"vEnum": -2147483649}' \
   '{"lEnum": [-1, 4294967296, 1e10, 1]}' \
   '{"vU8": 300, "vI8": 3}' '{"vI32": "x"}{"vI32": 7}' '{"lU8": [256]}' \
-  '{"vI32": true}' '{"vText": 5}' '{"vStruct": 5}' '{"lData": [[1.5]]}'; do
+  '{"vI32": true}' '{"vText": 5}' '{"vStruct": 5}' '{"lData": [[1.5]]}' \
+  '{"vI16": -1e, "vI8": 3}' '{"vF64": 1e+}' '{"lF64": [1e, 2E-, 1.]}'; do
   printf '%s' "$v" >"$TMP/in.bin"
   compare "json-recover-$((i++))" "$PARITY" Parity "text binary json"
 done

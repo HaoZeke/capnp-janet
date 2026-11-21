@@ -32,6 +32,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- A JSON number with an empty exponent, such as `1e` or `2E-`, reads as
+  0 after a recoverable error, as kj lexes and parses it.
 - `capnp-eval convert` goes on after the text errors `capnp` recovers
   from: a list item that does not parse, a value of the wrong type, an
   unknown field and a non-struct root are dropped, and integers out of
