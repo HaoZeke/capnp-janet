@@ -66,8 +66,10 @@ check ptr-structs-as-int16-list "$PARITY" Parity "text json" -- \
 check struct-as-cap "$HOLDER" Holder "text" -- \
   0001000100000000 0000000000000007 0000000100000000 0
 
-# A null root reads as an empty struct.
-check null-root "$PARITY" Parity "text json" -- 0
+# A null root reads as an empty struct; any other non-struct root fails.
+check null-root "$PARITY" Parity "text json binary packed flat canonical" -- 0
+check list-root "$PARITY" Parity "text json binary packed flat canonical" -- \
+  0000000100000001 0000000000000005
 
 if [[ $fails -ne 0 ]]; then
   echo "convert parity: $fails failure(s)" >&2

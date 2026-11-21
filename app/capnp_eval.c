@@ -362,6 +362,8 @@ static int rebuild_message(const capnp_message_t *src, size_t seg_words,
   mut.ready = 0;
   if (capnp_root(&mut, &root) != CAPNP_OK)
     return -1;
+  if (root.kind != CAPNP_PK_STRUCT && root.kind != CAPNP_PK_NULL)
+    return -1;
   if (single_flat) {
     capnp_builder_init_sized(&b, CAPNP_BUILDER_DEFAULT_FIRST_WORDS);
     b.force_single = 1;
@@ -376,11 +378,16 @@ static int rebuild_message(const capnp_message_t *src, size_t seg_words,
     capnp_builder_free(&b);
     return -1;
   }
-  if (root.kind != CAPNP_PK_NULL) {
-    if (copy_ptr_untrimmed(&b, broot.seg, broot.word, &root, 0)) {
+  /* setRoot(getRoot<AnyStruct>()) writes a null root as an empty struct. */
+  if (root.kind == CAPNP_PK_NULL) {
+    capnp_bptr_t body;
+    if (capnp_builder_struct(&broot, 0, 0, &body)) {
       capnp_builder_free(&b);
       return -1;
     }
+  } else if (copy_ptr_untrimmed(&b, broot.seg, broot.word, &root, 0)) {
+    capnp_builder_free(&b);
+    return -1;
   }
   if (single_flat) {
     size_t nbytes = b.segs[0].words * CAPNP_WORD_BYTES;
@@ -465,8 +472,15 @@ static int write_converted_message(capnp_dyn_t *dyn,
     return 0;
   }
   case FMT_CANONICAL: {
+    capnp_message_t mut = *m;
+    capnp_ptr_t root;
     uint8_t *can = NULL;
     size_t clen = 0;
+    mut.owned = NULL;
+    mut.ready = 0;
+    if (capnp_root(&mut, &root) != CAPNP_OK ||
+        (root.kind != CAPNP_PK_STRUCT && root.kind != CAPNP_PK_NULL))
+      return -1;
     if (capnp_canonicalize(m, &can, &clen) != CAPNP_OK)
       return -1;
     if (fwrite(can, 1, clen, stdout) != clen) {
@@ -717,14 +731,17 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
     if (from_fmt == FMT_CANONICAL) {
       uint8_t *can = NULL;
       size_t clen = 0;
-      if (capnp_canonicalize(&m, &can, &clen) != CAPNP_OK || clen != rlen ||
-          memcmp(can, raw, rlen) != 0) {
-        free(can);
+      size_t wbytes = seg.words * CAPNP_WORD_BYTES;
+      int canon = seg.words == 1 && capnp_load_le64(raw) == 0;
+      if (!canon)
+        canon = capnp_canonicalize(&m, &can, &clen) == CAPNP_OK &&
+                clen == wbytes && memcmp(can, raw, wbytes) == 0;
+      free(can);
+      if (!canon) {
         capnp_message_free(&m);
         free(raw);
         return 1;
       }
-      free(can);
     }
     if (write_converted_message(dyn, type_name, &m, to_fmt, pretty,
                                 seg_words)) {
