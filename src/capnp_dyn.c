@@ -4104,53 +4104,64 @@ static vnode_t *parse_text_list(scan_t *sc) {
   return arr;
 }
 
+/* A number token may not run into a letter, `_` or `.`. */
+static int number_ends(const scan_t *sc, size_t q) {
+  int c;
+  if (q >= sc->n)
+    return 1;
+  c = (unsigned char)sc->s[q];
+  return !(isalpha(c) || c == '_' || c == '.');
+}
+
 static vnode_t *parse_text_number(scan_t *sc, int neg) {
-  size_t start = sc->i;
+  size_t start = sc->i, q;
   int is_flt = 0;
   int base = 10;
   char tmp[128];
   size_t len;
   vnode_t *v;
 
-  if (sc->i + 2 <= sc->n && sc->s[sc->i] == '0' &&
-      (sc->s[sc->i + 1] == 'x' || sc->s[sc->i + 1] == 'X')) {
-    sc->i += 2;
+  /* kj tries an integer first: `0x` hex, `0` octal, or decimal. A leading
+   * zero stops at the first non-octal digit, so `08` is two tokens. */
+  if (start + 2 < sc->n && sc->s[start] == '0' && sc->s[start + 1] == 'x' &&
+      isxdigit((unsigned char)sc->s[start + 2])) {
     base = 16;
-    if (sc->i >= sc->n || !isxdigit((unsigned char)sc->s[sc->i]))
-      return NULL;
-    while (sc->i < sc->n && isxdigit((unsigned char)sc->s[sc->i]))
-      sc->i++;
+    q = start + 2;
+    while (q < sc->n && isxdigit((unsigned char)sc->s[q]))
+      q++;
+  } else if (start < sc->n && sc->s[start] == '0') {
+    base = 8;
+    q = start + 1;
+    while (q < sc->n && sc->s[q] >= '0' && sc->s[q] <= '7')
+      q++;
   } else {
-    if (sc->i >= sc->n || !isdigit((unsigned char)sc->s[sc->i]))
-      return NULL;
-    if (sc->s[sc->i] == '0')
-      base = 8;
-    while (sc->i < sc->n && isdigit((unsigned char)sc->s[sc->i])) {
-      if (sc->s[sc->i] >= '8')
-        base = 10;
-      sc->i++;
-    }
-    if (sc->i < sc->n && sc->s[sc->i] == '.') {
-      is_flt = 1;
-      sc->i++;
-      while (sc->i < sc->n && isdigit((unsigned char)sc->s[sc->i]))
-        sc->i++;
-    }
-    if (sc->i < sc->n && (sc->s[sc->i] == 'e' || sc->s[sc->i] == 'E')) {
-      is_flt = 1;
-      sc->i++;
-      if (sc->i < sc->n && (sc->s[sc->i] == '+' || sc->s[sc->i] == '-'))
-        sc->i++;
-      if (sc->i >= sc->n || !isdigit((unsigned char)sc->s[sc->i]))
-        return NULL;
-      while (sc->i < sc->n && isdigit((unsigned char)sc->s[sc->i]))
-        sc->i++;
-    }
+    q = start;
+    while (q < sc->n && isdigit((unsigned char)sc->s[q]))
+      q++;
   }
-  if (sc->i < sc->n &&
-      (isalpha((unsigned char)sc->s[sc->i]) || sc->s[sc->i] == '_' ||
-       sc->s[sc->i] == '.'))
-    return NULL;
+  if (!number_ends(sc, q)) {
+    is_flt = 1;
+    q = start;
+    while (q < sc->n && isdigit((unsigned char)sc->s[q]))
+      q++;
+    if (q < sc->n && sc->s[q] == '.') {
+      q++;
+      while (q < sc->n && isdigit((unsigned char)sc->s[q]))
+        q++;
+    }
+    if (q < sc->n && (sc->s[q] == 'e' || sc->s[q] == 'E')) {
+      q++;
+      if (q < sc->n && (sc->s[q] == '+' || sc->s[q] == '-'))
+        q++;
+      if (q >= sc->n || !isdigit((unsigned char)sc->s[q]))
+        return NULL;
+      while (q < sc->n && isdigit((unsigned char)sc->s[q]))
+        q++;
+    }
+    if (!number_ends(sc, q))
+      return NULL;
+  }
+  sc->i = q;
   len = sc->i - start;
   if (len == 0)
     return NULL;
@@ -4206,8 +4217,7 @@ static vnode_t *parse_text_expr(scan_t *sc) {
     return parse_text_tuple(sc);
   if (c == '[')
     return parse_text_list(sc);
-  if (c == '0' && sc->i + 3 <= sc->n &&
-      (sc->s[sc->i + 1] == 'x' || sc->s[sc->i + 1] == 'X') &&
+  if (c == '0' && sc->i + 3 <= sc->n && sc->s[sc->i + 1] == 'x' &&
       sc->s[sc->i + 2] == '"') {
     return parse_text_hex_binary(sc);
   }

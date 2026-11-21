@@ -187,6 +187,15 @@ for v in '(vU64 = 99999999999999999999)' '(vU64 = 18446744073709551616)' \
   printf '%s' "$v" >"$TMP/in.bin"
   compare "text-integer-$((i++))" "$PARITY" Parity "text binary"
 done
+
+# kj lexes `0x` hex, `0` octal, then decimal integers before floats, and
+# only a lowercase `x` starts hex. `08` is the two tokens `0` and `8`.
+for v in '(vI32 = 08)' '(vF64 = 08.5)' '(vF64 = 09e1)' '(vI32 = 0X1F)' \
+  '(vData = 0X"01")' '(vI32 = 007)' '(vF64 = 00.5)' '(vF64 = 0e5)' \
+  '(vF64 = 1.)' '(vF64 = 1e)' '(vI32 = 0x1F)' '(vI32 = 0x1g)'; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-number-$((i++))" "$PARITY" Parity "text binary"
+done
 in_fmt=binary
 
 # `capnp convert` lifts the nesting and traversal limits. A chain of 200

@@ -27,6 +27,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- Text number literals follow the kj lexer: a leading zero reads octal
+  digits only, so `08` and `09e1` are parse errors, and `0X` starts neither
+  a hex integer nor hex binary.
 - Text integer literals past 64 bits wrap modulo 2^64, as kj's
   `ParseInteger` does, so `99999999999999999999` no longer fails to parse.
 - `capnp_message_from_flat`, `capnp_message_view_flat` and
