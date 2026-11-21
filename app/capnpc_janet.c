@@ -882,25 +882,23 @@ static void emit_hex_string(FILE *out, const uint8_t *p, size_t n) {
   fputc('"', out);
 }
 
-/* 1 when a struct or list default was emitted, 0 when there is none, -1
- * on failure. The bytes are a framed canonical message whose root is the
- * default value. */
-static int emit_pointer_default(FILE *out, const char *sname, const char *fname,
-                                uint32_t offset, const capnp_ptr_t *field) {
-  capnp_ptr_t value, child;
+/* Framed canonical bytes of a message whose root is the struct or list in
+ * `value`, a schema Value. 1 on success, 0 when it holds no such pointer,
+ * -1 on failure. */
+static int pointer_value_bytes(const capnp_ptr_t *value, uint8_t **canon,
+                               size_t *clen) {
+  capnp_ptr_t child;
   capnp_builder_t b;
   capnp_bptr_t root;
   capnp_message_t msg = {0};
-  uint8_t *flat = NULL, *canon = NULL;
-  size_t flen = 0, clen = 0;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
   uint16_t which;
   int rc;
-  if (capnp_getp(field, 3, &value) != CAPNP_OK || value.kind != CAPNP_PK_STRUCT)
-    return 0;
-  which = capnp_get_u16(&value, 0, 0xffff);
+  which = capnp_get_u16(value, 0, 0xffff);
   if (which != TYPE_STRUCT && which != TYPE_LIST)
     return 0;
-  if (capnp_getp(&value, 0, &child) != CAPNP_OK || child.kind == CAPNP_PK_NULL)
+  if (capnp_getp(value, 0, &child) != CAPNP_OK || child.kind == CAPNP_PK_NULL)
     return 0;
   capnp_builder_init(&b);
   if (capnp_builder_root(&b, &root) || capnp_builder_copy_ptr(&root, &child)) {
@@ -918,12 +916,30 @@ static int emit_pointer_default(FILE *out, const char *sname, const char *fname,
     return -1;
   }
   free(flat);
-  rc = capnp_canonicalize_framed(&msg, &canon, &clen);
+  rc = capnp_canonicalize_framed(&msg, canon, clen);
   capnp_message_free(&msg);
   if (rc != CAPNP_OK) {
-    free(canon);
+    free(*canon);
+    *canon = NULL;
     return -1;
   }
+  return 1;
+}
+
+/* 1 when a struct or list default was emitted, 0 when there is none, -1
+ * on failure. The bytes are a framed canonical message whose root is the
+ * default value. */
+static int emit_pointer_default(FILE *out, const char *sname, const char *fname,
+                                uint32_t offset, const capnp_ptr_t *field) {
+  capnp_ptr_t value;
+  uint8_t *canon = NULL;
+  size_t clen = 0;
+  int rc;
+  if (capnp_getp(field, 3, &value) != CAPNP_OK || value.kind != CAPNP_PK_STRUCT)
+    return 0;
+  rc = pointer_value_bytes(&value, &canon, &clen);
+  if (rc <= 0)
+    return rc;
   fprintf(out, "(def %s-%s-default ", sname, fname);
   emit_hex_string(out, canon, clen);
   fprintf(out, ")\n");
@@ -1504,6 +1520,23 @@ static void emit_const(FILE *out, const capnp_ptr_t *node) {
       fputs("\"\"", out);
     else
       janet_quote(out, (const char *)data, n);
+    break;
+  }
+  case TYPE_STRUCT:
+  case TYPE_LIST: {
+    uint8_t *canon = NULL;
+    size_t clen = 0;
+    int rc = pointer_value_bytes(&value, &canon, &clen);
+    if (rc > 0) {
+      fputs("(:root (capnp/message-from-buffer (buffer ", out);
+      emit_hex_string(out, canon, clen);
+      fputs(")))", out);
+    } else if (rc == 0) {
+      fputs("nil", out);
+    } else {
+      fputs("(error \"unreadable Cap'n Proto pointer constant\")", out);
+    }
+    free(canon);
     break;
   }
   default:

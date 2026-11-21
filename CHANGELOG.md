@@ -30,6 +30,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnpc-janet` emits struct and list constants as the root of an
+  embedded canonical message, as `capnpc-c++` embeds their words. They
+  used to be an `error` form, so modules with one could not be imported.
 - The text decoder rejects single-quoted strings, which the capnp lexer
   does not know. They used to decode like double-quoted ones.
 - The JSON decoder reads any value as `Void`, in fields, lists and union
