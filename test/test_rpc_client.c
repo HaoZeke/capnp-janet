@@ -620,6 +620,41 @@ int main(void)
     }
   }
 
+  /* A Return with releaseParamCaps, the default the vat sends, gives back
+   * the reference each export in the params took, even once finished. */
+  {
+    static int param_server;
+    capnp_rpc_call_t call;
+    capnp_rpc_cap_ref_t ref;
+    uint32_t qp;
+    int ce = capnp_rpc_export(&client, &param_server, doubler_dispatch);
+    int before = client.exports[ce].refcount;
+    ref.kind = CAPNP_RPC_CAP_EXPORT;
+    ref.id = (uint32_t)ce;
+    memset(&call, 0, sizeof call);
+    call.interface_id = 0x1234;
+    call.params_dwords = 1;
+    call.params_pwords = 1;
+    call.fill = fill_u32;
+    call.fill_ctx = &arg;
+    call.caps = &ref;
+    call.ncaps = 1;
+    qp = capnp_rpc_send_call_ex(&client, &call);
+    CHECK(client.exports[ce].refcount == before + 1, "params take a reference");
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(client.exports[ce].refcount == before,
+          "releaseParamCaps gives it back");
+    capnp_rpc_send_finish(&client, qp);
+    pump(&vat, &g_to_vat);
+    qp = capnp_rpc_send_call_ex(&client, &call);
+    capnp_rpc_send_finish(&client, qp);
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(client.exports[ce].refcount == before,
+          "a late Return gives it back too");
+  }
+
   /* Kept results nobody takes are answered resultsSentElsewhere when the
    * caller finishes them. */
   {

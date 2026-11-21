@@ -94,6 +94,8 @@ static void questions_fail_all(capnp_rpc_conn_t *c);
 #define FINISH_PW 0
 /* Finish.releaseResultCaps, stored XOR its default of true. */
 #define FINISH_RELEASE_CAPS_BIT 32
+/* Return.releaseParamCaps, stored inverted: its default is true. */
+#define RETURN_RELEASE_PARAMS_BIT 32
 #define RELEASE_DW 1
 #define RELEASE_PW 0
 #define TARGET_DW 1
@@ -1541,6 +1543,41 @@ static int write_promised_target(const capnp_bptr_t *target,
 }
 
 
+/* Until its Return arrives a question has no reply, so its buffer keeps
+ * the exports the call's params took a reference to: a count, then the
+ * ids. rpc.c++ keeps them as the question's paramExports. */
+#define PARAM_EXPORTS_MAX (CAPNP_RPC_MAX_ANSWER_BYTES / 4 - 1)
+
+static void param_exports_note(capnp_rpc_question_t *q,
+                               const capnp_rpc_call_t *call)
+{
+  uint32_t i, n = 0;
+  for (i = 0; i < call->ncaps && n < PARAM_EXPORTS_MAX; i++) {
+    if (call->caps[i].kind == CAPNP_RPC_CAP_EXPORT) {
+      memcpy(q->reply + 4 + 4 * n, &call->caps[i].id, 4);
+      n++;
+    }
+  }
+  memcpy(q->reply, &n, 4);
+}
+
+/* A Return with releaseParamCaps gives those references back. */
+static int param_exports_release(capnp_rpc_conn_t *c, capnp_rpc_question_t *q,
+                                 int release)
+{
+  uint32_t i, n, id;
+  int rc = CAPNP_OK;
+  if (q->reply_len != 0)
+    return CAPNP_OK;
+  memcpy(&n, q->reply, 4);
+  memset(q->reply, 0, 4);
+  for (i = 0; release && i < n && rc == CAPNP_OK; i++) {
+    memcpy(&id, q->reply + 4 + 4 * i, 4);
+    rc = export_release(c, id, 1);
+  }
+  return rc;
+}
+
 uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c, const capnp_rpc_call_t *call)
 {
   capnp_builder_t b;
@@ -1610,6 +1647,7 @@ uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c, const capnp_rpc_call_t *cal
   for (i = 0; i < call->ncaps; i++)
     if (call->caps[i].kind == CAPNP_RPC_CAP_EXPORT)
       c->exports[call->caps[i].id].refcount++;
+  param_exports_note(q, call);
   if (call->results_to_yourself)
     q->used |= Q_TAIL;
   return qid;
@@ -1830,6 +1868,12 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
   if (q->answered)
     return protocol_abort(c, "expected question->isAwaitingReturn; "
                              "Duplicate Return.");
+  {
+    int rc = param_exports_release(
+        c, q, !capnp_get_bool(ret, RETURN_RELEASE_PARAMS_BIT, 0));
+    if (rc != CAPNP_OK)
+      return rc;
+  }
   tag = capnp_get_u16(ret, RETURN_TAG_OFF, 0);
   if (q->used & Q_FINISHED) {
     /* We finished it first, so nobody wants the results. A tail call back

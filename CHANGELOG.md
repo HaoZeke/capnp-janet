@@ -82,6 +82,9 @@ Pre-1.0 minor releases may include breaking API changes.
 - A call with `sendResultsTo.yourself` is answered `resultsSentElsewhere`
   when a `takeFromOtherQuestion` collects its results, or at `Finish`,
   as rpc.c++ sends it. It used to go out as soon as the method ran.
+- A Return with `releaseParamCaps` gives back the reference each export
+  in the call's params took, as rpc.c++ releases a question's
+  paramExports. Those references used to stay taken.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.
