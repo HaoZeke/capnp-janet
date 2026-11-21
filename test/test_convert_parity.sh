@@ -47,6 +47,17 @@ compare() {
   done
 }
 
+# check_framed NAME SCHEMA ROOT FORMATS -- HEX...: HEX starts with the
+# segment table
+check_framed() {
+  local name="$1" schema="$2" root="$3" fmts="$4"
+  shift 5
+  python3 -c 'import struct, sys
+sys.stdout.buffer.write(b"".join(struct.pack("<Q", int(x, 16)) for x in sys.argv[1:]))' \
+    "$@" >"$TMP/in.bin"
+  compare "$name" "$schema" "$root" "$fmts"
+}
+
 # check NAME SCHEMA ROOT FORMATS -- HEX...
 check() {
   local name="$1" schema="$2" root="$3" fmts="$4"
@@ -101,6 +112,14 @@ check bool-from-int64-list "$PARITY" Parity "text json" -- \
   $(parity_ptr 4 000000150000006d 0000000000000006 0)
 check structs-from-void-list "$PARITY" Parity "text json" -- \
   $(parity_ptr 18 0000001000000035)
+
+# A double-far landing pad only has to be a far pointer.
+check_framed pad-with-double-bit "$PARITY" Parity "text json binary" -- \
+  0000000100000001 3 0000000100000006 0000000100000016 0000000100000014 2a
+check_framed tag-with-offset "$PARITY" Parity "text json binary" -- \
+  0000000100000001 3 0000000100000006 0000000100000012 0000000100000014 2a
+check_framed pad-not-far "$PARITY" Parity "text json binary" -- \
+  0000000100000001 3 0000000100000006 0000000100000010 0000000100000014 2a
 
 # A null root reads as an empty struct; any other non-struct root fails.
 check null-root "$PARITY" Parity "text json binary packed flat canonical" -- 0

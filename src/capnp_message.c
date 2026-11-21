@@ -433,9 +433,8 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
         return CAPNP_ERR_TRAVERSAL;
       pad = read_word(m, tseg, toff);
       tag = read_word(m, tseg, (size_t)toff + 1u);
-      if (capnp_wp_kind(pad) != CAPNP_WK_FAR || capnp_wp_far_two(pad))
-        return CAPNP_ERR_KIND;
-      if (capnp_wp_offset(tag) != 0)
+      /* C++ ignores the pad's own double-far bit and the tag's offset. */
+      if (capnp_wp_kind(pad) != CAPNP_WK_FAR)
         return CAPNP_ERR_KIND;
       cseg = capnp_wp_far_seg(pad);
       coff = capnp_wp_far_off(pad);

@@ -27,6 +27,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- A double-far landing pad only has to be a far pointer, as in C++. Pads
+  with their own double-far bit set, and tags with a non-zero offset, used
+  to be rejected.
 - List readers follow C++ for wider elements: scalars read the low bytes of
   each element, `List(Bool)` reads bit `index` from the start of any data
   list, and a `List(Void)` reads as empty structs. They used to return the
