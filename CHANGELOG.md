@@ -30,6 +30,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- The builder emits any number of segments, like `MallocMessageBuilder`.
+  `capnp-eval convert --segment-size=1` failed past 512 segments.
 - `capnp_dyn_get_text` and `capnp_dyn_get_ptr` read Text and Data at any
   depth and fail on corrupt pointers or pointers of the wrong kind, as
   `DynamicStruct::Reader::get` does. They used to return the default.

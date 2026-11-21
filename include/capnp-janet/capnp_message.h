@@ -5,7 +5,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-/* The builder refuses to emit more segments than this. Flat and segment
+/* Kept for source compatibility; nothing enforces it. The builder emits
+ * any segment count, like MallocMessageBuilder, and flat and segment
  * array readers take any count, like FlatArrayMessageReader. */
 #define CAPNP_MAX_SEGMENTS 512u
 

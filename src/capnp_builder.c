@@ -100,9 +100,9 @@ static int ensure_segs_cap(capnp_builder_t *b, uint32_t need) {
   size_t bytes;
   if (need <= b->segs_cap)
     return CAPNP_OK;
-  ncap = b->segs_cap ? b->segs_cap * 2u : 4u;
+  ncap = b->segs_cap ? b->segs_cap : 4u;
   while (ncap < need)
-    ncap *= 2u;
+    ncap = ncap > UINT32_MAX / 2u ? UINT32_MAX : ncap * 2u;
 #if SIZE_MAX <= UINT32_MAX
   if ((size_t)ncap >
       (SIZE_MAX - sizeof(struct capnp_builder_priv)) / sizeof(capnp_bseg_t))
@@ -158,7 +158,8 @@ static int append_segment(capnp_builder_t *b, size_t cap_words) {
     cap_words = 1;
   if (cap_words > lim)
     cap_words = lim;
-  if (b->nsegs >= CAPNP_MAX_SEGMENTS)
+  /* Far pointers name a segment with 32 bits. */
+  if (b->nsegs == UINT32_MAX)
     return CAPNP_ERR_ALLOC;
   if (ensure_segs_cap(b, b->nsegs + 1))
     return CAPNP_ERR_ALLOC;

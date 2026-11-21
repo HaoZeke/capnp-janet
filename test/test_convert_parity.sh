@@ -143,6 +143,11 @@ done
 extra=()
 BIG="(vData = 0x\"$(printf 'ab%.0s' $(seq 5000))\", lU16 = [$(seq -s, 1 3000)], lText = [\"x\", \"y\"])"
 check_text big-message "$PARITY" Parity "binary packed" "$BIG"
+# MallocMessageBuilder has no segment count limit: 603 segments here.
+MANY="(lText = [$(seq -s, -f '"s%g"' 0 599)])"
+extra=("--segment-size=1")
+check_text many-segments "$PARITY" Parity "binary packed" "$MANY"
+extra=()
 
 # JSON base64 and hex strings decode as kj does with its error flag
 # ignored: stray characters and padding skipped, bad hex digits read as 0.
