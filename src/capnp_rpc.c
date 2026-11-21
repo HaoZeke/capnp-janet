@@ -267,6 +267,10 @@ typedef struct rpc_side {
   rpc_hold_t *holds;
   size_t nholds, cholds;
   capnp_rpc_inbuf_t in;
+  /* Set once the reader reports idle: a senderLoopback abort then waits
+   * for it, as rpc.c++ runs that check from evalLast. */
+  int defer_loopback;
+  char *loopback;
 } rpc_side_t;
 
 static pthread_mutex_t side_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -306,6 +310,7 @@ static void side_drop(const capnp_rpc_conn_t *c)
     free(s->imports);
     free(s->holds);
     free(s->in.data);
+    free(s->loopback);
   }
   free(s);
 }
@@ -1653,6 +1658,51 @@ static int cx_exception(capnp_rpc_conn_t *c, const capnp_ptr_t *s,
   return cx_reason_trace(c, &exc);
 }
 
+void capnp_rpc_defer_loopback(capnp_rpc_conn_t *c)
+{
+  rpc_side_t *s = side_get(c, 1);
+  if (s != NULL)
+    s->defer_loopback = 1;
+}
+
+int capnp_rpc_idle(capnp_rpc_conn_t *c)
+{
+  rpc_side_t *s;
+  char *reason;
+  int rc = CAPNP_OK;
+  if (c == NULL)
+    return CAPNP_ERR_ARG;
+  s = side_get(c, 1);
+  if (s == NULL)
+    return CAPNP_ERR_ALLOC;
+  s->defer_loopback = 1;
+  reason = s->loopback;
+  s->loopback = NULL;
+  if (reason != NULL && !s->aborted) {
+    protocol_abort(c, reason);
+    rc = CAPNP_ERR_KIND;
+  }
+  free(reason);
+  return rc;
+}
+
+/* The brand check of a senderLoopback Disembargo, held for the next idle
+ * report when the reader gives one. */
+static int loopback_abort(capnp_rpc_conn_t *c, const char *reason)
+{
+  rpc_side_t *s = side_get(c, 0);
+  size_t n = strlen(reason) + 1;
+  if (s == NULL || !s->defer_loopback)
+    return protocol_abort(c, reason);
+  if (s->loopback == NULL) {
+    s->loopback = (char *)malloc(n);
+    if (s->loopback == NULL)
+      return protocol_abort(c, reason);
+    memcpy(s->loopback, reason, n);
+  }
+  return CAPNP_OK;
+}
+
 int capnp_rpc_abort_typed(capnp_rpc_conn_t *c, uint16_t type,
                           const char *reason)
 {
@@ -2540,7 +2590,7 @@ static int handle_disembargo(capnp_rpc_conn_t *c, const capnp_ptr_t *dis)
            "back to the sender.",
            (unsigned long)(uintptr_t)c->exports[eid].server,
            (unsigned long)(uintptr_t)c);
-  return protocol_abort(c, reason);
+  return loopback_abort(c, reason);
 }
 
 /* Take the capability a Resolve names. With `keep` null it is dropped,

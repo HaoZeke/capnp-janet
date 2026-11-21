@@ -259,6 +259,11 @@ CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
  * import that a Return or a running call's params handed us as
  * senderHosted, and that is not yet released. */
 CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
+/* Reports that no complete frame is waiting. rpc.c++ checks the target
+ * of a senderLoopback Disembargo once its event loop is idle, so after
+ * the first call that abort waits for the next call here, which sends
+ * it and returns CAPNP_ERR_KIND. capnp_rpc_recv_fd calls this itself. */
+CAPNP_JANET_EXPORT int capnp_rpc_idle(capnp_rpc_conn_t *c);
 
 /* --- client side -------------------------------------------------- */
 

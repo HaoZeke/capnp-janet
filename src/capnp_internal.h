@@ -98,6 +98,8 @@ struct capnp_rpc_conn;
 /* The read-ahead buffer of a connection, NULL when out of memory. */
 CAPNP_JANET_HIDDEN capnp_rpc_inbuf_t *
 capnp_rpc_inbuf(const struct capnp_rpc_conn *c);
+/* Hold senderLoopback aborts for capnp_rpc_idle from the first frame. */
+CAPNP_JANET_HIDDEN void capnp_rpc_defer_loopback(struct capnp_rpc_conn *c);
 /* Send an Abort of Exception.type `type`, as rpc.c++ disconnect does,
  * unless this vat has sent one already, and fail every open question. */
 CAPNP_JANET_HIDDEN int capnp_rpc_abort_typed(struct capnp_rpc_conn *c,

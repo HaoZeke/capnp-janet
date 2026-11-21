@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -440,10 +441,20 @@ static uint64_t expected_words(const uint8_t *p, size_t words) {
 
 /* Reads into `p` until `min` bytes or end of stream, taking up to `max`.
  * Returns the count read, or -1 on an error. */
-static ssize_t read_some(int fd, uint8_t *p, size_t min, size_t max) {
+/* Reads at least `min` bytes unless the stream ends. Before a read that
+ * would wait, `c` is told it is idle; -2 when that sent an Abort. */
+static ssize_t read_some(capnp_rpc_conn_t *c, int fd, uint8_t *p, size_t min,
+                         size_t max) {
   size_t got = 0;
   while (got < min) {
-    ssize_t n = read(fd, p + got, max - got);
+    struct pollfd pfd;
+    ssize_t n;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    if (poll(&pfd, 1, 0) == 0 && capnp_rpc_idle(c) != CAPNP_OK)
+      return -2;
+    n = read(fd, p + got, max - got);
     if (n < 0) {
       if (errno == EINTR)
         continue;
@@ -500,10 +511,12 @@ static int read_entire(capnp_rpc_conn_t *c, int fd, const uint8_t *prefix,
     memcpy(grown, prefix, plen);
     free(msg);
     msg = grown;
-    n = read_some(fd, msg + plen, (size_t)expected * 8 - plen,
+    n = read_some(c, fd, msg + plen, (size_t)expected * 8 - plen,
                   (size_t)expected * 8 - plen);
     if (n < 0 || (size_t)n < (size_t)expected * 8 - plen) {
       free(msg);
+      if (n == -2)
+        return CAPNP_ERR_KIND;
       if (n >= 0)
         capnp_rpc_abort_typed(c, RPC_TYPE_DISCONNECTED, PREMATURE_REASON);
       return CAPNP_ERR_FRAMING;
@@ -528,6 +541,7 @@ int capnp_rpc_recv_fd(capnp_rpc_conn_t *c, int fd) {
   in = capnp_rpc_inbuf(c);
   if (in == NULL)
     return CAPNP_ERR_ALLOC;
+  capnp_rpc_defer_loopback(c);
   for (;;) {
     size_t avail = in->end - in->begin, words = avail / 8, need;
     uint64_t expected = expected_words(in->data + in->begin, words);
@@ -550,9 +564,9 @@ int capnp_rpc_recv_fd(capnp_rpc_conn_t *c, int fd) {
       in->begin = 0;
       in->end = avail;
     }
-    n = read_some(fd, in->data + in->end, need, cap - in->end);
+    n = read_some(c, fd, in->data + in->end, need, cap - in->end);
     if (n < 0)
-      return CAPNP_ERR_IO;
+      return n == -2 ? CAPNP_ERR_KIND : CAPNP_ERR_IO;
     in->end += (size_t)n;
     if ((size_t)n < need) {
       if (in->end > in->begin)

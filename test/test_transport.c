@@ -32,6 +32,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -721,13 +722,31 @@ static void add_reason(const uint8_t *f, size_t n, char *out, size_t cap) {
   capnp_message_free(&m);
 }
 
+/* add_reason for each whole frame of the `got` bytes at `back`. */
+static void reasons_of(const uint8_t *back, size_t got, char *out,
+                       size_t cap) {
+  size_t at = 0;
+  out[0] = 0;
+  while (got - at >= 8) {
+    uint32_t segs = capnp_load_le32(back + at) + 1, i;
+    size_t len = 4 + 4 * (size_t)segs;
+    len += len & 4;
+    for (i = 0; i < segs && at + 8 + 4 * (size_t)i <= got; i++)
+      len += 8 * (size_t)capnp_load_le32(back + at + 4 + 4 * (size_t)i);
+    if (len > got - at)
+      break;
+    add_reason(back + at, len, out, cap);
+    at += len;
+  }
+}
+
 /* Sends `n` bytes to a link vat and closes the stream. `out` gets the
  * reason of each Abort or exception Return the vat sends back. */
 static void link_abort_for(const uint8_t *in, size_t n, char *out,
                            size_t cap) {
   capnp_link_t *link = (capnp_link_t *)calloc(1, sizeof(*link));
   static uint8_t back[4096];
-  size_t got = 0, at = 0;
+  size_t got = 0;
   ssize_t r;
   int sv[2];
   out[0] = 0;
@@ -747,17 +766,7 @@ static void link_abort_for(const uint8_t *in, size_t n, char *out,
   while ((r = read(sv[0], back + got, sizeof(back) - got)) > 0)
     got += (size_t)r;
   close(sv[0]);
-  while (got - at >= 8) {
-    uint32_t segs = capnp_load_le32(back + at) + 1, i;
-    size_t len = 4 + 4 * (size_t)segs;
-    len += len & 4;
-    for (i = 0; i < segs && at + 8 + 4 * (size_t)i <= got; i++)
-      len += 8 * (size_t)capnp_load_le32(back + at + 4 + 4 * (size_t)i);
-    if (len > got - at)
-      break;
-    add_reason(back + at, len, out, cap);
-    at += len;
-  }
+  reasons_of(back, got, out, cap);
 }
 
 /* rpc.c++ answers a stream that ends, or a frame its reader refuses,
@@ -852,6 +861,67 @@ static void test_link_pointer_aborts(void) {
       fprintf(stderr, "FAIL pointer abort %zu: got \"%s\"\n", i, got);
       g_fail++;
     }
+  }
+}
+
+#define LOOPBACK_BOOT \
+  "0000000004000000000000000100010008000000000000000000000001000000" \
+  "0000000000000000"
+#define LOOPBACK_DIS \
+  "000000000900000000000000010001000d000000000000000000000001000100" \
+  "0000000000000000000000000100010000000000010000000000000001000100" \
+  "00000000000000000000000000000000"
+#define LOOPBACK_CALL \
+  "0000000011000000000000000100010002000000000000000000000003000300" \
+  "0100000000000000114441bc0ce101ea00000000000000000800000001000100" \
+  "1400000000000200000000000000000000000000010000000000000001000100" \
+  "0000000000000000000000000000000004000000020000000000000000000000" \
+  "14000000000000001600000000000000"
+/* rpc.c++ checks a senderLoopback target from evalLast, so frames that
+ * arrive with it are read first, and a stream that ends before the loop
+ * goes idle never sees the brand abort. */
+static void test_link_loopback_waits_for_idle(void) {
+  capnp_link_t *link = (capnp_link_t *)calloc(1, sizeof(*link));
+  static uint8_t back[4096];
+  static const char brand[] = "0 expected target->getBrand() == this";
+  uint8_t in[512];
+  char got[768];
+  size_t n, len = 0;
+  ssize_t r;
+  int sv[2], r1, r2, r3;
+  n = unhex(LOOPBACK_BOOT LOOPBACK_DIS LOOPBACK_CALL, in, sizeof in);
+  link_abort_for(in, n, got, sizeof got);
+  if (strcmp(got, "2 Peer disconnected.") != 0) {
+    fprintf(stderr, "FAIL loopback before end: got \"%s\"\n", got);
+    g_fail++;
+  }
+  if (!link || socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+    free(link);
+    g_fail++;
+    return;
+  }
+  n = unhex(LOOPBACK_BOOT LOOPBACK_DIS, in, sizeof in);
+  {
+    struct timeval tv = {2, 0};
+    setsockopt(sv[1], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  }
+  capnp_link_from_fd(link, sv[1]);
+  capnp_rpc_set_bootstrap(&link->conn, &g_server_obj, adder_dispatch);
+  capnp_write_all(sv[0], in, n);
+  r1 = capnp_link_recv(link);
+  r2 = capnp_link_recv(link);
+  r3 = capnp_link_recv(link);
+  capnp_link_close(link);
+  free(link);
+  while ((r = read(sv[0], back + len, sizeof(back) - len)) > 0)
+    len += (size_t)r;
+  close(sv[0]);
+  reasons_of(back, len, got, sizeof got);
+  if (r1 != CAPNP_OK || r2 != CAPNP_OK || r3 != CAPNP_ERR_KIND ||
+      strncmp(got, brand, sizeof brand - 1) != 0) {
+    fprintf(stderr, "FAIL loopback at idle: %d %d %d \"%s\"\n", r1, r2, r3,
+            got);
+    g_fail++;
   }
 }
 
@@ -2393,6 +2463,7 @@ int main(int argc, char **argv) {
   test_frame_alloc_limit();
   test_link_framing_aborts();
   test_link_pointer_aborts();
+  test_link_loopback_waits_for_idle();
   test_bootstrap_frame_little_endian();
   test_size_to_i32();
   test_write_pipe();

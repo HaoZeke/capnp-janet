@@ -52,6 +52,9 @@ Pre-1.0 minor releases may include breaking API changes.
   C++ BufferedMessageStream reads it. `capnp_link_recv` and
   `capnp/rpc-recv` use it, so an ended stream or a frame C++ refuses is
   answered with the Abort rpc.c++ sends.
+- `capnp_rpc_idle` reports that no frame is waiting. After its first
+  call a senderLoopback Disembargo that fails its brand check aborts at
+  the next idle report, as rpc.c++ checks it from `evalLast`.
 
 ### Fixed
 
