@@ -32,6 +32,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnpc-janet` lists inherited methods in `<Interface>-methods`, as
+  `capnpc-c++` exposes them on the derived client, and emits
+  `<Interface>-superclasses`. Each entry carries the `:interface-id` a
+  call must use. Superclasses used to be ignored.
 - `capnp_rpc_answer_cap_id` reads a `senderPromise` descriptor, which
   names an export as `senderHosted` does. A promised capability, such
   as a bootstrap that resolves later, used to have no id.

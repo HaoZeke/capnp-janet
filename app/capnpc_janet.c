@@ -512,7 +512,80 @@ static void emit_union_select(FILE *out, const char *struct_name,
             struct_name, struct_name, field_name);
 }
 
-/* Emit an interface's id and one entry per method.
+#define MAX_IFACE_WALK 64
+#define MAX_IFACE_METHODS 1024
+
+typedef struct {
+  uint64_t seen[MAX_IFACE_WALK];
+  int nseen;
+  const char *names[MAX_IFACE_METHODS];
+  int nnames;
+  int any;
+} method_walk_t;
+
+/* One entry per method of `node` and, depth first, of its superclasses,
+ * as capnpc-c++ gives `Derived::Client` every inherited method. Each
+ * entry names the interface that declares it, since a call must carry
+ * that id. A name already emitted, own methods first, is kept. With a
+ * NULL `out` this only counts. */
+static void emit_methods(FILE *out, const capnp_ptr_t *node,
+                         const capnp_ptr_t *nodes, method_walk_t *w) {
+  capnp_ptr_t methods, supers;
+  uint64_t id = capnp_get_u64(node, 0, 0);
+  uint32_t i, count;
+  int k;
+
+  if (capnp_get_u16(node, 12, 0xffff) != NODE_IFACE)
+    return;
+  for (k = 0; k < w->nseen; k++)
+    if (w->seen[k] == id)
+      return;
+  if (w->nseen == MAX_IFACE_WALK)
+    return;
+  w->seen[w->nseen++] = id;
+
+  /* interface.methods shares pointer slot 3 with struct.fields. */
+  count = capnp_getp(node, 3, &methods) == CAPNP_OK ? capnp_list_len(&methods) : 0;
+  for (i = 0; i < count; i++) {
+    capnp_ptr_t m;
+    const char *mname;
+    int pdw, ppw, rdw, rpw, dup = 0;
+    if (capnp_list_get_struct(&methods, i, &m) != CAPNP_OK)
+      continue;
+    mname = get_text(&m, 0);
+    if (!mname)
+      mname = "?";
+    for (k = 0; k < w->nnames; k++)
+      if (strcmp(w->names[k], mname) == 0)
+        dup = 1;
+    if (dup)
+      continue;
+    if (w->nnames < MAX_IFACE_METHODS)
+      w->names[w->nnames++] = mname;
+    struct_shape(nodes, capnp_get_u64(&m, 8, 0), &pdw, &ppw);
+    struct_shape(nodes, capnp_get_u64(&m, 16, 0), &rdw, &rpw);
+    w->any = 1;
+    if (!out)
+      continue;
+    fprintf(out,
+            "\n   :%s {:ordinal %u :params-dwords %d :params-pwords %d"
+            " :results-dwords %d :results-pwords %d"
+            " :interface-id (int/u64 \"0x%016llx\")}",
+            mname, i, pdw, ppw, rdw, rpw, (unsigned long long)id);
+  }
+
+  /* interface.superclasses is pointer slot 4; Superclass.id is word 0. */
+  count = capnp_getp(node, 4, &supers) == CAPNP_OK ? capnp_list_len(&supers) : 0;
+  for (i = 0; i < count; i++) {
+    capnp_ptr_t sc, base;
+    if (capnp_list_get_struct(&supers, i, &sc) == CAPNP_OK &&
+        node_by_id(nodes, capnp_get_u64(&sc, 0, 0), &base))
+      emit_methods(out, &base, nodes, w);
+  }
+}
+
+/* Emit an interface's id, its direct superclass ids, and one entry per
+ * method it can be called with.
  *
  * The caller needs three things the schema already carries: which
  * interface, which ordinal, and how big the parameter struct is. Emitting
@@ -520,8 +593,9 @@ static void emit_union_select(FILE *out, const char *struct_name,
 static void emit_interface(FILE *out, const capnp_ptr_t *node,
                            const capnp_ptr_t *nodes) {
   char iname[256];
-  capnp_ptr_t methods;
+  capnp_ptr_t supers;
   uint32_t i, count;
+  method_walk_t *w;
 
   if (capnp_get_u16(node, 12, 0xffff) != NODE_IFACE)
     return;
@@ -531,29 +605,29 @@ static void emit_interface(FILE *out, const capnp_ptr_t *node,
   fprintf(out, "(def %s-interface-id (int/u64 \"0x%016llx\"))\n", iname,
           (unsigned long long)capnp_get_u64(node, 0, 0));
 
-  /* interface.methods shares pointer slot 3 with struct.fields. */
-  if (capnp_getp(node, 3, &methods) != CAPNP_OK)
-    return;
-  count = capnp_list_len(&methods);
-  if (count == 0)
-    return;
-
-  fprintf(out, "(def %s-methods\n  {", iname);
-  for (i = 0; i < count; i++) {
-    capnp_ptr_t m;
-    const char *mname;
-    int pdw, ppw, rdw, rpw;
-    if (capnp_list_get_struct(&methods, i, &m) != CAPNP_OK)
-      continue;
-    mname = get_text(&m, 0);
-    struct_shape(nodes, capnp_get_u64(&m, 8, 0), &pdw, &ppw);
-    struct_shape(nodes, capnp_get_u64(&m, 16, 0), &rdw, &rpw);
-    fprintf(out,
-            "\n   :%s {:ordinal %u :params-dwords %d :params-pwords %d"
-            " :results-dwords %d :results-pwords %d}",
-            mname ? mname : "?", i, pdw, ppw, rdw, rpw);
+  count = capnp_getp(node, 4, &supers) == CAPNP_OK ? capnp_list_len(&supers) : 0;
+  if (count > 0) {
+    fprintf(out, "(def %s-superclasses\n  [", iname);
+    for (i = 0; i < count; i++) {
+      capnp_ptr_t sc;
+      if (capnp_list_get_struct(&supers, i, &sc) == CAPNP_OK)
+        fprintf(out, "%s(int/u64 \"0x%016llx\")", i ? " " : "",
+                (unsigned long long)capnp_get_u64(&sc, 0, 0));
+    }
+    fprintf(out, "])\n");
   }
-  fprintf(out, "})\n");
+
+  w = calloc(1, sizeof(*w));
+  if (!w)
+    return;
+  emit_methods(NULL, node, nodes, w);
+  if (w->any) {
+    memset(w, 0, sizeof(*w));
+    fprintf(out, "(def %s-methods\n  {", iname);
+    emit_methods(out, node, nodes, w);
+    fprintf(out, "})\n");
+  }
+  free(w);
 }
 
 static int type_is_parameter(const capnp_ptr_t *typ, uint64_t *scope,
