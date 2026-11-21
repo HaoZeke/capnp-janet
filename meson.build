@@ -317,6 +317,18 @@ if bash.found()
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
   )
+  test(
+    'random_parity',
+    bash,
+    args: [meson.project_source_root() / 'test/test_random_parity.sh'],
+    depends: [capnp_eval],
+    workdir: meson.project_source_root(),
+    # About 5 s, and 11 s under sanitizers.
+    timeout: 60,
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
 else
   message('codegen smoke: skipped (no bash).')
 endif

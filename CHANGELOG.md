@@ -10,6 +10,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Added
 
+- `random_parity` test: seeded random `Parity` messages encoded and
+  converted by `capnp` and `capnp-eval` (binary, packed, canonical, flat,
+  text, JSON and random `--segment-size`), byte-compared.
 - `capnp_builder_orphan_free` zeroes an orphan that will not be adopted,
   including text reachable from it, and leaves the orphan dead.
 - `capnp_dyn_error` returns the text of the last decode failure.
