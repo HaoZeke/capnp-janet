@@ -316,7 +316,22 @@ done <<'EOF'
 (vI8 = 08, vI16 = 1e)
 (vI32 = 1.5.3)
 (vData = 0x"0a 1b", vI8 = 0x"0a"x)
+(vF64 = 1e)
+(vF64 = -1e, vF32 = 1e+)
+(vF32 = -1E-, vI8 = 3)
+(vF64 = 1.e)
+(vF64 = 0e)
+(vF64 = -0e, vI32 = 1e, vU8 = -1e)
+(lF64 = [1e, -1e, 2E-, 1.5], lF32 = [1e+, -1e, 3])
 EOF
+# A float with an empty exponent reads as 0 in a Json.Value too.
+JSONV="$INC/capnp/compat/json.capnp"
+for v in '(number = 1e)' '(number = -1e)' \
+  '(array = [(number = 1E-), (number = -0e), (number = 2)])' \
+  '(object = [(name = "a", value = (number = -1.e))])'; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-json-value-$((i++))" "$JSONV" Value "text binary json"
+done
 # A `#` in a string still ends the chunk scan, so this is one
 # application and reads as an empty root.
 printf '(vText = "a#b")\n(vI8 = 2)' >"$TMP/in.bin"

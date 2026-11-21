@@ -32,6 +32,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- A text float with an empty exponent, such as `1e`, `1.e` or `-1E-`,
+  reads as 0 or -0 after a recoverable error, in fields, lists and a
+  `Json.Value`, as `capnp` does.
 - Text encoding no longer follows the pointer of an inactive union
   member, so a corrupt one there is not an error, as in `stringify.c++`.
 - A JSON number with an empty exponent, such as `1e` or `2E-`, reads as

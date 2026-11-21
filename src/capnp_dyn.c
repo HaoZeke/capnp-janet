@@ -4472,8 +4472,6 @@ static vnode_t *parse_text_number(scan_t *sc, int neg) {
       q++;
       if (q < sc->n && (sc->s[q] == '+' || sc->s[q] == '-'))
         q++;
-      if (q >= sc->n || !isdigit((unsigned char)sc->s[q]))
-        return NULL;
       while (q < sc->n && isdigit((unsigned char)sc->s[q]))
         q++;
     }
@@ -4487,8 +4485,13 @@ static vnode_t *parse_text_number(scan_t *sc, int neg) {
 
   if (is_flt) {
     double dv;
-    if (strtod_n(sc->s + start, len, &dv))
-      return NULL;
+    /* kj lexes an exponent without digits; `parseAs<double>` then
+     * recovers with 0, which a unary minus negates. */
+    if (strtod_n(sc->s + start, len, &dv)) {
+      if (soft_error())
+        return NULL;
+      dv = 0;
+    }
     v = new_vnode(VK_FLOAT);
     if (!v)
       return NULL;
