@@ -30,6 +30,11 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- Text and JSON encoders treat a pointer field as absent when its far
+  pointer or pointer kind cannot be followed, as `DynamicStruct::has`
+  does. A null or unreadable struct prints its default fields, union
+  member 0 included, and a flattened null struct in JSON prints its
+  defaults too. They used to print nothing for these.
 - `capnp-eval` reads binary and packed streams as kj does. A short read
   is zero-filled with a recoverable error, a packed stream that ends
   inside a word stops the run, and later segments are read only when a

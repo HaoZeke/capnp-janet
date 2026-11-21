@@ -2004,6 +2004,83 @@ static void enc_field_blob(const capnp_ptr_t *s, const dyn_field_t *f,
   }
 }
 
+static int far_segment_ok(const capnp_message_t *m, uint32_t seg) {
+  if (seg < m->nsegs && !m->segs[seg].data) {
+    note_wire(CAPNP_ERR_IO);
+    return 0;
+  }
+  /* tryGetSegment knows no segment of zero words. */
+  if (seg >= m->nsegs || m->segs[seg].words == 0) {
+    note_wire(CAPNP_ERR_SEGMENT);
+    return 0;
+  }
+  return 1;
+}
+
+/* DynamicStruct::Reader::has for a pointer field: PointerReader::isNull,
+ * which follows far pointers but not the object. A pointer it cannot
+ * follow is absent after a recoverable error; one to a corrupt object is
+ * present and then reads as its default. */
+static int pointer_present(const capnp_ptr_t *s, uint32_t idx) {
+  const capnp_message_t *m = s->msg;
+  uint64_t w;
+  if (idx >= s->pwords)
+    return 0;
+  w = capnp_load_le64(m->segs[s->seg].data +
+                      (s->word + (size_t)s->dwords + idx) * CAPNP_WORD_BYTES);
+  if (w == 0)
+    return 0;
+  if (capnp_wp_kind(w) == CAPNP_WK_FAR) {
+    uint32_t seg = capnp_wp_far_seg(w);
+    size_t pos = capnp_wp_far_off(w);
+    int two = capnp_wp_far_two(w);
+    uint64_t pad;
+    if (!far_segment_ok(m, seg))
+      return 0;
+    if (pos + (two ? 2u : 1u) > m->segs[seg].words) {
+      note_wire(CAPNP_ERR_BOUNDS);
+      return 0;
+    }
+    pad = capnp_load_le64(m->segs[seg].data + pos * CAPNP_WORD_BYTES);
+    if (two) {
+      if (!far_segment_ok(m, capnp_wp_far_seg(pad)))
+        return 0;
+      if (capnp_wp_kind(pad) != CAPNP_WK_FAR) {
+        note_wire(CAPNP_ERR_KIND);
+        return 0;
+      }
+      w = capnp_load_le64(m->segs[seg].data + (pos + 1u) * CAPNP_WORD_BYTES);
+    } else {
+      w = pad;
+    }
+    if (capnp_wp_kind(w) == CAPNP_WK_FAR) {
+      note_wire(CAPNP_ERR_KIND);
+      return 0;
+    }
+  }
+  if (capnp_wp_kind(w) == CAPNP_WK_CAP && (uint32_t)w != CAPNP_WK_CAP) {
+    note_wire(CAPNP_ERR_KIND);
+    return 0;
+  }
+  return 1;
+}
+
+/* A struct pointer that is null or could not be read gives C++ an empty
+ * StructReader, whose fields all read as their defaults. */
+static const capnp_ptr_t *as_struct(const capnp_ptr_t *s, capnp_ptr_t *tmp) {
+  if (s && s->kind != CAPNP_PK_NULL)
+    return s;
+  memset(tmp, 0, sizeof(*tmp));
+  if (s)
+    *tmp = *s;
+  tmp->kind = CAPNP_PK_STRUCT;
+  tmp->dwords = 0;
+  tmp->pwords = 0;
+  tmp->data_bits = 0;
+  tmp->body_byte = 0;
+  return tmp;
+}
+
 static int field_has_wire(capnp_dyn_t *d, const capnp_ptr_t *s,
                           const dyn_field_t *f, const brand_env_t *env,
                           int non_null) {
@@ -2014,15 +2091,9 @@ static int field_has_wire(capnp_dyn_t *d, const capnp_ptr_t *s,
     return 0;
   if (resolve_field_type(d, f, env, &ft))
     return 0;
-  /* DynamicStruct::Reader::has looks at the raw pointer word, so a
-   * corrupt pointer is present and then reads as its default. */
   if (ft.list_depth > 0 || is_ptr_type(ft.which)) {
     free_rtype(&ft);
-    if (f->offset >= s->pwords)
-      return 0;
-    return capnp_load_le64(s->msg->segs[s->seg].data +
-                           (s->word + (size_t)s->dwords + f->offset) *
-                               CAPNP_WORD_BYTES) != 0;
+    return pointer_present(s, f->offset);
   }
   if (non_null) {
     free_rtype(&ft);
@@ -2425,8 +2496,10 @@ static int encode_text_struct(buf_t *b, capnp_dyn_t *d,
   uint32_t i;
   uint16_t which = 0xffff;
   int next_ind = indent ? indent + 1 : 0;
+  capnp_ptr_t empty;
   if (depth > value_depth)
     return -1;
+  s = as_struct(s, &empty);
   if (buf_ch(b, '('))
     return -1;
   memset(&pl, 0, sizeof(pl));
@@ -2637,9 +2710,11 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
   uint16_t which = 0xffff;
   disc_opts_t dopts;
   const char *tag_name = NULL;
+  capnp_ptr_t empty;
 
   if (depth > value_depth)
     return -1;
+  s = as_struct(s, &empty);
   memset(&dopts, 0, sizeof(dopts));
   if (disc_override && disc_override->present)
     dopts = *disc_override;
@@ -3267,12 +3342,14 @@ static int encode_json_struct(buf_t *b, capnp_dyn_t *d,
   json_list_t jl;
   uint32_t i;
   int sub_indent;
+  capnp_ptr_t empty;
 
   if (depth > value_depth)
     return -1;
   if (st->id == JSON_VALUE_TYPE_ID)
     return encode_json_value_struct(b, s, indent, multiline, has_prefix, pretty,
                                     depth);
+  s = as_struct(s, &empty);
   memset(&fl, 0, sizeof(fl));
   if (gather_json_fields(d, st, env, s, disc_override, union_decl_name, "", &fl,
                          depth)) {

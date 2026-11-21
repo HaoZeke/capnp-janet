@@ -123,6 +123,17 @@ check bool-from-int64-list "$PARITY" Parity "text json" -- \
   $(parity_ptr 4 000000150000006d 0000000000000006 0)
 check structs-from-void-list "$PARITY" Parity "text json" -- \
   $(parity_ptr 18 0000001000000035)
+# A pointer field is absent when its far pointer or kind cannot be
+# followed. A null or unreadable struct prints its defaults, union
+# member 0 included, and a flattened one does the same in JSON.
+check far-unknown-segment "$PARITY" Parity "text json" -- \
+  $(parity_ptr 8 0000000500000002)
+check other-not-cap "$PARITY" Parity "text json" -- \
+  $(parity_ptr 8 0000000000000007)
+check struct-oob "$PARITY" Parity "text json" -- \
+  $(parity_ptr 26 000100010000fff0)
+check flatten-null "$PARITY" Parity "text json" -- \
+  $(parity_ptr 26 0001000100000014 0000000100000000 0)
 # canonicalize copies a corrupt last pointer as null, which leaves the
 # copy untruncated and fails its isCanonical check.
 full=1
