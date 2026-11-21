@@ -219,7 +219,10 @@ CAPNP_JANET_EXPORT void capnp_rpc_set_bootstrap(capnp_rpc_conn_t *c, void *serve
 CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
                      capnp_rpc_dispatch_fn dispatch);
 
-/* Handle one framed message. 0 when handled, non-zero on a bad frame. */
+/* Handle one framed message. 0 when handled, non-zero on a bad frame.
+ * CAPNP_ERR_IO means the peer sent Abort, and CAPNP_ERR_KIND also covers
+ * an Unimplemented reply to anything but Resolve. Either one ends the
+ * connection: every unanswered question fails and nothing is sent back. */
 CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
 
 /* --- client side -------------------------------------------------- */

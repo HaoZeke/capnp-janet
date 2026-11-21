@@ -234,6 +234,31 @@ int main(void)
     capnp_builder_free(&b);
   }
 
+  /* Abort ends the connection: unanswered questions fail and nothing
+   * goes back, or two vats would trade replies forever. */
+  {
+    capnp_builder_t b;
+    capnp_bptr_t root, msg;
+    uint8_t *flat = NULL;
+    size_t len = 0;
+    uint32_t pending = capnp_rpc_send_bootstrap(&client);
+    CHECK(pending != (uint32_t)-1, "pending bootstrap");
+    g_to_vat.head = g_to_vat.tail = 0;
+    capnp_builder_init(&b);
+    CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "abort root");
+    CHECK(capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK, "abort msg");
+    CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_ABORT) == CAPNP_OK,
+          "abort tag");
+    CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK,
+          "abort serialize");
+    CHECK(capnp_rpc_handle(&client, flat, len) == CAPNP_ERR_IO,
+          "abort reported");
+    CHECK(g_to_vat.tail == 0, "abort not answered");
+    CHECK(capnp_rpc_is_failed(&client, pending), "pending question failed");
+    free(flat);
+    capnp_builder_free(&b);
+  }
+
   if (g_failures != 0) {
     fprintf(stderr, "%d failure(s)\n", g_failures);
     return 1;

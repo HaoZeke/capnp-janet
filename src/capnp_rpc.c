@@ -1377,6 +1377,33 @@ int capnp_rpc_pending_provisions(capnp_rpc_conn_t *c, uint64_t *out, int cap)
   return n;
 }
 
+/* The connection is lost: nothing still waiting will be answered. */
+static void questions_fail_all(capnp_rpc_conn_t *c)
+{
+  int i;
+  for (i = 0; i < CAPNP_RPC_MAX_QUESTIONS; i++) {
+    capnp_rpc_question_t *q = &c->questions[i];
+    if (q->used && !q->answered) {
+      q->answered = 1;
+      q->failed = 1;
+      q->reply_len = 0;
+    }
+  }
+}
+
+/* rpc.c++ handleUnimplemented: a Resolve may go unadopted, and any other
+ * message the peer refused is fatal to the connection. This vat never
+ * sends Resolve, so it has no export to give back for one. Replying in
+ * kind would bounce between two vats forever. */
+static int handle_unimplemented(capnp_rpc_conn_t *c, const capnp_ptr_t *orig)
+{
+  if (orig->kind == CAPNP_PK_STRUCT &&
+      capnp_get_u16(orig, MESSAGE_TAG_OFF, 0) == CAPNP_RPC_MSG_RESOLVE)
+    return CAPNP_OK;
+  questions_fail_all(c);
+  return CAPNP_ERR_KIND;
+}
+
 int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
 {
   capnp_message_t m = {0};
@@ -1396,6 +1423,13 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
     memset(&body, 0, sizeof body);
 
   switch (which) {
+  case CAPNP_RPC_MSG_UNIMPLEMENTED:
+    rc = handle_unimplemented(c, &body);
+    break;
+  case CAPNP_RPC_MSG_ABORT:
+    questions_fail_all(c);
+    rc = CAPNP_ERR_IO;
+    break;
   case CAPNP_RPC_MSG_BOOTSTRAP:
     rc = handle_bootstrap(c, &body);
     break;

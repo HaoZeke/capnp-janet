@@ -24,11 +24,13 @@
 #define ADDER_IFACE 0xea01e10cbc414411ULL
 
 static int g_fd = -1;
+static int g_sends;
 
 static int send_fd(void *ctx, const uint8_t *data, size_t len)
 {
 	size_t off = 0;
 	(void)ctx;
+	g_sends++;
 	while (off < len) {
 		ssize_t n = write(g_fd, data + off, len - off);
 		if (n <= 0)
@@ -54,6 +56,47 @@ static int fill_add(void *ctx, const capnp_bptr_t *params)
 	const int64_t *ab = (const int64_t *)ctx;
 	capnp_builder_set_u64(params, 0, (uint64_t)ab[0]);
 	capnp_builder_set_u64(params, 8, (uint64_t)ab[1]);
+	return 0;
+}
+
+/* Message.which 7 is the obsolete save, which capnp-C++ answers with
+ * Unimplemented. */
+static int send_save(void)
+{
+	capnp_builder_t b;
+	capnp_bptr_t root, msg;
+	uint8_t *out = NULL;
+	size_t len = 0;
+	int rc;
+	capnp_builder_init(&b);
+	rc = capnp_builder_root(&b, &root) ||
+	     capnp_builder_struct(&root, 1, 1, &msg) ||
+	     capnp_builder_set_u16(&msg, 0, 7) ||
+	     capnp_builder_serialize(&b, &out, &len) || send_fd(NULL, out, len);
+	free(out);
+	capnp_builder_free(&b);
+	return rc;
+}
+
+static int call_add(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap,
+		    int64_t a, int64_t b, int64_t *sum)
+{
+	int64_t ab[2];
+	uint32_t q;
+	capnp_message_t m = {0};
+	capnp_ptr_t content;
+	ssize_t n;
+	ab[0] = a;
+	ab[1] = b;
+	q = capnp_rpc_send_call(conn, 0, ADDER_IFACE, 0, 2, 0, fill_add, ab);
+	if (q == (uint32_t)-1)
+		return -1;
+	n = read_frame(g_fd, buf, cap);
+	if (n <= 0 || capnp_rpc_handle(conn, buf, (size_t)n) != 0 ||
+	    capnp_rpc_answer_content(conn, q, &m, &content) != CAPNP_OK)
+		return -1;
+	*sum = (int64_t)capnp_get_u64(&content, 0, 0);
+	capnp_message_free(&m);
 	return 0;
 }
 
@@ -152,6 +195,34 @@ int main(int argc, char **argv)
 		if (sum != 42) {
 			fprintf(stderr, "add(20, 22) returned %lld, expected 42\n",
 			        (long long)sum);
+			return 1;
+		}
+	}
+
+	/* An Unimplemented reply ends the connection for capnp-C++, and
+	 * echoing it back would make the peer abort. */
+	{
+		ssize_t n;
+		int sends, rc;
+		int64_t sum = 0;
+		if (send_save()) {
+			fprintf(stderr, "save not sent\n");
+			return 1;
+		}
+		n = read_frame(g_fd, buf, sizeof buf);
+		if (n <= 0) {
+			fprintf(stderr, "no reply to save\n");
+			return 1;
+		}
+		sends = g_sends;
+		rc = capnp_rpc_handle(&conn, buf, (size_t)n);
+		if (rc != CAPNP_ERR_KIND || g_sends != sends) {
+			fprintf(stderr, "Unimplemented: rc %d, %d message(s) sent\n",
+			        rc, g_sends - sends);
+			return 1;
+		}
+		if (call_add(&conn, buf, sizeof buf, 1, 2, &sum) || sum != 3) {
+			fprintf(stderr, "capnp-C++ dropped the connection\n");
 			return 1;
 		}
 	}

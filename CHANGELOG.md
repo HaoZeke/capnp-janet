@@ -32,6 +32,10 @@ Pre-1.0 minor releases may include breaking API changes.
 - `capnp-eval convert` writes a null root as an empty struct in binary,
   packed and flat output, and rejects a list or capability root in every
   output format, as `capnp convert` 1.4.0 does.
+- The RPC vat no longer answers Unimplemented or Abort with another
+  Unimplemented. Abort, or Unimplemented for anything but Resolve, fails
+  every unanswered question and returns an error, as the C++ 1.4.0 vat
+  ends the connection there.
 - `capnp_builder_new_orphan_list` rejects an element count above `2^29 - 1`
   when the orphan is created. It used to accept a larger count for void,
   bit, byte, two-byte and four-byte elements and fail only at adopt. C++
