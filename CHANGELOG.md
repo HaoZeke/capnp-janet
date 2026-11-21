@@ -30,6 +30,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- Text and JSON float literals have no length limit. Literals of 128
+  characters or more used to fail to parse.
 - The builder emits any number of segments, like `MallocMessageBuilder`.
   `capnp-eval convert --segment-size=1` failed past 512 segments.
 - `capnp_dyn_get_text` and `capnp_dyn_get_ptr` read Text and Data at any

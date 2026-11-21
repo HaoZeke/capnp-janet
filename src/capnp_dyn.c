@@ -3632,11 +3632,30 @@ static int parse_json_str_raw(scan_t *sc, char **out, size_t *len) {
 
 static vnode_t *parse_json_val(scan_t *sc);
 
+/* strtod over exactly `len` bytes, which must all be consumed. Literals
+ * have no length limit, as in kj. */
+static int strtod_n(const char *s, size_t len, double *out) {
+  char small[128];
+  char *buf = small, *endp = NULL;
+  int rc = 0;
+  if (len >= sizeof(small)) {
+    buf = (char *)malloc(len + 1);
+    if (!buf)
+      return -1;
+  }
+  memcpy(buf, s, len);
+  buf[len] = 0;
+  *out = strtod(buf, &endp);
+  if (!endp || *endp != 0)
+    rc = -1;
+  if (buf != small)
+    free(buf);
+  return rc;
+}
+
 static vnode_t *parse_json_num(scan_t *sc) {
   size_t start = sc->i;
-  char tmp[128];
   size_t len;
-  char *endp = NULL;
   double dv;
   vnode_t *v;
 
@@ -3665,12 +3684,7 @@ static vnode_t *parse_json_num(scan_t *sc) {
       sc->i++;
   }
   len = sc->i - start;
-  if (len == 0 || len >= sizeof(tmp))
-    return NULL;
-  memcpy(tmp, sc->s + start, len);
-  tmp[len] = 0;
-  dv = strtod(tmp, &endp);
-  if (!endp || *endp != 0)
+  if (len == 0 || strtod_n(sc->s + start, len, &dv))
     return NULL;
   v = new_vnode(VK_FLOAT);
   if (!v)
@@ -4167,7 +4181,6 @@ static vnode_t *parse_text_number(scan_t *sc, int neg) {
   size_t start = sc->i, q;
   int is_flt = 0;
   int base = 10;
-  char tmp[128];
   size_t len;
   vnode_t *v;
 
@@ -4217,15 +4230,8 @@ static vnode_t *parse_text_number(scan_t *sc, int neg) {
     return NULL;
 
   if (is_flt) {
-    char *endp = NULL;
     double dv;
-    if (len >= sizeof(tmp))
-      return NULL;
-    memcpy(tmp, sc->s + start, len);
-    tmp[len] = 0;
-    errno = 0;
-    dv = strtod(tmp, &endp);
-    if (!endp || *endp != 0)
+    if (strtod_n(sc->s + start, len, &dv))
       return NULL;
     v = new_vnode(VK_FLOAT);
     if (!v)

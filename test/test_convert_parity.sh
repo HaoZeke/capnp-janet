@@ -201,6 +201,19 @@ for v in '(vI32 = 08)' '(vF64 = 08.5)' '(vF64 = 09e1)' '(vI32 = 0X1F)' \
   printf '%s' "$v" >"$TMP/in.bin"
   compare "text-number-$((i++))" "$PARITY" Parity "text binary"
 done
+
+# Float literals have no length limit in either codec.
+Z=$(printf '0%.0s' {1..130})
+for v in "(vF64 = ${Z}1.5)" "(vF64 = 1.${Z}5)" "(vF32 = 1${Z}e-130)"; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-long-float-$((i++))" "$PARITY" Parity "text binary"
+done
+in_fmt=json
+for v in "{\"vF64\": 1.${Z}5}" "{\"vF64\": 1${Z}}" \
+  "{\"vF64\": -0.${Z}${Z}1e300}"; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "json-long-float-$((i++))" "$PARITY" Parity "text binary"
+done
 in_fmt=binary
 
 # `capnp convert` lifts the nesting and traversal limits. A chain of 200
