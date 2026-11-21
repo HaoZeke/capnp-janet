@@ -6,9 +6,13 @@ BUILD="${CAPNP_JANET_BUILD:-$ROOT/build}"
 SERVER="$BUILD/rpc_peer_server"
 CLIENT="$BUILD/rpc_peer_client"
 MODULE="${CAPNP_JANET_MODULE:-$BUILD/capnp.so}"
+# Meson sets CAPNP_JANET_NEED_MODULE when it builds capnp.so, and then
+# a missing tool is a failure.
+skip=77
+[[ "${CAPNP_JANET_NEED_MODULE:-}" == 1 ]] && skip=1
 if ! command -v janet >/dev/null 2>&1 || [[ ! -f "$MODULE" || ! -x "$CLIENT" || ! -x "$SERVER" ]]; then
   echo "SKIP: janet host tools not built" >&2
-  exit 77
+  exit $skip
 fi
 MODDIR=$(cd "$(dirname "$MODULE")" && pwd)
 # Janet loads an instrumented capnp.so, so that process needs the

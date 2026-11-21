@@ -111,6 +111,21 @@ capnp_eval = executable(
   install: true,
 )
 
+# Tests that load capnp.so depend on it, so `meson test` builds the
+# module and they never skip for want of it.
+janet_dep = dependency('janet', required: get_option('janet'))
+janet_module = []
+if janet_dep.found()
+  janet_module = [shared_module(
+    'capnp',
+    capnp_janet_mod_src,
+    dependencies: [capnp_janet_dep, janet_dep],
+    name_prefix: '',
+    install: true,
+    install_dir: get_option('libdir') / 'janet',
+  )]
+endif
+
 test_inc = include_directories('test')
 
 test_wire = executable(
@@ -250,9 +265,10 @@ if bash.found()
     'codegen',
     bash,
     args: [meson.project_source_root() / 'test/test_codegen.sh'],
-    depends: [capnpc_janet],
+    depends: [capnpc_janet] + janet_module,
     workdir: meson.project_source_root(),
     env: {
+      'CAPNP_JANET_NEED_MODULE': janet_dep.found() ? '1' : '',
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
   )
@@ -443,9 +459,10 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
     'rpc_janet',
     bash,
     args: [meson.project_source_root() / 'test/test_rpc_janet.sh'],
-    depends: [rpc_peer_server],
+    depends: [rpc_peer_server] + janet_module,
     workdir: meson.project_source_root(),
     env: {
+      'CAPNP_JANET_NEED_MODULE': janet_dep.found() ? '1' : '',
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
   )
@@ -464,9 +481,10 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
     'rpc_janet_host',
     bash,
     args: [meson.project_source_root() / 'test/test_rpc_janet_host.sh'],
-    depends: [rpc_peer_server, rpc_peer_client],
+    depends: [rpc_peer_server, rpc_peer_client] + janet_module,
     workdir: meson.project_source_root(),
     env: {
+      'CAPNP_JANET_NEED_MODULE': janet_dep.found() ? '1' : '',
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
     timeout: 60,
@@ -512,18 +530,6 @@ if bash.found()
     args: [meson.project_source_root() / 'scripts/abi-diff.sh'],
     workdir: meson.project_source_root(),
     timeout: 600,
-  )
-endif
-
-janet_dep = dependency('janet', required: get_option('janet'))
-if janet_dep.found()
-  shared_module(
-    'capnp',
-    capnp_janet_mod_src,
-    dependencies: [capnp_janet_dep, janet_dep],
-    name_prefix: '',
-    install: true,
-    install_dir: get_option('libdir') / 'janet',
   )
 endif
 

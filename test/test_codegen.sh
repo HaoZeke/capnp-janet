@@ -192,6 +192,9 @@ if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then
     RUNTIME_ENV+=("LD_PRELOAD=$ASAN_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}")
   fi
   "${RUNTIME_ENV[@]}" janet "$ROOT/test/generated_builder_smoke.janet"
+elif [[ "${CAPNP_JANET_NEED_MODULE:-}" == 1 ]]; then
+  echo "FAIL: janet or $MODULE missing" >&2
+  exit 1
 fi
 
 echo "ok codegen"
