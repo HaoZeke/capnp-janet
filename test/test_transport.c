@@ -1612,6 +1612,12 @@ static const vscenario_t vat_diffs[] = {
      {{VF_TAG, 0, 0, 0, 0, 20, 0, 9u << 28}}, 1, 99, 0, 0, 0},
     {"call pipelined with a legal list of void as its transform",
      {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1, 10u << 28}}, 1, 99, 0, 0, 0},
+    {"call with a corrupt params pointer that the method reads",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u << 28}}, 1, 1, 0, 0, 0},
+    {"call with a corrupt params pointer that the method ignores",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1u << 28}}, 1, 1, 0, 0, 0},
+    {"call to an unknown method with a corrupt params pointer",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 1u << 28}}, 1, 1, 0, 0, 0},
     {"capability descriptor of an unknown arm in the params of a call",
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | 0x200}}, 1, 99, 0, 0, 0},
     {"capability then a descriptor of an unknown arm in the params",
@@ -1956,6 +1962,7 @@ static uint64_t vf_list_word(unsigned esize, uint32_t count) {
 
 /* Rewrite one pointer of a built frame, which is one segment of
  * single-word-aligned objects laid out in the order they were built:
+ *   1  the params content, an offset past the segment,
  *   2  the first list as an amplified list of void,
  *   3  the first list as an amplified list of zero-sized structs,
  *   4  a message body as an amplified list of void,
@@ -1976,6 +1983,15 @@ static int vf_corrupt(uint32_t bad, uint8_t **frame, size_t *len) {
     vf_set_word(f, 2, vf_list_word(0, bad == 8 ? VF_BODY_FITS
                                                 : VF_BODY_FITS + 1));
     return 0;
+  case 1:
+    for (w = 0; w < words; w++) {
+      uint64_t v = vf_word(f, w);
+      if ((v & 3) == 0 && (v >> 32) == 2) {
+        vf_set_word(f, w, ((uint64_t)0x40000u << 2) | (v & 0xffffffff00000000ull));
+        return 0;
+      }
+    }
+    return -1;
   case 2:
   case 3:
     for (w = 0; w < words; w++) {
@@ -2471,6 +2487,20 @@ static const struct {
      "capnp::ReaderOptions."},
     {"call pipelined with a legal list of void as its transform",
      "return 1 exception: Invalid pipeline transform. | no end"},
+    {"call with a corrupt params pointer that the method reads",
+     "return 1 exception: expected boundsCheck(segment, ptr, "
+     "ref->structRef.wordSize()); Message contained out-of-bounds "
+     "struct pointer. This usually indicates that the input data was "
+     "corrupted, used a different encoding than specified (e.g. "
+     "packed vs. non-packed), or was not a Cap'n Proto message to "
+     "begin with. Note that this error is NOT due to a schema "
+     "mismatch; the input is invalid regardless of schema."},
+    {"call with a corrupt params pointer that the method ignores",
+     "return 1 results 0"},
+    {"call to an unknown method with a corrupt params pointer",
+     "return 1 exception: Method not implemented.; interfaceName = "
+     "adder.capnp:Adder; typeId = 16862005924666098705; methodId = 9 "
+     "(unimplemented)"},
     {"capability descriptor of an unknown arm in the params of a call",
      "abort: unknown CapDescriptor type"},
     {"capability then a descriptor of an unknown arm in the params",

@@ -329,6 +329,9 @@ Pre-1.0 minor releases may include breaking API changes.
 - A call pipelined through a noop on a bootstrap answer fails with
   `Invalid pipeline transform.`, as rpc.c++ answers it. A transform long
   enough to pass the traversal limit twice is read once, as rpc.c++ does.
+- A method that reads the params of a call whose content pointer rpc.c++
+  refuses fails with that reason, as `getParams` throws. A method that
+  never reads them answers. The handler used to see empty params.
 
 ### Changed
 

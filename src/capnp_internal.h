@@ -21,6 +21,13 @@
 #define CAPNP_JANET_HIDDEN
 #endif
 
+/* The params of a call whose content pointer rpc.c++ refuses: the method
+ * is handed a null pointer into this message, and the first read through
+ * it, whatever it asks for, sets `capnp_poison_read`. rpc.c++ throws from
+ * getParams() at that point, so the call fails with the pointer's reason. */
+CAPNP_JANET_HIDDEN extern capnp_message_t capnp_poison_msg;
+CAPNP_JANET_HIDDEN extern _Thread_local int capnp_poison_read;
+
 /* MallocMessageBuilder's allocation, for byte-identical output. Every
  * segment keeps the capacity it was created with. An object goes in the
  * segment of the pointer naming it when it fits; otherwise it goes in the

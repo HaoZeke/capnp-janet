@@ -1,3 +1,5 @@
+#include "capnp_internal.h"
+
 #include <capnp-janet/capnp_message.h>
 #include <capnp-janet/capnp_pointer.h>
 
@@ -523,7 +525,12 @@ int capnp_root(capnp_message_t *m, capnp_ptr_t *out) {
   return resolve_ptr(m, 0, 0, m->depth_limit, out);
 }
 
+capnp_message_t capnp_poison_msg;
+_Thread_local int capnp_poison_read;
+
 int capnp_getp(const capnp_ptr_t *s, uint16_t ptr_index, capnp_ptr_t *out) {
+  if (s && s->msg == &capnp_poison_msg)
+    capnp_poison_read = 1;
   if (!s || !out || s->kind != CAPNP_PK_STRUCT)
     return CAPNP_ERR_KIND;
   if (ptr_index >= s->pwords) {
@@ -549,6 +556,8 @@ static const uint8_t *data_bytes(const capnp_ptr_t *s) {
 static int data_has_bytes(const capnp_ptr_t *s, uint32_t byte_offset,
                           uint32_t width) {
   size_t logical, abs, seg_bytes;
+  if (s && s->msg == &capnp_poison_msg)
+    capnp_poison_read = 1;
   if (!s || !s->msg || s->kind != CAPNP_PK_STRUCT || s->seg >= s->msg->nsegs)
     return 0;
   if (width == 0)
@@ -618,6 +627,8 @@ double capnp_get_f64(const capnp_ptr_t *s, uint32_t byte_offset, double dflt) {
 int capnp_get_bool(const capnp_ptr_t *s, uint32_t bit_offset, int dflt) {
   uint32_t byte_offset;
   uint8_t bit;
+  if (s && s->msg == &capnp_poison_msg)
+    capnp_poison_read = 1;
   if (!s || s->kind != CAPNP_PK_STRUCT)
     return dflt;
   if (bit_offset >= data_bit_count(s))

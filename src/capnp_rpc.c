@@ -2225,7 +2225,7 @@ static uint64_t *param_holds(capnp_rpc_conn_t *c, const capnp_ptr_t *payload,
 static int call_answer(capnp_rpc_conn_t *c, const capnp_ptr_t *call,
                        uint32_t qid, int eid, const char *failure,
                        uint16_t ftype, int mode, const capnp_ptr_t *params,
-                       int *kept);
+                       const char *params_error, int *kept);
 
 /* rpc.c++ releases a call's params when its context goes: right after a
  * Return that leaves nothing to pipeline on, or that is an exception,
@@ -2240,12 +2240,13 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   int eid = -1, rc, yourself, mode, kept = 0, failed;
   uint64_t *keys = NULL;
   size_t nkeys = 0;
-  char refusal[CX_REASON_MAX];
+  char refusal[CX_REASON_MAX], params_error[CX_REASON_MAX];
   uint32_t taken = 0;
 
   /* The checks and their order are rpc.c++ handleCall's: the target,
    * then sendResultsTo, then the question id. */
   memset(&params, 0, sizeof params);
+  params_error[0] = '\0';
   rc = message_target(c, call, &eid, &failure, reason, sizeof reason,
                       &ftype);
   if (rc != CAPNP_OK)
@@ -2277,7 +2278,18 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
     return protocol_abort(c, refusal);
   }
   if (capnp_getp(call, 1, &params_payload) == CAPNP_OK) {
-    (void)capnp_getp(&params_payload, 0, &params);
+    /* The content is read when the method asks for its params; a pointer
+     * rpc.c++ refuses there fails the call at that read. */
+    cx_caught = params_error;
+    failed = cx_struct(c, &params_payload, 0);
+    cx_caught = NULL;
+    if (failed) {
+      params.msg = &capnp_poison_msg;
+      params.kind = CAPNP_PK_NULL;
+    } else {
+      (void)capnp_getp(&params_payload, 0, &params);
+      params_error[0] = '\0';
+    }
     note_introductions(c, &params_payload);
     keys = param_holds(c, &params_payload, UINT32_MAX, &nkeys);
   }
@@ -2304,7 +2316,8 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
     return protocol_abort(c, "expected !answer.active; questionId is "
                              "already in use");
   }
-  rc = call_answer(c, call, qid, eid, failure, ftype, mode, &params, &kept);
+  rc = call_answer(c, call, qid, eid, failure, ftype, mode, &params,
+                   params_error, &kept);
   if (kept && answer_find(c, qid) != NULL) {
     holds_keep(c, qid, keys, nkeys);
   } else {
@@ -2321,7 +2334,7 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
 static int call_answer(capnp_rpc_conn_t *c, const capnp_ptr_t *call,
                        uint32_t qid, int eid, const char *failure,
                        uint16_t ftype, int mode, const capnp_ptr_t *params,
-                       int *kept)
+                       const char *params_error, int *kept)
 {
   capnp_builder_t b;
   capnp_bptr_t ret, payload, results;
@@ -2351,12 +2364,23 @@ static int call_answer(capnp_rpc_conn_t *c, const capnp_ptr_t *call,
     if (capnp_builder_slot(&payload, PAYLOAD_DW, 0, &results)) {
       rc = CAPNP_ERR_ALLOC;
     } else {
-      int failed;
+      int failed, outer_read = capnp_poison_read;
       current_results = &caps;
+      capnp_poison_read = 0;
       failed = c->exports[eid].dispatch(c->exports[eid].server,
                                         capnp_get_u64(call, 8, 0),
                                         capnp_get_u16(call, 4, 0), params,
                                         &results) != 0;
+      /* A method that read params rpc.c++ cannot read has thrown there. */
+      if (capnp_poison_read && params_error[0] != '\0') {
+        free(caps.fail_reason);
+        caps.fail_reason = (char *)malloc(strlen(params_error) + 1);
+        if (caps.fail_reason != NULL)
+          strcpy(caps.fail_reason, params_error);
+        caps.fail_type = EXCEPTION_TYPE_FAILED;
+        failed = 1;
+      }
+      capnp_poison_read = outer_read;
       current_results = outer;
       if (failed) {
         /* A method that fails is answered with an exception, as rpc.c++
