@@ -30,6 +30,8 @@ Pre-1.0 minor releases may include breaking API changes.
 - `capnp_rpc_send_call_ex` takes a `capnp_rpc_call_t`, which can address
   a promised answer through getPointerField steps. A call pipelined on
   the capnp-C++ Adder's `self()` answer returns before that answer does.
+- A `capnp_rpc_call_t` can pass capabilities in its params: this vat's
+  exports as senderHosted and the peer's imports as receiverHosted.
 - `capnp_read_frame_alloc` reads a frame of any size into a heap buffer,
   refusing more than 8388608 words as C++ RPC does.
 

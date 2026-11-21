@@ -46,6 +46,7 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define CAPDESC_SENDERHOSTED_OFF 4
 #define CAPDESC_TAG_SENDERHOSTED 1
 #define CAPDESC_TAG_SENDERPROMISE 2
+#define CAPDESC_TAG_RECEIVERHOSTED 3
 #define CAPDESC_TAG_THIRDPARTYHOSTED 5
 /* ThirdPartyCapDescriptor: id @ptr0, vineId @0 (u32).
  * ThirdPartyCapId (rpc-threeparty.capnp): vat @ptr0, nonce @0 (u64).
@@ -1094,16 +1095,48 @@ static int write_promised_target(const capnp_bptr_t *target,
   return CAPNP_OK;
 }
 
+/* Payload.capTable for the capabilities a call passes. */
+static int write_param_caps(const capnp_bptr_t *payload,
+                            const capnp_rpc_call_t *call)
+{
+  capnp_bptr_t cd;
+  uint32_t i;
+  if (call->ncaps == 0)
+    return CAPNP_OK;
+  if (capnp_builder_set_list_struct(payload, PAYLOAD_DW, 1, call->ncaps,
+                                    CAPDESC_DW, CAPDESC_PW, &cd))
+    return CAPNP_ERR_ALLOC;
+  for (i = 0; i < call->ncaps; i++) {
+    capnp_bptr_t e = cd;
+    uint16_t tag = call->caps[i].kind == CAPNP_RPC_CAP_EXPORT
+                       ? CAPDESC_TAG_SENDERHOSTED
+                       : CAPDESC_TAG_RECEIVERHOSTED;
+    e.word += (size_t)i * (CAPDESC_DW + CAPDESC_PW);
+    if (capnp_builder_set_u16(&e, CAPDESC_TAG_OFF, tag) ||
+        capnp_builder_set_u32(&e, CAPDESC_SENDERHOSTED_OFF, call->caps[i].id))
+      return CAPNP_ERR_ALLOC;
+  }
+  return CAPNP_OK;
+}
+
 uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c, const capnp_rpc_call_t *call)
 {
   capnp_builder_t b;
   capnp_bptr_t msg, slot, target, payload, params;
   capnp_rpc_question_t *q;
-  uint32_t qid = 0;
+  uint32_t qid = 0, i;
   int rc;
 
-  if (call == NULL || (call->transform_len && call->transform == NULL))
+  if (call == NULL || (call->transform_len && call->transform == NULL) ||
+      (call->ncaps && call->caps == NULL))
     return (uint32_t)-1;
+  for (i = 0; i < call->ncaps; i++) {
+    const capnp_rpc_cap_ref_t *r = &call->caps[i];
+    if (r->kind == CAPNP_RPC_CAP_EXPORT
+            ? r->id >= CAPNP_RPC_MAX_EXPORTS || !c->exports[r->id].used
+            : r->kind != CAPNP_RPC_CAP_IMPORT)
+      return (uint32_t)-1;
+  }
   /* rpc.c++ refuses to pipeline on a request it no longer holds. */
   if (call->promised && question_find(c, call->target) == NULL)
     return (uint32_t)-1;
@@ -1141,12 +1174,17 @@ uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c, const capnp_rpc_call_t *cal
   if (rc == CAPNP_OK && call->fill && call->fill(call->fill_ctx, &params) != 0)
     rc = CAPNP_ERR_KIND;
   if (rc == CAPNP_OK)
+    rc = write_param_caps(&payload, call);
+  if (rc == CAPNP_OK)
     rc = flush(c, &b);
   capnp_builder_free(&b);
   if (rc != CAPNP_OK) {
     question_drop(q);
     return (uint32_t)-1;
   }
+  for (i = 0; i < call->ncaps; i++)
+    if (call->caps[i].kind == CAPNP_RPC_CAP_EXPORT)
+      c->exports[call->caps[i].id].refcount++;
   return qid;
 }
 

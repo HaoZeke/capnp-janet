@@ -9,4 +9,6 @@ interface Adder @0xea01e10cbc414411 {
   echo @1 (n :UInt32) -> (data :Data);
   # This same capability, for a call pipelined on the answer.
   self @2 () -> (adder :Adder);
+  # The sum `cb.add(20, 22)` returns, for a capability in the params.
+  callBack @3 (cb :Adder) -> (sum :Int64);
 }

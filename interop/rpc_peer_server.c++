@@ -30,6 +30,15 @@ public:
 		ctx.getResults().setAdder(thisCap());
 		return kj::READY_NOW;
 	}
+
+	kj::Promise<void> callBack(CallBackContext ctx) override {
+		auto req = ctx.getParams().getCb().addRequest();
+		req.setA(20);
+		req.setB(22);
+		return req.send().then([ctx](auto resp) mutable {
+			ctx.getResults().setSum(resp.getSum());
+		});
+	}
 };
 
 // A bootstrap made when the Bootstrap message arrives. It resolves on the

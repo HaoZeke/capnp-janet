@@ -250,6 +250,16 @@ CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t im
                              uint16_t params_dwords, uint16_t params_pwords,
                              capnp_rpc_fill_fn fill, void *fill_ctx);
 
+/* A capability a call passes in its params: one of this vat's exports,
+ * sent as senderHosted, or one of the peer's, sent back to it as
+ * receiverHosted. A capability pointer in the params names its index in
+ * the call's `caps`. */
+enum { CAPNP_RPC_CAP_EXPORT = 0, CAPNP_RPC_CAP_IMPORT = 1 };
+typedef struct capnp_rpc_cap_ref {
+  int kind;
+  uint32_t id;
+} capnp_rpc_cap_ref_t;
+
 /* A call, addressed to an imported capability or, for promise
  * pipelining, to the capability that question `target`'s results hold
  * at the end of `transform`. Each transform entry is a getPointerField
@@ -266,10 +276,14 @@ typedef struct capnp_rpc_call {
   uint16_t params_pwords;
   capnp_rpc_fill_fn fill;
   void *fill_ctx;
+  const capnp_rpc_cap_ref_t *caps;
+  uint32_t ncaps;
 } capnp_rpc_call_t;
 
 /* Send `call`. Returns the questionId, or (uint32_t)-1 when the table
- * is full, the promised question is unknown, or `fill` failed. */
+ * is full, the promised question or an exported cap is unknown, or
+ * `fill` failed. Each export sent gains a reference, which the peer
+ * gives back with Release. */
 CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c,
                                                    const capnp_rpc_call_t *call);
 

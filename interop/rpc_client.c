@@ -176,6 +176,69 @@ static int check_pipeline(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 	return 0;
 }
 
+/* This vat's own Adder adds 1000, so a sum shows whose add() ran. */
+static int local_add(void *server, uint64_t iid, uint16_t mid,
+		     const capnp_ptr_t *params, const capnp_bptr_t *results)
+{
+	capnp_bptr_t body;
+	(void)server;
+	if (iid != ADDER_IFACE || mid != 0 ||
+	    capnp_builder_struct(results, 1, 0, &body))
+		return 1;
+	return capnp_builder_set_u64(&body, 0,
+	                             capnp_get_u64(params, 0, 0) +
+	                                 capnp_get_u64(params, 8, 0) + 1000);
+}
+
+static int fill_cb(void *ctx, const capnp_bptr_t *params)
+{
+	(void)ctx;
+	return capnp_builder_set_cap(params, 0, 0, 0);
+}
+
+/* callBack(cb) calls cb.add(20, 22). Passed one of our exports, the
+ * peer calls back into this vat; passed its own bootstrap as
+ * receiverHosted, it calls its own Adder. */
+static int check_cap_params(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
+{
+	static int self;
+	capnp_rpc_cap_ref_t ref;
+	capnp_rpc_call_t call;
+	int pass, eid = capnp_rpc_export(conn, &self, local_add);
+	if (eid < 0)
+		return 1;
+	for (pass = 0; pass < 2; pass++) {
+		int64_t want = pass == 0 ? 1042 : 42, sum;
+		capnp_message_t m = {0};
+		capnp_ptr_t content;
+		uint32_t q;
+		ref.kind = pass == 0 ? CAPNP_RPC_CAP_EXPORT : CAPNP_RPC_CAP_IMPORT;
+		ref.id = pass == 0 ? (uint32_t)eid : 0;
+		memset(&call, 0, sizeof call);
+		call.interface_id = ADDER_IFACE;
+		call.method_id = 3;
+		call.params_pwords = 1;
+		call.fill = fill_cb;
+		call.caps = &ref;
+		call.ncaps = 1;
+		q = capnp_rpc_send_call_ex(conn, &call);
+		if (q == (uint32_t)-1 || wait_answer(conn, q, buf, cap) ||
+		    capnp_rpc_answer_content(conn, q, &m, &content) != CAPNP_OK) {
+			fprintf(stderr, "callBack() pass %d failed\n", pass);
+			return 1;
+		}
+		sum = (int64_t)capnp_get_u64(&content, 0, 0);
+		capnp_message_free(&m);
+		if (sum != want) {
+			fprintf(stderr, "callBack() pass %d returned %lld, want %lld\n",
+			        pass, (long long)sum, (long long)want);
+			return 1;
+		}
+		capnp_rpc_send_finish(conn, q);
+	}
+	return 0;
+}
+
 /* The bootstrap of `rpc_peer_server PORT promise` resolves later, so
  * capnp-C++ describes it as senderPromise. Its export id is still the
  * one to call; the peer queues the call until the promise resolves. */
@@ -365,6 +428,8 @@ int main(int argc, char **argv)
 	}
 
 	if (check_pipeline(&conn, buf, sizeof buf))
+		return 1;
+	if (check_cap_params(&conn, buf, sizeof buf))
 		return 1;
 
 	/* An Unimplemented reply ends the connection for capnp-C++, and

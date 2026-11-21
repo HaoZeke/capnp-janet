@@ -169,6 +169,38 @@ int main(void)
     doubler_calls = 0;
   }
 
+  /* An exported cap in the params gains a reference for the peer to
+   * release. An export we do not hold is refused before sending. */
+  {
+    static int local;
+    capnp_rpc_call_t call;
+    capnp_rpc_cap_ref_t ref;
+    int eid = capnp_rpc_export(&client, &local, doubler_dispatch);
+    uint32_t qc;
+    memset(&call, 0, sizeof call);
+    call.interface_id = 0x1234;
+    call.params_dwords = 1;
+    call.fill = fill_u32;
+    call.fill_ctx = &arg;
+    call.caps = &ref;
+    call.ncaps = 1;
+    ref.kind = CAPNP_RPC_CAP_EXPORT;
+    ref.id = (uint32_t)eid + 1;
+    CHECK(capnp_rpc_send_call_ex(&client, &call) == (uint32_t)-1,
+          "unknown export refused");
+    ref.id = (uint32_t)eid;
+    qc = capnp_rpc_send_call_ex(&client, &call);
+    CHECK(qc != (uint32_t)-1 && client.exports[eid].refcount == 2,
+          "exported cap referenced");
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_is_answered(&client, qc), "cap call answered");
+    capnp_rpc_send_finish(&client, qc);
+    pump(&vat, &g_to_vat);
+    memset(&client.exports[eid], 0, sizeof client.exports[eid]);
+    doubler_calls = 0;
+  }
+
   /* A call returns the server's results to the caller. */
   arg = 21;
   q = capnp_rpc_send_call(&client, 0, 0x1234, 1, 1, 1, fill_u32, &arg);
