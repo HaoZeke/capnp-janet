@@ -327,6 +327,45 @@ static void answer_drop(capnp_rpc_conn_t *c, uint32_t qid)
     a->used = 0;
 }
 
+static void export_release(capnp_rpc_conn_t *c, uint32_t id, uint32_t count)
+{
+  if (id >= CAPNP_RPC_MAX_EXPORTS || !c->exports[id].used)
+    return;
+  /* Release.referenceCount is an untrusted UInt32 while the local count
+   * is signed. Do not narrow a large count before comparing it. */
+  if (count >= (uint32_t)c->exports[id].refcount)
+    memset(&c->exports[id], 0, sizeof c->exports[id]);
+  else
+    c->exports[id].refcount -= (int)count;
+}
+
+/* Finish with releaseResultCaps: drop the reference each capability in
+ * the stored Return took, as C++ releases an answer's resultExports. */
+static void answer_release_caps(capnp_rpc_conn_t *c, uint32_t qid)
+{
+  capnp_rpc_answer_t *a = answer_find(c, qid);
+  capnp_message_t stored = {0};
+  capnp_ptr_t root, ret, payload, table;
+  uint32_t i, n;
+  if (a == NULL || capnp_message_from_flat(&stored, a->frame, a->len) != CAPNP_OK)
+    return;
+  if (capnp_root(&stored, &root) == CAPNP_OK &&
+      capnp_get_u16(&root, MESSAGE_TAG_OFF, 0) == CAPNP_RPC_MSG_RETURN &&
+      capnp_getp(&root, 0, &ret) == CAPNP_OK &&
+      capnp_get_u16(&ret, RETURN_TAG_OFF, 0) == RETURN_TAG_RESULTS &&
+      capnp_getp(&ret, 0, &payload) == CAPNP_OK &&
+      capnp_getp(&payload, 1, &table) == CAPNP_OK) {
+    n = capnp_list_len(&table);
+    for (i = 0; i < n; i++) {
+      capnp_ptr_t desc;
+      if (capnp_list_get_struct(&table, i, &desc) == CAPNP_OK &&
+          capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0) == CAPDESC_TAG_SENDERHOSTED)
+        export_release(c, capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0), 1);
+    }
+  }
+  capnp_message_free(&stored);
+}
+
 /* Send a Return and keep it until `Finish`, so a call pipelined against
  * this answer can still find the capability it names. */
 static int flush_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid)
@@ -591,16 +630,8 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
 
 static void handle_release(capnp_rpc_conn_t *c, const capnp_ptr_t *rel)
 {
-  uint32_t id = capnp_get_u32(rel, QUESTIONID_OFF, 0);
-  uint32_t count = capnp_get_u32(rel, RELEASE_REFCOUNT_OFF, 0);
-  if (id >= CAPNP_RPC_MAX_EXPORTS || !c->exports[id].used)
-    return;
-  /* Release.referenceCount is an untrusted UInt32 while the local count
-   * is signed. Do not narrow a large count before comparing it. */
-  if (count >= (uint32_t)c->exports[id].refcount)
-    memset(&c->exports[id], 0, sizeof c->exports[id]);
-  else
-    c->exports[id].refcount -= (int)count;
+  export_release(c, capnp_get_u32(rel, QUESTIONID_OFF, 0),
+                 capnp_get_u32(rel, RELEASE_REFCOUNT_OFF, 0));
 }
 
 /* Answer one Join question with a JoinResult payload. */
@@ -1447,6 +1478,8 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
   case CAPNP_RPC_MSG_FINISH:
     /* The caller is done with the answer, so the results it might have
      * pipelined against can go. */
+    if (!capnp_get_bool(&body, FINISH_RELEASE_CAPS_BIT, 0))
+      answer_release_caps(c, capnp_get_u32(&body, QUESTIONID_OFF, 0));
     answer_drop(c, capnp_get_u32(&body, QUESTIONID_OFF, 0));
     break;
   case CAPNP_RPC_MSG_RELEASE:

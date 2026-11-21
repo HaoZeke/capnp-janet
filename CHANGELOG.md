@@ -27,6 +27,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- A `Finish` with `releaseResultCaps` releases the export reference each
+  capability in the stored Return took, as C++ does. Such references used
+  to stay held until the connection closed.
 - `capnp_rpc_send_finish` sets `releaseResultCaps` to false once the Return
   has arrived, as C++ does. It used to leave the default of true, so a C++
   server released the capabilities in the answer, the bootstrap included,

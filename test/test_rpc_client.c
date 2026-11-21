@@ -248,6 +248,22 @@ int main(void)
     pump(&vat, &g_to_vat);
   }
 
+  /* A Finish that crosses the Return releases the capabilities in it. */
+  {
+    uint32_t cancelled = capnp_rpc_send_bootstrap(&client);
+    int before;
+    pump(&vat, &g_to_vat);
+    before = vat.exports[0].refcount;
+    CHECK(vat.exports[0].used && before > 0, "cancel: exported");
+    CHECK(capnp_rpc_send_finish(&client, cancelled) == CAPNP_OK,
+          "cancel: finish");
+    pump(&vat, &g_to_vat);
+    CHECK(vat.exports[0].used ? vat.exports[0].refcount == before - 1
+                              : before == 1,
+          "cancelled finish releases the result capability");
+    pump(&client, &g_to_client);
+  }
+
   /* A peer controls Release.referenceCount. A value that does not fit the
    * local signed counter must release the export rather than overflowing. */
   {
