@@ -157,6 +157,18 @@ for v in '"0aF"' '"zz41"' '"4g"' '"g1"'; do
   compare "json-hex-$((i++))" "$PARITY" Parity "text binary"
 done
 
+# Stream input takes at most 511 segments.
+in_fmt=binary
+for n in 511 512; do
+  python3 -c 'import struct, sys
+n = int(sys.argv[1])
+hdr = struct.pack("<I", n - 1) + struct.pack("<I", 4) + struct.pack("<I", 1) * (n - 1)
+hdr += b"\0" * (len(hdr) % 8)
+body = struct.pack("<QQQQ", 0x0002000100000000, 7, 0, 0) + b"\0" * 8 * (n - 1)
+open(sys.argv[2], "wb").write(hdr + body)' "$n" "$TMP/in.bin"
+  compare "segments-$n" "$NODE" Node "text binary"
+done
+
 # The C++ lexer joins adjacent operator characters into one token, so `=-5`
 # is a parse error while `= -5` and `= - 5` are fine.
 in_fmt=text

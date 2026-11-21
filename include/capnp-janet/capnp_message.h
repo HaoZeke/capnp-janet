@@ -9,6 +9,10 @@
  * so a message it writes stays readable. */
 #define CAPNP_MAX_SEGMENTS 512u
 
+/* Stream readers in C++ (InputStreamMessageReader and the async reader
+ * behind RPC) refuse a segment table of 512 or more entries. */
+#define CAPNP_MAX_STREAM_SEGMENTS 511u
+
 typedef struct capnp_segment {
   const uint8_t *data; /* words, little-endian */
   size_t words;        /* length in 8-byte words */

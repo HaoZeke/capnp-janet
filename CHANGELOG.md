@@ -27,6 +27,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- Stream readers (`capnp_read_frame` and `capnp-eval` input) refuse a
+  segment table of 512 entries, as `InputStreamMessageReader` does.
 - The text parser rejects runs of operator characters such as `=-5` or
   `=.5`, which the C++ lexer reads as one unknown operator.
 - `capnp-eval` rejects `-q` everywhere and `--quiet` outside `convert` and

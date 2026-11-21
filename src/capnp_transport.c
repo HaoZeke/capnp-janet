@@ -164,7 +164,7 @@ int capnp_read_frame(int fd, uint8_t *buf, size_t cap, size_t *out_len) {
     return CAPNP_ERR_FRAMING;
   nsegs = capnp_load_le32(buf);
   nsegs += 1;
-  if (nsegs == 0 || nsegs > 512)
+  if (nsegs == 0 || nsegs > CAPNP_MAX_STREAM_SEGMENTS)
     return CAPNP_ERR_FRAMING;
   table_bytes = 4 + nsegs * 4;
   if (table_bytes % 8)

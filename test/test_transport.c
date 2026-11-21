@@ -370,6 +370,32 @@ static void test_frame_little_endian(void) {
   close(sv[1]);
 }
 
+/* C++ stream readers take at most 511 segments. */
+static void test_frame_segment_limit(void) {
+  static uint8_t frame[8 + 4 * 512 + 8 * 512], buf[sizeof(frame)];
+  uint32_t nsegs, i;
+  for (nsegs = 511; nsegs <= 512; nsegs++) {
+    int sv[2];
+    size_t n = 0, table = 4 + 4 * (size_t)nsegs;
+    int rc;
+    table += table % 8;
+    memset(frame, 0, sizeof(frame));
+    capnp_store_le32(frame, nsegs - 1);
+    for (i = 0; i < nsegs; i++)
+      capnp_store_le32(frame + 4 + 4 * i, 1);
+    check(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+    check(capnp_write_all(sv[0], frame, table + 8 * nsegs) == CAPNP_OK,
+          "write frame");
+    rc = capnp_read_frame(sv[1], buf, sizeof(buf), &n);
+    if (nsegs == 511)
+      check(rc == CAPNP_OK && n == table + 8 * nsegs, "511 segments read");
+    else
+      check(rc == CAPNP_ERR_FRAMING, "512 segments refused");
+    close(sv[0]);
+    close(sv[1]);
+  }
+}
+
 static uint8_t g_boot[256];
 static size_t g_boot_len;
 
@@ -688,6 +714,7 @@ int main(int argc, char **argv) {
     return serve_peer((uint16_t)atoi(argv[2]));
   test_ipv4_literal();
   test_frame_little_endian();
+  test_frame_segment_limit();
   test_bootstrap_frame_little_endian();
   test_size_to_i32();
   test_write_pipe();

@@ -522,7 +522,7 @@ static int framed_message_size(const uint8_t *data, size_t avail,
   if (avail < 8)
     return -1;
   nsegs = capnp_load_le32(data) + 1u;
-  if (nsegs == 0 || nsegs > CAPNP_MAX_SEGMENTS)
+  if (nsegs == 0 || nsegs > CAPNP_MAX_STREAM_SEGMENTS)
     return -1;
   table_bytes = 4u + 4u * (size_t)nsegs;
   if (table_bytes % 8u != 0)
