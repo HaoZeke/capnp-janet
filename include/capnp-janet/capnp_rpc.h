@@ -105,7 +105,8 @@ typedef struct capnp_rpc_export {
 typedef struct capnp_rpc_question {
   /* Nonzero while in use. Bit 2 marks a call sent with
    * sendResultsTo.yourself, whose Return must be resultsSentElsewhere;
-   * bit 4 marks one finished before its Return. */
+   * bit 4 marks one finished before its Return; bit 8 one whose Return
+   * said `noFinishNeeded`. */
   int used;
   uint32_t question_id;
   int answered;
@@ -319,7 +320,8 @@ CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c,
 /* Tell the peer we are done with an answer, and drop our copy. After the
  * Return has arrived the result capabilities stay imported
  * (releaseResultCaps = false); before it, the peer releases them, and
- * the question waits in the table for that Return. */
+ * the question waits in the table for that Return. A Return that said
+ * `noFinishNeeded` only drops the copy, as rpc.c++ sends nothing then. */
 CAPNP_JANET_EXPORT int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id);
 
 /* Drop `count` references to an import. */

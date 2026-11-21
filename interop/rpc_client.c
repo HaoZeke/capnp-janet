@@ -852,6 +852,15 @@ int main(int argc, char **argv)
 			return 1;
 		}
 	}
+	/* capnp-C++ returns add() with noFinishNeeded, so finishing it sends
+	 * nothing, as its own client would. */
+	{
+		int sends = g_sends;
+		if (capnp_rpc_send_finish(&conn, qcall) || g_sends != sends) {
+			fprintf(stderr, "add() Finish sent despite noFinishNeeded\n");
+			return 1;
+		}
+	}
 
 	/* Finishing an answered bootstrap keeps its capability: the import
 	 * is ours now, and only a Release may drop it. */

@@ -660,6 +660,27 @@ int main(void)
           "a late Return gives it back too");
   }
 
+  /* A Return with noFinishNeeded is finished without a message, as
+   * rpc.c++ skips it; results with a capability still need one. */
+  {
+    uint32_t qf;
+    arg = 3;
+    qf = capnp_rpc_send_call(&client, 0, 0x1234, 0, 1, 0, fill_u32, &arg);
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_send_finish(&client, qf) == CAPNP_OK &&
+              g_to_vat.tail == 0 && !capnp_rpc_is_answered(&client, qf),
+          "noFinishNeeded skips the Finish");
+    arg = 0;
+    qf = capnp_rpc_send_call(&client, 0, 0x1234, 9, 1, 0, fill_u32, &arg);
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_send_finish(&client, qf) == CAPNP_OK &&
+              g_to_vat.tail == 1,
+          "results with a capability are finished");
+    pump(&vat, &g_to_vat);
+  }
+
   /* Kept results nobody takes are answered resultsSentElsewhere when the
    * caller finishes them. */
   {

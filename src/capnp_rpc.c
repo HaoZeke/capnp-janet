@@ -37,6 +37,8 @@ static void questions_fail_all(capnp_rpc_conn_t *c);
 #define Q_USED 1
 #define Q_TAIL 2
 #define Q_FINISHED 4
+/* Its Return said `noFinishNeeded`. */
+#define Q_NO_FINISH 8
 
 /* Message.union discriminant, byte 0. */
 #define MESSAGE_TAG_OFF 0
@@ -1689,6 +1691,11 @@ int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id)
   capnp_rpc_question_t *q = question_live(c, question_id);
   int keep_caps = q && q->answered;
   int rc;
+  /* rpc.c++ skips the Finish a Return said is not needed. */
+  if (q && q->answered && (q->used & Q_NO_FINISH)) {
+    question_drop(q);
+    return CAPNP_OK;
+  }
   /* As in rpc.c++, a question whose Return is still to come stays in the
    * table until that Return, which then only closes it. */
   if (q && q->answered)
@@ -1886,6 +1893,8 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
     if (rc != CAPNP_OK)
       return rc;
   }
+  if (capnp_get_bool(ret, RETURN_NO_FINISH_BIT, 0))
+    q->used |= Q_NO_FINISH;
   tag = capnp_get_u16(ret, RETURN_TAG_OFF, 0);
   if (q->used & Q_FINISHED) {
     /* We finished it first, so nobody wants the results. A tail call back

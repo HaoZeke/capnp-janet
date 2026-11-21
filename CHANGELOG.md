@@ -88,6 +88,8 @@ Pre-1.0 minor releases may include breaking API changes.
 - Results without capabilities are returned with `noFinishNeeded` and
   forgotten at once, as rpc.c++ does, so their question id is free for
   the caller to reuse. They used to wait for `Finish`.
+- Finishing a question whose Return said `noFinishNeeded` sends nothing,
+  as rpc.c++ skips that Finish. It used to be sent anyway.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.
