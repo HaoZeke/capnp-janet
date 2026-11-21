@@ -637,8 +637,9 @@ static int send_results_sent_elsewhere(capnp_rpc_conn_t *c, uint32_t qid);
 
 /* Keep a Return until `Finish`, so a call pipelined against this answer
  * can still find the capability it names. A call that asked for
- * sendResultsTo.yourself gets resultsSentElsewhere on the wire, and the
- * kept Return waits for a takeFromOtherQuestion. */
+ * sendResultsTo.yourself sends nothing yet: the kept Return waits for a
+ * takeFromOtherQuestion, and resultsSentElsewhere goes out then or at
+ * Finish, as rpc.c++ sends it. */
 static int keep_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid,
                        int redirect)
 {
@@ -657,8 +658,7 @@ static int keep_answer(capnp_rpc_conn_t *c, capnp_builder_t *b, uint32_t qid,
       break;
     }
   }
-  rc = redirect ? send_results_sent_elsewhere(c, qid)
-                : c->send(c->send_ctx, flat, len);
+  rc = redirect ? CAPNP_OK : c->send(c->send_ctx, flat, len);
   free(flat);
   return rc;
 }
@@ -1837,8 +1837,12 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
     if (tag == RETURN_TAG_TAKE_FROM_OTHER_QUESTION) {
       capnp_rpc_answer_t *a =
           answer_find(c, capnp_get_u32(ret, RETURN_TAKEFROM_OFF, 0));
-      if (a != NULL && a->used == SLOT_MARKED)
+      question_drop(q);
+      if (a != NULL && a->used == SLOT_MARKED) {
         a->used = SLOT_TAKEN;
+        return send_results_sent_elsewhere(c, a->question_id);
+      }
+      return CAPNP_OK;
     }
     question_drop(q);
     return CAPNP_OK;
@@ -1894,7 +1898,7 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
       q->failed = 1;
     if (!q->failed)
       flip_taken_caps(q);
-    return CAPNP_OK;
+    return send_results_sent_elsewhere(c, a->question_id);
   }
   q->answered = 1;
   q->failed = tag != RETURN_TAG_RESULTS;
@@ -2231,9 +2235,17 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
   case CAPNP_RPC_MSG_FINISH:
     /* The caller is done with the answer, so the results it might have
      * pipelined against can go. */
-    if (!capnp_get_bool(&body, FINISH_RELEASE_CAPS_BIT, 0))
-      rc = answer_release_caps(c, capnp_get_u32(&body, QUESTIONID_OFF, 0));
-    answer_drop(c, capnp_get_u32(&body, QUESTIONID_OFF, 0));
+    {
+      uint32_t qid = capnp_get_u32(&body, QUESTIONID_OFF, 0);
+      capnp_rpc_answer_t *a = answer_find(c, qid);
+      if (!capnp_get_bool(&body, FINISH_RELEASE_CAPS_BIT, 0))
+        rc = answer_release_caps(c, qid);
+      /* Redirected results nobody took: rpc.c++ answers the call as it
+       * tears it down. */
+      if (rc == CAPNP_OK && a != NULL && a->used == SLOT_MARKED)
+        rc = send_results_sent_elsewhere(c, qid);
+      answer_drop(c, qid);
+    }
     break;
   case CAPNP_RPC_MSG_RELEASE:
     rc = handle_release(c, &body);

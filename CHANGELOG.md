@@ -79,6 +79,9 @@ Pre-1.0 minor releases may include breaking API changes.
 - Results collected with `takeFromOtherQuestion` name their capabilities
   from the asking side: our exports come back as exports, and the
   peer's own as imports. They used to read as the peer wrote them.
+- A call with `sendResultsTo.yourself` is answered `resultsSentElsewhere`
+  when a `takeFromOtherQuestion` collects its results, or at `Finish`,
+  as rpc.c++ sends it. It used to go out as soon as the method ran.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

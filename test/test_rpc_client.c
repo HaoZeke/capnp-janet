@@ -479,8 +479,8 @@ int main(void)
           "senderPromise names export 7");
   }
 
-  /* A call with sendResultsTo.yourself is answered resultsSentElsewhere,
-   * and the vat keeps its results for a takeFromOtherQuestion. */
+  /* A call with sendResultsTo.yourself is answered resultsSentElsewhere
+   * once a takeFromOtherQuestion collects the results the vat kept. */
   {
     capnp_rpc_call_t call;
     capnp_message_t m = {0};
@@ -495,10 +495,7 @@ int main(void)
     arg = 8;
     qy = capnp_rpc_send_call_ex(&client, &call);
     pump(&vat, &g_to_vat);
-    pump(&client, &g_to_client);
-    CHECK(capnp_rpc_is_answered(&client, qy) &&
-              !capnp_rpc_is_failed(&client, qy),
-          "resultsSentElsewhere answers a tail call");
+    CHECK(g_to_client.tail == 0, "kept results send nothing yet");
     vq = capnp_rpc_send_bootstrap(&vat);
     q_drop(&g_to_client);
     CHECK(feed_return(&vat, vq, 4, qy) == CAPNP_OK &&
@@ -506,7 +503,11 @@ int main(void)
               capnp_get_u32(&content, 0, 0) == 16,
           "takeFromOtherQuestion takes the kept results");
     capnp_message_free(&m);
-    CHECK(g_to_client.tail == 0, "takeFromOtherQuestion sends nothing");
+    CHECK(g_to_client.tail == 1, "the take sends one Return");
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_is_answered(&client, qy) &&
+              !capnp_rpc_is_failed(&client, qy),
+          "resultsSentElsewhere answers a tail call");
     vq = capnp_rpc_send_bootstrap(&vat);
     q_drop(&g_to_client);
     CHECK(feed_return(&vat, vq, 4, qy) == CAPNP_ERR_KIND &&
@@ -619,6 +620,27 @@ int main(void)
     }
   }
 
+  /* Kept results nobody takes are answered resultsSentElsewhere when the
+   * caller finishes them. */
+  {
+    capnp_rpc_call_t call;
+    uint32_t qy;
+    memset(&call, 0, sizeof call);
+    call.interface_id = 0x1234;
+    call.params_dwords = 1;
+    call.fill = fill_u32;
+    call.fill_ctx = &arg;
+    call.results_to_yourself = 1;
+    qy = capnp_rpc_send_call_ex(&client, &call);
+    pump(&vat, &g_to_vat);
+    q_drop(&g_to_client);
+    capnp_rpc_send_finish(&client, qy);
+    pump(&vat, &g_to_vat);
+    CHECK(g_to_client.tail == 1, "Finish of untaken results sends a Return");
+    pump(&client, &g_to_client);
+    CHECK(!capnp_rpc_is_answered(&client, qy), "and that Return ends it");
+  }
+
   /* A tail call back to us whose question we already finished frees the
    * kept results, as rpc.c++ drops the answer's task. */
   {
@@ -637,8 +659,12 @@ int main(void)
     vq = capnp_rpc_send_bootstrap(&vat);
     capnp_rpc_send_finish(&vat, vq);
     q_drop(&g_to_client);
-    CHECK(feed_return(&vat, vq, 4, qy) == CAPNP_OK && g_to_client.tail == 0,
-          "late takeFromOtherQuestion is quiet");
+    CHECK(feed_return(&vat, vq, 4, qy) == CAPNP_OK && g_to_client.tail == 1,
+          "late takeFromOtherQuestion answers the redirected call");
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_is_answered(&client, qy) &&
+              !capnp_rpc_is_failed(&client, qy),
+          "that answer is resultsSentElsewhere");
     for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++) {
       if (vat.answers[i].used && vat.answers[i].question_id == qy) {
         kept = 1;
