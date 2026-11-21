@@ -32,6 +32,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- A call whose dispatch function fails is answered with
+  `Return.exception`, as `rpc.c++` answers a method that throws. No
+  Return used to be sent, so the caller waited forever.
 - `capnpc-janet` lists inherited methods in `<Interface>-methods`, as
   `capnpc-c++` exposes them on the derived client, and emits
   `<Interface>-superclasses`. Each entry carries the `:interface-id` a

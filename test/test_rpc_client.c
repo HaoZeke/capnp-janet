@@ -163,6 +163,15 @@ int main(void)
   CHECK(capnp_rpc_is_answered(&client, q), "unroutable call answered");
   CHECK(capnp_rpc_is_failed(&client, q), "unroutable call failed");
 
+  /* A method that fails is answered with an exception. */
+  doubler_fail_from = doubler_calls + 1;
+  q = capnp_rpc_send_call(&client, 0, 0x1234, 1, 1, 1, fill_u32, &arg);
+  pump(&vat, &g_to_vat);
+  pump(&client, &g_to_client);
+  CHECK(capnp_rpc_is_answered(&client, q), "failed method answered");
+  CHECK(capnp_rpc_is_failed(&client, q), "failed method is an exception");
+  doubler_fail_from = 1 << 30;
+
   /* A Return of any size is recorded on the caller and kept by the vat
    * until Finish, as C++ has no frame limit. */
   {

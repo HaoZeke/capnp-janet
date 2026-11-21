@@ -674,11 +674,15 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
      * drop every field past that, which C++ does not do. */
     if (capnp_builder_slot(&payload, PAYLOAD_DW, 0, &results))
       rc = CAPNP_ERR_ALLOC;
-    else
-      rc = c->exports[eid].dispatch(c->exports[eid].server,
-                                    capnp_get_u64(call, 8, 0),
-                                    capnp_get_u16(call, 4, 0), &params,
-                                    &results);
+    else if (c->exports[eid].dispatch(c->exports[eid].server,
+                                      capnp_get_u64(call, 8, 0),
+                                      capnp_get_u16(call, 4, 0), &params,
+                                      &results) != 0) {
+      /* A method that fails is answered with an exception, as rpc.c++
+       * does when one throws; otherwise the caller waits forever. */
+      capnp_builder_free(&b);
+      return send_return_exception(c, qid, "method failed");
+    }
   }
   if (rc == CAPNP_OK)
     rc = flush_answer(c, &b, qid);
