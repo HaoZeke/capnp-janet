@@ -1075,6 +1075,16 @@ static const vscenario_t vat_diffs[] = {
       {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
     {"Return for an unknown question",
      {{VF_RETURN, 5, 0, 0, 0, 0, 0}}, 1, 5, 0, 0},
+    {"Release of an unknown export",
+     {{VF_RELEASE, 99, 0, 0, 0, 0, 1}}, 1, 99, 0, 0},
+    {"Release beyond the reference count",
+     {{VF_RELEASE, 0, 0, 0, 0, 0, 5}}, 1, 99, 0, 0},
+    {"Release of the last reference",
+     {{VF_RELEASE, 0, 0, 0, 0, 0, 1},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Finish releasing a released result",
+     {{VF_RELEASE, 0, 0, 0, 0, 0, 1},
+      {VF_FINISH, 0, 0, 0, 0, 0, 0}}, 2, 99, 0, 0},
 };
 #define N_VAT_DIFFS (sizeof vat_diffs / sizeof vat_diffs[0])
 

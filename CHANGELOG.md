@@ -57,6 +57,10 @@ Pre-1.0 minor releases may include breaking API changes.
   exception. Exception answers are kept until Finish, as in rpc.c++.
   `test_transport vat-diff` sends the same frames to a live capnp-C++
   server and to this vat and compares the replies.
+- A Release naming no export, or more references than the export has,
+  aborts with capnp-C++'s reason, and so does a Finish whose results name
+  an export already released. These used to be ignored, or to drop the
+  export.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

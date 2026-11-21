@@ -132,6 +132,29 @@ static int feed_return(capnp_rpc_conn_t *c, uint32_t answer, uint16_t tag,
   return rc;
 }
 
+/* A Release of `count` references to export `id`. */
+static int feed_release(capnp_rpc_conn_t *c, uint32_t id, uint32_t count)
+{
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, rel;
+  uint8_t *flat = NULL;
+  size_t len = 0;
+  int rc = CAPNP_ERR_ALLOC;
+  capnp_builder_init(&b);
+  if (capnp_builder_root(&b, &root) == CAPNP_OK &&
+      capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK &&
+      capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RELEASE) == CAPNP_OK &&
+      capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK &&
+      capnp_builder_struct(&slot, 1, 0, &rel) == CAPNP_OK &&
+      capnp_builder_set_u32(&rel, 0, id) == CAPNP_OK &&
+      capnp_builder_set_u32(&rel, 4, count) == CAPNP_OK &&
+      capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK)
+    rc = capnp_rpc_handle(c, flat, len);
+  free(flat);
+  capnp_builder_free(&b);
+  return rc;
+}
+
 /* The one frame queued is an Abort whose reason is `reason`. */
 static int sent_abort(queue_t *q, const char *reason)
 {
@@ -649,29 +672,27 @@ int main(void)
     pump(&client, &g_to_client);
   }
 
-  /* A peer controls Release.referenceCount. A value that does not fit the
-   * local signed counter must release the export rather than overflowing. */
+  /* A peer controls Release.referenceCount. A count above the export's,
+   * even one the local signed counter cannot hold, aborts as rpc.c++
+   * does, and so does a Release naming no export. */
   {
-    capnp_builder_t b;
-    capnp_bptr_t root, msg, slot, rel;
-    uint8_t *flat = NULL;
-    size_t len = 0;
-    capnp_builder_init(&b);
-    CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "release root");
-    CHECK(capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK, "release msg");
-    CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RELEASE) == CAPNP_OK,
-          "release tag");
-    CHECK(capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK, "release slot");
-    CHECK(capnp_builder_struct(&slot, 1, 0, &rel) == CAPNP_OK, "release body");
-    CHECK(capnp_builder_set_u32(&rel, 0, 0) == CAPNP_OK, "release id");
-    CHECK(capnp_builder_set_u32(&rel, 4, UINT32_MAX) == CAPNP_OK,
-          "release count");
-    CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK,
-          "release serialize");
-    CHECK(capnp_rpc_handle(&vat, flat, len) == CAPNP_OK, "release handle");
-    CHECK(!vat.exports[0].used, "large release drops export");
-    free(flat);
-    capnp_builder_free(&b);
+    char want[128];
+    snprintf(want, sizeof want,
+             "expected refcount <= exp->refcount [%u <= %d]; Tried to drop "
+             "export's refcount below zero.",
+             (unsigned)UINT32_MAX, vat.exports[0].refcount);
+    q_drop(&g_to_client);
+    CHECK(feed_release(&vat, 0, UINT32_MAX) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_client, want),
+          "large release aborts");
+    CHECK(vat.exports[0].used, "large release keeps the export");
+    CHECK(feed_release(&vat, 63, 1) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_client, "Tried to release invalid export ID."),
+          "release of an unknown export aborts");
+    CHECK(feed_release(&vat, 0, (uint32_t)vat.exports[0].refcount) ==
+                  CAPNP_OK &&
+              !vat.exports[0].used && g_to_client.tail == 0,
+          "releasing every reference drops the export");
   }
 
   /* Abort ends the connection: unanswered questions fail and nothing
