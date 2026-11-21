@@ -5,6 +5,7 @@
  * other by eye.
  */
 
+#include <capnp-janet/capnp_pointer.h>
 #include <capnp-janet/capnp_rpc.h>
 
 #include "capnp_internal.h"
@@ -1063,8 +1064,17 @@ static int answer_exception(capnp_rpc_conn_t *c, uint32_t qid,
 
 /* Abort with rpc.c++'s reason for refusing a message: the connection is
  * over, so every unanswered question fails. */
+static int protocol_abort_len(capnp_rpc_conn_t *c, uint16_t type,
+                              const char *reason, size_t len);
+
 static int protocol_abort_typed(capnp_rpc_conn_t *c, uint16_t type,
                                 const char *reason)
+{
+  return protocol_abort_len(c, type, reason, strlen(reason));
+}
+
+static int protocol_abort_len(capnp_rpc_conn_t *c, uint16_t type,
+                              const char *reason, size_t len)
 {
   capnp_builder_t b;
   capnp_bptr_t root, msg;
@@ -1076,8 +1086,8 @@ static int protocol_abort_typed(capnp_rpc_conn_t *c, uint16_t type,
       capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK &&
       capnp_builder_set_u16(&msg, MESSAGE_TAG_OFF, CAPNP_RPC_MSG_ABORT) ==
           CAPNP_OK &&
-      write_exception_typed(&msg, MESSAGE_DW, 0, reason, strlen(reason),
-                            type) == CAPNP_OK)
+      write_exception_typed(&msg, MESSAGE_DW, 0, reason, len, type) ==
+          CAPNP_OK)
     (void)flush(c, &b);
   capnp_builder_free(&b);
   questions_fail_all(c);
@@ -1087,6 +1097,560 @@ static int protocol_abort_typed(capnp_rpc_conn_t *c, uint16_t type,
 static int protocol_abort(capnp_rpc_conn_t *c, const char *reason)
 {
   return protocol_abort_typed(c, EXCEPTION_TYPE_FAILED, reason);
+}
+
+/* rpc.c++ reads a message through WireHelpers, which throws on a pointer
+ * it refuses; disconnect() sends that reason as the Abort. These follow
+ * readStructPointer, readListPointer and readTextPointer word for word.
+ * Only the traversal limit of a list is checked, against what the message
+ * has left; no RPC message reaches the nesting limit. */
+#define OOB_DETAIL                                                            \
+  "This usually indicates that the input data was corrupted, used a "        \
+  "different encoding than specified (e.g. packed vs. non-packed), or was "  \
+  "not a Cap'n Proto message to begin with. Note that this error is NOT "    \
+  "due to a schema mismatch; the input is invalid regardless of schema."
+
+/* An object as rpc.c++ finds it: the pointer that describes it, after far
+ * pointers, and its first word. `null` is set for a null pointer. */
+typedef struct {
+  const capnp_message_t *m;
+  uint32_t seg;
+  size_t at;
+  uint64_t ref;
+  int null;
+} cx_obj_t;
+
+static uint64_t cx_word(const capnp_message_t *m, uint32_t seg, size_t at)
+{
+  return capnp_load_le64(m->segs[seg].data + at * CAPNP_WORD_BYTES);
+}
+
+/* SegmentReader::checkOffset: out of range is the segment end. */
+static size_t cx_offset(const capnp_message_t *m, uint32_t seg, size_t from,
+                        int64_t off)
+{
+  int64_t to = (int64_t)from + off;
+  if (to < 0 || (uint64_t)to > m->segs[seg].words)
+    return m->segs[seg].words;
+  return (size_t)to;
+}
+
+static int cx_fits(const capnp_message_t *m, uint32_t seg, size_t at,
+                   uint64_t words)
+{
+  return at <= m->segs[seg].words && words <= m->segs[seg].words - at;
+}
+
+/* Set while a read runs inside rpc.c++ runCatchingExceptions: the reason
+ * lands here and nothing is sent. */
+#define CX_REASON_MAX 768
+static _Thread_local char *cx_caught;
+
+static int cx_abort(capnp_rpc_conn_t *c, const char *fmt, ...)
+{
+  char reason[CX_REASON_MAX];
+  va_list ap;
+  va_start(ap, fmt);
+  vsnprintf(cx_caught != NULL ? cx_caught : reason, CX_REASON_MAX, fmt, ap);
+  va_end(ap);
+  if (cx_caught == NULL)
+    capnp_rpc_abort_typed(c, EXCEPTION_TYPE_FAILED, reason);
+  return -1;
+}
+
+/* followFars for the pointer at word `at` of segment `seg`. 0 when `o`
+ * is found, -1 after an Abort. */
+static int cx_follow(capnp_rpc_conn_t *c, const capnp_message_t *m,
+                     uint32_t seg, size_t at, cx_obj_t *o)
+{
+  uint64_t ref = cx_word(m, seg, at), pad;
+  uint32_t pseg;
+  size_t pat;
+  memset(o, 0, sizeof *o);
+  o->m = m;
+  o->null = ref == 0;
+  o->seg = seg;
+  o->ref = ref;
+  if (o->null)
+    return 0;
+  if (capnp_wp_kind(ref) != CAPNP_WK_FAR) {
+    o->at = cx_offset(m, seg, at + 1, capnp_wp_offset(ref));
+    return 0;
+  }
+  pseg = capnp_wp_far_seg(ref);
+  if (pseg >= m->nsegs)
+    return cx_abort(c, "expected segment != nullptr [0 != nullptr]; Message "
+                       "contains far pointer to unknown segment.");
+  pat = cx_offset(m, pseg, 0, capnp_wp_far_off(ref));
+  if (!cx_fits(m, pseg, pat, capnp_wp_far_two(ref) ? 2 : 1))
+    return cx_abort(c, "expected boundsCheck(segment, ptr, padWords); Message "
+                       "contains out-of-bounds far pointer. " OOB_DETAIL);
+  pad = cx_word(m, pseg, pat);
+  if (!capnp_wp_far_two(ref)) {
+    o->seg = pseg;
+    o->ref = pad;
+    o->at = cx_offset(m, pseg, pat + 1, capnp_wp_offset(pad));
+    return 0;
+  }
+  if (capnp_wp_far_seg(pad) >= m->nsegs)
+    return cx_abort(c, "expected newSegment != nullptr [0 != nullptr]; "
+                       "Message contains double-far pointer to unknown "
+                       "segment.");
+  if (capnp_wp_kind(pad) != CAPNP_WK_FAR)
+    return cx_abort(c, "expected pad->kind() == WirePointer::FAR [%d == 2]; "
+                       "Second word of double-far pad must be far pointer.",
+                    capnp_wp_kind(pad));
+  o->ref = cx_word(m, pseg, pat + 1);
+  o->seg = capnp_wp_far_seg(pad);
+  o->at = cx_offset(m, o->seg, 0, capnp_wp_far_off(pad));
+  return 0;
+}
+
+/* The word of pointer `idx` of struct `s`, or 0 past its pointers. */
+static int cx_ptr_word(const capnp_ptr_t *s, uint16_t idx, size_t *at)
+{
+  if (s == NULL || s->kind != CAPNP_PK_STRUCT || idx >= s->pwords)
+    return 0;
+  *at = s->word + s->dwords + idx;
+  return 1;
+}
+
+/* readStructPointer on the pointer at word `at` of segment `seg`. */
+static int cx_struct_at(capnp_rpc_conn_t *c, const capnp_message_t *m,
+                        uint32_t seg, size_t at)
+{
+  cx_obj_t o;
+  if (cx_follow(c, m, seg, at, &o) || o.null)
+    return o.null ? 0 : -1;
+  if (capnp_wp_kind(o.ref) != CAPNP_WK_STRUCT)
+    return cx_abort(c, "expected ref->kind() == WirePointer::STRUCT [%d == 0]; "
+                       "Schema mismatch: Message contains non-struct pointer "
+                       "where struct pointerwas expected.",
+                    capnp_wp_kind(o.ref));
+  if (!cx_fits(o.m, o.seg, o.at,
+               (uint64_t)capnp_wp_struct_dwords(o.ref) +
+                   capnp_wp_struct_pwords(o.ref)))
+    return cx_abort(c, "expected boundsCheck(segment, ptr, "
+                       "ref->structRef.wordSize()); Message contained "
+                       "out-of-bounds struct pointer. " OOB_DETAIL);
+  return 0;
+}
+
+/* readStructPointer on pointer `idx` of `s`. */
+static int cx_struct(capnp_rpc_conn_t *c, const capnp_ptr_t *s, uint16_t idx)
+{
+  size_t at;
+  if (!cx_ptr_word(s, idx, &at))
+    return 0;
+  return cx_struct_at(c, s->msg, s->seg, at);
+}
+
+/* getRoot<rpc::Message>, then the union member handleMessage reads. */
+static int cx_message(capnp_rpc_conn_t *c, const capnp_message_t *m)
+{
+  if (m->nsegs == 0 || m->segs[0].words == 0)
+    return cx_abort(c, "expected segment != nullptr && "
+                       "segment->checkObject(segment->getStartPtr(), ONE * "
+                       "WORDS); Message did not contain a root pointer.");
+  return cx_struct_at(c, m, 0, 0);
+}
+
+
+/* The read limiter: a list that charges `words` more than the message has
+ * left throws. The reader charges them itself when it takes the list. */
+static int cx_limit(capnp_rpc_conn_t *c, const capnp_message_t *m,
+                    uint64_t words)
+{
+  if (words > m->traversal_left)
+    return cx_abort(c, "Exceeded message traversal limit.  See "
+                       "capnp::ReaderOptions.");
+  return 0;
+}
+
+/* readListPointer on pointer `idx` of `s`, for a list of structs. */
+static int cx_struct_list(capnp_rpc_conn_t *c, const capnp_ptr_t *s,
+                          uint16_t idx)
+{
+  static const unsigned bits[] = {0, 1, 8, 16, 32, 64, 64};
+  cx_obj_t o;
+  size_t at;
+  int esize;
+  uint32_t count;
+  if (!cx_ptr_word(s, idx, &at))
+    return 0;
+  if (cx_follow(c, s->msg, s->seg, at, &o) || o.null)
+    return o.null ? 0 : -1;
+  if (capnp_wp_kind(o.ref) != CAPNP_WK_LIST)
+    return cx_abort(c, "expected ref->kind() == WirePointer::LIST [%d == 1]; "
+                       "Schema mismatch: Message contains non-list pointer "
+                       "where list pointer was expected.",
+                    capnp_wp_kind(o.ref));
+  esize = capnp_wp_list_esize(o.ref);
+  count = capnp_wp_list_count(o.ref);
+  if (esize == CAPNP_SZ_COMPOSITE) {
+    uint64_t tag, words;
+    uint32_t elems;
+    if (!cx_fits(o.m, o.seg, o.at, (uint64_t)count + 1))
+      return cx_abort(c, "expected boundsCheck(segment, ptr, wordCount + "
+                         "POINTER_SIZE_IN_WORDS); Message contains "
+                         "out-of-bounds list pointer. " OOB_DETAIL);
+    tag = cx_word(o.m, o.seg, o.at);
+    if (capnp_wp_kind(tag) != CAPNP_WK_STRUCT)
+      return cx_abort(c, "expected tag->kind() == WirePointer::STRUCT [%d == "
+                         "0]; INLINE_COMPOSITE lists of non-STRUCT type are "
+                         "not supported.",
+                      capnp_wp_kind(tag));
+    elems = ((uint32_t)tag >> 2) & 0x1fffffffu;
+    words = (uint64_t)elems * ((uint64_t)capnp_wp_struct_dwords(tag) +
+                               capnp_wp_struct_pwords(tag));
+    if (words > count)
+      return cx_abort(c, "expected upgradeBound<uint64_t>(size) * "
+                         "wordsPerElement <= wordCount [%llu <= %u]; "
+                         "INLINE_COMPOSITE list's elements overrun its word "
+                         "count.",
+                      (unsigned long long)words, count);
+    /* A list of zero-sized structs reads as many elements as it claims
+     * without sending them, so it is charged for them. */
+    if (capnp_wp_struct_dwords(tag) + capnp_wp_struct_pwords(tag) == 0)
+      return cx_limit(c, o.m, (uint64_t)count + 1 + elems);
+    return 0;
+  }
+  if (!cx_fits(o.m, o.seg, o.at, ((uint64_t)count * bits[esize] + 63) / 64))
+    return cx_abort(c, "expected boundsCheck(segment, ptr, wordCount); "
+                       "Message contains out-of-bounds list pointer. "
+                       OOB_DETAIL);
+  if (esize == CAPNP_SZ_VOID && cx_limit(c, o.m, count))
+    return -1;
+  if (esize == CAPNP_SZ_BIT)
+    return cx_abort(c, "Found bit list where struct list was expected; "
+                       "upgrading boolean lists to structs is no longer "
+                       "supported.");
+  return 0;
+}
+
+/* PointerReader::getPointerType, which a generated hasX() calls: 1 for a
+ * pointer, 0 for null. */
+static int cx_has(capnp_rpc_conn_t *c, const capnp_ptr_t *s, uint16_t idx)
+{
+  cx_obj_t o;
+  size_t at;
+  if (!cx_ptr_word(s, idx, &at))
+    return 0;
+  if (cx_follow(c, s->msg, s->seg, at, &o))
+    return -1;
+  if (o.null)
+    return 0;
+  if (capnp_wp_kind(o.ref) == CAPNP_WK_FAR)
+    return cx_abort(c, "far pointer not followed?");
+  if (capnp_wp_kind(o.ref) == CAPNP_WK_CAP && (uint32_t)o.ref != CAPNP_WK_CAP)
+    return cx_abort(c, "expected ptr->isCapability(); unknown pointer type");
+  return 1;
+}
+
+/* readTextPointer on pointer `idx` of `s`. */
+static int cx_text(capnp_rpc_conn_t *c, const capnp_ptr_t *s, uint16_t idx)
+{
+  cx_obj_t o;
+  size_t at;
+  uint32_t size;
+  if (!cx_ptr_word(s, idx, &at))
+    return 0;
+  if (cx_follow(c, s->msg, s->seg, at, &o) || o.null)
+    return o.null ? 0 : -1;
+  if (capnp_wp_kind(o.ref) != CAPNP_WK_LIST)
+    return cx_abort(c, "expected ref->kind() == WirePointer::LIST [%d == 1]; "
+                       "Schema mismatch: Message contains non-list pointer "
+                       "where text was expected.",
+                    capnp_wp_kind(o.ref));
+  if (capnp_wp_list_esize(o.ref) != CAPNP_SZ_BYTE)
+    return cx_abort(c, "expected ref->listRef.elementSize() == "
+                       "ElementSize::BYTE [(can't stringify) == (can't "
+                       "stringify)]; Schema mismatch: Message contains list "
+                       "pointer of non-bytes where text was expected.");
+  size = capnp_wp_list_count(o.ref);
+  if (!cx_fits(o.m, o.seg, o.at, ((uint64_t)size + 7) / 8))
+    return cx_abort(c, "expected boundsCheck(segment, ptr, "
+                       "roundBytesUpToWords(size)); Message contained "
+                       "out-of-bounds text pointer. " OOB_DETAIL);
+  if (size == 0)
+    return cx_abort(c, "expected size > ZERO * BYTES [0 > 0]; Message "
+                       "contains text that is not NUL-terminated.");
+  if (o.m->segs[o.seg].data[o.at * CAPNP_WORD_BYTES + size - 1] != 0) {
+    /* kj prints both chars as they are, the NUL included. */
+    static const char head[] = "expected cptr[unboundedSize] == '\\0' [";
+    static const char tail[] = "]; Message contains text that is not "
+                               "NUL-terminated.";
+    char reason[sizeof head + sizeof tail + 8];
+    size_t n = sizeof head - 1;
+    rpc_side_t *sd = side_get(c, 0);
+    memcpy(reason, head, n);
+    reason[n++] = (char)o.m->segs[o.seg].data[o.at * CAPNP_WORD_BYTES + size - 1];
+    memcpy(reason + n, " == ", 4);
+    n += 4;
+    reason[n++] = 0;
+    memcpy(reason + n, tail, sizeof tail - 1);
+    n += sizeof tail - 1;
+    if (sd == NULL || !sd->aborted)
+      protocol_abort_len(c, EXCEPTION_TYPE_FAILED, reason, n);
+    return -1;
+  }
+  return 0;
+}
+
+/* WireHelpers::totalSize on the pointer at word `at`, which handleMessage
+ * runs over a message it echoes as Unimplemented. `*budget` is what the
+ * read limiter has left. */
+static int cx_total(capnp_rpc_conn_t *c, const capnp_message_t *m,
+                    uint32_t seg, size_t at, int nesting, uint64_t *budget,
+                    int *caps)
+{
+  static const unsigned bits[] = {0, 1, 8, 16, 32, 64};
+  cx_obj_t o;
+  uint64_t words, i, j;
+  if (cx_word(m, seg, at) == 0)
+    return 0;
+  if (nesting <= 0)
+    return cx_abort(c, "expected nestingLimit > 0 [0 > 0]; Message is too "
+                       "deeply-nested.");
+  if (cx_follow(c, m, seg, at, &o))
+    return -1;
+#define CX_READ(n)                                                            \
+  do {                                                                        \
+    if ((n) > *budget)                                                        \
+      return cx_abort(c, "Exceeded message traversal limit.  See "            \
+                         "capnp::ReaderOptions.");                            \
+    *budget -= (n);                                                           \
+  } while (0)
+  switch (capnp_wp_kind(o.ref)) {
+  case CAPNP_WK_STRUCT: {
+    uint16_t dw = capnp_wp_struct_dwords(o.ref);
+    uint16_t pw = capnp_wp_struct_pwords(o.ref);
+    if (!cx_fits(m, o.seg, o.at, (uint64_t)dw + pw))
+      return cx_abort(c, "expected boundsCheck(segment, ptr, "
+                         "ref->structRef.wordSize()); Message contained "
+                         "out-of-bounds struct pointer. " OOB_DETAIL);
+    CX_READ((uint64_t)dw + pw);
+    for (i = 0; i < pw; i++)
+      if (cx_total(c, m, o.seg, o.at + dw + i, nesting - 1, budget, caps))
+        return -1;
+    return 0;
+  }
+  case CAPNP_WK_LIST: {
+    int esize = capnp_wp_list_esize(o.ref);
+    uint32_t count = capnp_wp_list_count(o.ref);
+    if (esize == CAPNP_SZ_VOID) {
+      /* The copy charges a list of void for every element it claims. */
+      CX_READ(count);
+      return 0;
+    }
+    if (esize < CAPNP_SZ_PTR) {
+      words = ((uint64_t)count * bits[esize] + 63) / 64;
+      if (!cx_fits(m, o.seg, o.at, words))
+        return cx_abort(c, "expected boundsCheck(segment, ptr, totalWords); "
+                           "Message contained out-of-bounds list pointer. "
+                           OOB_DETAIL);
+      CX_READ(words);
+      return 0;
+    }
+    if (esize == CAPNP_SZ_PTR) {
+      if (!cx_fits(m, o.seg, o.at, count))
+        return cx_abort(c, "expected boundsCheck(segment, ptr, count * "
+                           "WORDS_PER_POINTER); Message contained "
+                           "out-of-bounds list pointer. " OOB_DETAIL);
+      CX_READ(count);
+      for (i = 0; i < count; i++)
+        if (cx_total(c, m, o.seg, o.at + i, nesting - 1, budget, caps))
+          return -1;
+      return 0;
+    }
+    {
+      uint64_t tag, n, step;
+      uint16_t dw, pw;
+      if (!cx_fits(m, o.seg, o.at, (uint64_t)count + 1))
+        return cx_abort(c, "expected boundsCheck(segment, ptr, wordCount + "
+                           "POINTER_SIZE_IN_WORDS); Message contained "
+                           "out-of-bounds list pointer. " OOB_DETAIL);
+      tag = cx_word(m, o.seg, o.at);
+      if (capnp_wp_kind(tag) != CAPNP_WK_STRUCT)
+        return cx_abort(c, "expected elementTag->kind() == "
+                           "WirePointer::STRUCT [%d == 0]; Don't know how to "
+                           "handle non-STRUCT inline composite.",
+                        capnp_wp_kind(tag));
+      n = ((uint32_t)tag >> 2) & 0x1fffffffu;
+      dw = capnp_wp_struct_dwords(tag);
+      pw = capnp_wp_struct_pwords(tag);
+      step = (uint64_t)dw + pw;
+      if (step * n > count)
+        return cx_abort(c, "expected actualSize <= wordCount [%llu <= %u]; "
+                           "Struct list pointer's elements overran size. "
+                           OOB_DETAIL,
+                        (unsigned long long)(step * n), count);
+      CX_READ((uint64_t)count + 1);
+      if (step == 0)
+        CX_READ(n);
+      for (i = 0; pw > 0 && i < n; i++)
+        for (j = 0; j < pw; j++)
+          if (cx_total(c, m, o.seg, o.at + 1 + i * step + dw + j,
+                       nesting - 1, budget, caps))
+            return -1;
+      return 0;
+    }
+  }
+  case CAPNP_WK_FAR:
+    return cx_abort(c, "Unexpected FAR pointer.");
+  default:
+    if ((uint32_t)o.ref != CAPNP_WK_CAP)
+      return cx_abort(c, "Unknown pointer type.");
+    (*caps)++;
+    return 0;
+  }
+#undef CX_READ
+}
+
+/* reader.totalSize() over the whole message, from its root struct. */
+static int cx_message_total(capnp_rpc_conn_t *c, const capnp_ptr_t *root)
+{
+  uint64_t budget = CAPNP_DEFAULT_TRAVERSAL_WORDS;
+  uint16_t i;
+  int caps = 0;
+  for (i = 0; i < root->pwords; i++)
+    if (cx_total(c, root->msg, root->seg, root->word + root->dwords + i,
+                 CAPNP_DEFAULT_DEPTH_LIMIT - 1, &budget, &caps))
+      return -1;
+  /* The copy then finds no capability table to take them from. */
+  if (caps > 0)
+    return cx_abort(c, "Message contained invalid capability pointer.");
+  return 0;
+}
+
+/* The struct in pointer `idx` of `s`, after cx_struct passed it. */
+static capnp_ptr_t cx_get(const capnp_ptr_t *s, uint16_t idx)
+{
+  capnp_ptr_t out;
+  if (s->kind != CAPNP_PK_STRUCT || capnp_getp(s, idx, &out) != CAPNP_OK)
+    memset(&out, 0, sizeof out);
+  return out;
+}
+
+/* A PromisedAnswer and its transform, in pointer `idx` of `s`. */
+static int cx_promised(capnp_rpc_conn_t *c, const capnp_ptr_t *s,
+                       uint16_t idx)
+{
+  capnp_ptr_t pa;
+  if (cx_struct(c, s, idx))
+    return -1;
+  pa = cx_get(s, idx);
+  return cx_struct_list(c, &pa, 0);
+}
+
+/* toPipelineOps on the transform of PromisedAnswer `pa`. */
+static int cx_ops(capnp_rpc_conn_t *c, const capnp_ptr_t *pa)
+{
+  capnp_ptr_t ops, op;
+  uint32_t i, n = 0;
+  uint16_t tag;
+  if (pa->kind == CAPNP_PK_STRUCT && capnp_getp(pa, 0, &ops) == CAPNP_OK)
+    n = capnp_list_len(&ops);
+  for (i = 0; i < n; i++) {
+    if (capnp_list_get_struct(&ops, i, &op) != CAPNP_OK)
+      break;
+    tag = capnp_get_u16(&op, PA_OP_TAG_OFF, 0);
+    if (tag != PA_OP_TAG_NOOP && tag != PA_OP_TAG_GETPTRFIELD)
+      return cx_abort(c, "Unsupported pipeline op.; (uint)opReader.which() = %u",
+                      (unsigned)tag);
+  }
+  return 0;
+}
+
+/* receiveCap converts the transform of a receiverAnswer only when the
+ * answer it names is active. */
+static int cx_receiver_answer(capnp_rpc_conn_t *c, const capnp_ptr_t *desc)
+{
+  capnp_ptr_t pa;
+  if (cx_promised(c, desc, 0))
+    return -1;
+  pa = cx_get(desc, 0);
+  if (pa.kind != CAPNP_PK_STRUCT ||
+      answer_find(c, capnp_get_u32(&pa, PA_QUESTIONID_OFF, 0)) == NULL)
+    return 0;
+  return cx_ops(c, &pa);
+}
+
+/* receiveCap: what it reads of the CapDescriptor in pointer `idx`. */
+static int cx_capdesc(capnp_rpc_conn_t *c, const capnp_ptr_t *s,
+                      uint16_t idx)
+{
+  capnp_ptr_t desc;
+  uint16_t tag;
+  if (cx_struct(c, s, idx))
+    return -1;
+  desc = cx_get(s, idx);
+  if (desc.kind != CAPNP_PK_STRUCT)
+    return 0;
+  tag = capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0);
+  if (tag == CAPDESC_TAG_RECEIVERANSWER)
+    return cx_receiver_answer(c, &desc);
+  if (tag == CAPDESC_TAG_THIRDPARTYHOSTED)
+    return cx_struct(c, &desc, 0);
+  return 0;
+}
+
+/* receiveCaps on the capTable of the Payload in pointer `idx` of `s`.
+ * `*taken`, when given, is how many entries it took before it refused one. */
+static int cx_payload(capnp_rpc_conn_t *c, const capnp_ptr_t *s, uint16_t idx,
+                      uint32_t *taken)
+{
+  capnp_ptr_t payload, table, desc;
+  uint32_t i, n;
+  if (cx_struct(c, s, idx))
+    return -1;
+  payload = cx_get(s, idx);
+  if (cx_struct_list(c, &payload, 1))
+    return -1;
+  if (payload.kind != CAPNP_PK_STRUCT ||
+      capnp_getp(&payload, 1, &table) != CAPNP_OK ||
+      table.kind != CAPNP_PK_LIST)
+    return 0;
+  n = capnp_list_len(&table);
+  for (i = 0; i < n; i++) {
+    uint16_t tag;
+    if (taken != NULL)
+      *taken = i;
+    if (capnp_list_get_struct(&table, i, &desc) != CAPNP_OK)
+      return 0;
+    tag = capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0);
+    if (tag == CAPDESC_TAG_RECEIVERANSWER && cx_receiver_answer(c, &desc))
+      return -1;
+    if (tag == CAPDESC_TAG_THIRDPARTYHOSTED && cx_struct(c, &desc, 0))
+      return -1;
+    if (tag > CAPDESC_TAG_THIRDPARTYHOSTED)
+      return cx_abort(c, "unknown CapDescriptor type");
+  }
+  return 0;
+}
+
+/* What toException reads of `exc`: the reason, then the trace if
+ * hasTrace says there is one. */
+static int cx_reason_trace(capnp_rpc_conn_t *c, const capnp_ptr_t *exc)
+{
+  int has;
+  if (cx_text(c, exc, 0))
+    return -1;
+  has = cx_has(c, exc, 1);
+  if (has < 0)
+    return -1;
+  return has ? cx_text(c, exc, 1) : 0;
+}
+
+/* toException on the Exception in pointer `idx` of `s`. */
+static int cx_exception(capnp_rpc_conn_t *c, const capnp_ptr_t *s,
+                        uint16_t idx)
+{
+  capnp_ptr_t exc;
+  if (cx_struct(c, s, idx))
+    return -1;
+  exc = cx_get(s, idx);
+  return cx_reason_trace(c, &exc);
 }
 
 int capnp_rpc_abort_typed(capnp_rpc_conn_t *c, uint16_t type,
@@ -1117,6 +1681,8 @@ static int handle_abort(capnp_rpc_conn_t *c, const capnp_ptr_t *exc)
   questions_fail_all(c);
   if (s != NULL && s->aborted)
     return CAPNP_ERR_IO;
+  if (exc->kind == CAPNP_PK_STRUCT && cx_reason_trace(c, exc))
+    return CAPNP_ERR_KIND;
   if (s == NULL)
     s = side_get(c, 1);
   if (s != NULL)
@@ -1253,7 +1819,6 @@ static int handle_bootstrap(capnp_rpc_conn_t *c, const capnp_ptr_t *boot)
 {
   capnp_builder_t b;
   capnp_bptr_t ret, payload;
-  capnp_ptr_t object_id;
   uint32_t qid = capnp_get_u32(boot, QUESTIONID_OFF, 0);
   int eid, rc;
 
@@ -1266,14 +1831,23 @@ static int handle_bootstrap(capnp_rpc_conn_t *c, const capnp_ptr_t *boot)
     return protocol_abort(c, reason);
   }
   /* rpc.c++ answers a 0.4-style named export with this exception when,
-   * like this vat, it has no restorer. */
-  if (capnp_getp(boot, 0, &object_id) == CAPNP_OK &&
-      object_id.kind != CAPNP_PK_NULL)
-    return answer_exception(c, qid,
-                            "This vat only supports a bootstrap interface, "
-                            "not the old Cap'n-Proto-0.4-style named "
-                            "exports.",
-                            0);
+   * like this vat, it has no restorer. hasDeprecatedObjectId runs inside
+   * runCatchingExceptions, so a pointer it refuses is answered too. */
+  {
+    char caught[CX_REASON_MAX];
+    int has;
+    cx_caught = caught;
+    has = cx_has(c, boot, 0);
+    cx_caught = NULL;
+    if (has < 0)
+      return answer_exception(c, qid, caught, 0);
+    if (has)
+      return answer_exception(c, qid,
+                              "This vat only supports a bootstrap interface, "
+                              "not the old Cap'n-Proto-0.4-style named "
+                              "exports.",
+                              0);
+  }
   if (c->bootstrap == NULL)
     return answer_no_bootstrap(c, qid);
   eid = capnp_rpc_export(c, c->bootstrap, c->bootstrap_dispatch);
@@ -1446,6 +2020,8 @@ static int message_target(capnp_rpc_conn_t *c, const capnp_ptr_t *body,
   uint16_t which = TARGET_TAG_IMPORTEDCAP;
   *eid = -1;
   *failure = NULL;
+  if (cx_struct(c, body, 0))
+    return CAPNP_ERR_KIND;
   if (capnp_getp(body, 0, &target) != CAPNP_OK)
     memset(&target, 0, sizeof target);
   if (target.kind == CAPNP_PK_STRUCT)
@@ -1458,26 +2034,15 @@ static int message_target(capnp_rpc_conn_t *c, const capnp_ptr_t *body,
       return protocol_abort(c, "Message target is not a current export ID.");
     *eid = (int)id;
   } else if (which == TARGET_TAG_PROMISEDANSWER) {
-    capnp_ptr_t pa, ops, op;
-    uint32_t i, n = 0;
-    uint16_t tag;
+    capnp_ptr_t pa;
+    if (cx_promised(c, &target, 0))
+      return CAPNP_ERR_KIND;
     if (capnp_getp(&target, 0, &pa) != CAPNP_OK)
       memset(&pa, 0, sizeof pa);
     /* rpc.c++ converts the whole transform before it pipelines, on any
      * answer or none. */
-    if (pa.kind == CAPNP_PK_STRUCT && capnp_getp(&pa, 0, &ops) == CAPNP_OK)
-      n = capnp_list_len(&ops);
-    for (i = 0; i < n; i++) {
-      if (capnp_list_get_struct(&ops, i, &op) != CAPNP_OK)
-        break;
-      tag = capnp_get_u16(&op, PA_OP_TAG_OFF, 0);
-      if (tag != PA_OP_TAG_NOOP && tag != PA_OP_TAG_GETPTRFIELD) {
-        snprintf(buf, cap,
-                 "Unsupported pipeline op.; (uint)opReader.which() = %u",
-                 (unsigned)tag);
-        return protocol_abort(c, buf);
-      }
-    }
+    if (cx_ops(c, &pa))
+      return CAPNP_ERR_KIND;
     *eid = resolve_promised_answer(c, &pa);
     if (*eid < 0)
       *failure = promised_failure(c, &pa, buf, cap, type);
@@ -1493,7 +2058,7 @@ static int message_target(capnp_rpc_conn_t *c, const capnp_ptr_t *body,
  * import the call holds, as rpc.c++ receives every capability of the
  * params before it runs the call. */
 static uint64_t *param_holds(capnp_rpc_conn_t *c, const capnp_ptr_t *payload,
-                             size_t *n)
+                             uint32_t limit, size_t *n)
 {
   capnp_ptr_t table, desc;
   uint32_t i, len;
@@ -1504,6 +2069,8 @@ static uint64_t *param_holds(capnp_rpc_conn_t *c, const capnp_ptr_t *payload,
       capnp_getp(payload, 1, &table) != CAPNP_OK ||
       (len = capnp_list_len(&table)) == 0)
     return NULL;
+  if (len > limit)
+    len = limit;
   keys = (uint64_t *)malloc(len * sizeof *keys);
   if (keys == NULL)
     return NULL;
@@ -1536,9 +2103,11 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   uint16_t send_to, ftype = EXCEPTION_TYPE_FAILED;
   const char *failure = NULL;
   char reason[1024];
-  int eid = -1, rc, yourself, mode, kept = 0;
+  int eid = -1, rc, yourself, mode, kept = 0, failed;
   uint64_t *keys = NULL;
   size_t nkeys = 0;
+  char refusal[CX_REASON_MAX];
+  uint32_t taken = 0;
 
   /* The checks and their order are rpc.c++ handleCall's: the target,
    * then sendResultsTo, then the question id. */
@@ -1560,10 +2129,23 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   /* The cap table describes the message, not the dispatch: a call this
    * vat cannot route still told us where a third party's capability
    * lives. */
+  cx_caught = refusal;
+  failed = cx_payload(c, call, 1, &taken);
+  cx_caught = NULL;
+  if (failed) {
+    /* rpc.c++ imports each capability as it reads the table, so those
+     * before the one it refuses go back, last first, ahead of the Abort. */
+    if (taken > 0 && capnp_getp(call, 1, &params_payload) == CAPNP_OK) {
+      keys = param_holds(c, &params_payload, taken, &nkeys);
+      (void)holds_drop(c, keys, nkeys);
+      free(keys);
+    }
+    return protocol_abort(c, refusal);
+  }
   if (capnp_getp(call, 1, &params_payload) == CAPNP_OK) {
     (void)capnp_getp(&params_payload, 0, &params);
     note_introductions(c, &params_payload);
-    keys = param_holds(c, &params_payload, &nkeys);
+    keys = param_holds(c, &params_payload, UINT32_MAX, &nkeys);
   }
 
   if (answer_find(c, qid) != NULL) {
@@ -1848,11 +2430,21 @@ static int abort_unimplemented_disembargo(capnp_rpc_conn_t *c,
                                           const capnp_ptr_t *dis)
 {
   size_t len = 0, cap = 128;
-  char *buf = (char *)malloc(cap);
+  char *buf;
   capnp_ptr_t target, pa, ops, op;
   const char *sep = "";
   uint16_t ctx = capnp_get_u16(dis, DIS_CTX_TAG_OFF, 0);
   int rc;
+  /* Printing the Disembargo reads its target and transform, and a
+   * pointer kj refuses there is the reason instead. */
+  if (cx_struct(c, dis, 0))
+    return CAPNP_ERR_KIND;
+  if (capnp_getp(dis, 0, &target) == CAPNP_OK &&
+      target.kind == CAPNP_PK_STRUCT &&
+      capnp_get_u16(&target, TARGET_TAG_OFF, 0) == TARGET_TAG_PROMISEDANSWER &&
+      cx_promised(c, &target, 0))
+    return CAPNP_ERR_KIND;
+  buf = (char *)malloc(cap);
   if (buf == NULL)
     return protocol_abort(c, "Unimplemented Disembargo type.");
   buf[0] = '\0';
@@ -2054,6 +2646,9 @@ static int handle_resolve(capnp_rpc_conn_t *c, const capnp_ptr_t *res)
   tag = capnp_get_u16(res, RESOLVE_TAG_OFF, 0);
   if (tag != RESOLVE_TAG_CAP && tag != RESOLVE_TAG_EXCEPTION)
     return protocol_abort(c, "Unknown 'Resolve' type.");
+  if (tag == RESOLVE_TAG_CAP ? cx_capdesc(c, res, 0)
+                             : cx_exception(c, res, 0))
+    return CAPNP_ERR_KIND;
   pid = capnp_get_u32(res, RESOLVE_PROMISEID_OFF, 0);
   im = import_find(side_get(c, 0), pid);
   if (im != NULL && im->promise && im->app == 0)
@@ -2084,8 +2679,18 @@ static int send_unimplemented(capnp_rpc_conn_t *c, const capnp_ptr_t *orig)
                                CAPNP_RPC_MSG_UNIMPLEMENTED);
   if (rc == CAPNP_OK && capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot))
     rc = CAPNP_ERR_ALLOC;
+  /* rpc.c++ copies a message it has only read the root of. That read
+   * leaves six words charged (the limit it aborts at, measured against
+   * a 1.4.0 peer), and nothing else the dispatch looked at. */
+  if (rc == CAPNP_OK && orig->msg != NULL)
+    orig->msg->traversal_left = CAPNP_DEFAULT_TRAVERSAL_WORDS - 6;
   if (rc == CAPNP_OK)
     rc = capnp_builder_copy_ptr(&slot, orig);
+  if (rc == CAPNP_ERR_TRAVERSAL) {
+    capnp_builder_free(&b);
+    return protocol_abort(c, "Exceeded message traversal limit.  See "
+                             "capnp::ReaderOptions.");
+  }
   if (rc == CAPNP_OK)
     rc = flush(c, &b);
   capnp_builder_free(&b);
@@ -2724,6 +3329,9 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
       flip_taken_caps(q);
     return send_results_sent_elsewhere(c, a->question_id);
   }
+  if (tag == RETURN_TAG_RESULTS ? cx_payload(c, ret, 0, NULL)
+                                : cx_exception(c, ret, 0))
+    return CAPNP_ERR_KIND;
   q->answered = 1;
   q->failed = tag != RETURN_TAG_RESULTS;
   if (!q->failed) {
@@ -3004,6 +3612,18 @@ static int handle_unimplemented(capnp_rpc_conn_t *c, const capnp_ptr_t *orig)
   if (which == CAPNP_RPC_MSG_RESOLVE) {
     capnp_ptr_t res, cap, tpcd;
     uint16_t tag;
+    if (cx_struct(c, orig, 0))
+      return CAPNP_ERR_KIND;
+    res = cx_get(orig, 0);
+    if (res.kind == CAPNP_PK_STRUCT &&
+        capnp_get_u16(&res, RESOLVE_TAG_OFF, 0) == RESOLVE_TAG_CAP &&
+        (cx_struct(c, &res, 0) ||
+         (cap = cx_get(&res, 0),
+          cap.kind == CAPNP_PK_STRUCT &&
+              capnp_get_u16(&cap, CAPDESC_TAG_OFF, 0) ==
+                  CAPDESC_TAG_THIRDPARTYHOSTED &&
+              cx_struct(c, &cap, 0))))
+      return CAPNP_ERR_KIND;
     if (capnp_getp(orig, 0, &res) != CAPNP_OK ||
         res.kind != CAPNP_PK_STRUCT ||
         capnp_get_u16(&res, RESOLVE_TAG_OFF, 0) != RESOLVE_TAG_CAP ||
@@ -3036,14 +3656,34 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
 
   if (capnp_message_from_flat(&m, data, len) != CAPNP_OK)
     return CAPNP_ERR_FRAMING;
+  if (cx_message(c, &m)) {
+    capnp_message_free(&m);
+    return CAPNP_ERR_KIND;
+  }
   if (capnp_root(&m, &root) != CAPNP_OK) {
     capnp_message_free(&m);
     return CAPNP_ERR_FRAMING;
   }
 
   which = capnp_get_u16(&root, MESSAGE_TAG_OFF, 0);
+  /* Each union member handleMessage passes on is a struct; any other
+   * message is copied whole into the Unimplemented echo, which sizes it
+   * first. Provide, Accept and Join are served here at level 3. */
+  if ((which <= CAPNP_RPC_MSG_RELEASE || which == CAPNP_RPC_MSG_BOOTSTRAP ||
+       which == CAPNP_RPC_MSG_DISEMBARGO)
+          ? cx_struct(c, &root, 0)
+          : cx_message_total(c, &root)) {
+    capnp_message_free(&m);
+    return CAPNP_ERR_KIND;
+  }
   if (capnp_getp(&root, 0, &body) != CAPNP_OK)
     memset(&body, 0, sizeof body);
+  /* A null body reads as the struct's defaults, as in C++. */
+  if (body.kind != CAPNP_PK_STRUCT) {
+    memset(&body, 0, sizeof body);
+    body.msg = &m;
+    body.kind = CAPNP_PK_STRUCT;
+  }
 
   switch (which) {
   case CAPNP_RPC_MSG_UNIMPLEMENTED:

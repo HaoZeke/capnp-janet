@@ -694,16 +694,40 @@ static void test_frame_alloc_limit(void) {
   }
 }
 
-/* Sends `n` bytes to a link vat and closes the stream. `out` gets
- * "type reason" of the one Abort the vat sends back, or "" for none. */
+/* The "type reason" of an Abort or of a Return that carries an
+ * exception, added to `out` after " | " when `out` is not empty. */
+static void add_reason(const uint8_t *f, size_t n, char *out, size_t cap) {
+  capnp_message_t m = {0};
+  capnp_ptr_t root, body, exc;
+  const char *text = NULL;
+  size_t tn = 0, used = strlen(out);
+  uint16_t tag;
+  int ok = 0;
+  if (capnp_message_from_flat(&m, f, n) == CAPNP_OK &&
+      capnp_root(&m, &root) == CAPNP_OK &&
+      capnp_getp(&root, 0, &body) == CAPNP_OK) {
+    tag = capnp_get_u16(&root, 0, 0);
+    if (tag == CAPNP_RPC_MSG_ABORT) {
+      exc = body;
+      ok = 1;
+    } else if (tag == CAPNP_RPC_MSG_RETURN && capnp_get_u16(&body, 6, 0) == 1) {
+      ok = capnp_getp(&body, 0, &exc) == CAPNP_OK;
+    }
+  }
+  if (ok && capnp_get_text(&exc, 0, &text, &tn) == CAPNP_OK &&
+      used + tn + 8 < cap)
+    snprintf(out + used, cap - used, "%s%u %.*s", used ? " | " : "",
+             (unsigned)capnp_get_u16(&exc, 4, 0), (int)tn, text);
+  capnp_message_free(&m);
+}
+
+/* Sends `n` bytes to a link vat and closes the stream. `out` gets the
+ * reason of each Abort or exception Return the vat sends back. */
 static void link_abort_for(const uint8_t *in, size_t n, char *out,
                            size_t cap) {
   capnp_link_t *link = (capnp_link_t *)calloc(1, sizeof(*link));
   static uint8_t back[4096];
-  capnp_message_t m = {0};
-  capnp_ptr_t root, exc;
-  const char *text = NULL;
-  size_t got = 0, tn = 0;
+  size_t got = 0, at = 0;
   ssize_t r;
   int sv[2];
   out[0] = 0;
@@ -723,14 +747,17 @@ static void link_abort_for(const uint8_t *in, size_t n, char *out,
   while ((r = read(sv[0], back + got, sizeof(back) - got)) > 0)
     got += (size_t)r;
   close(sv[0]);
-  if (got && capnp_message_from_flat(&m, back, got) == CAPNP_OK &&
-      capnp_root(&m, &root) == CAPNP_OK &&
-      capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_ABORT &&
-      capnp_getp(&root, 0, &exc) == CAPNP_OK &&
-      capnp_get_text(&exc, 0, &text, &tn) == CAPNP_OK && tn + 3 < cap)
-    snprintf(out, cap, "%u %.*s", (unsigned)capnp_get_u16(&exc, 4, 0),
-             (int)tn, text);
-  capnp_message_free(&m);
+  while (got - at >= 8) {
+    uint32_t segs = capnp_load_le32(back + at) + 1, i;
+    size_t len = 4 + 4 * (size_t)segs;
+    len += len & 4;
+    for (i = 0; i < segs && at + 8 + 4 * (size_t)i <= got; i++)
+      len += 8 * (size_t)capnp_load_le32(back + at + 4 + 4 * (size_t)i);
+    if (len > got - at)
+      break;
+    add_reason(back + at, len, out, cap);
+    at += len;
+  }
 }
 
 /* rpc.c++ answers a stream that ends, or a frame its reader refuses,
@@ -758,6 +785,71 @@ static void test_link_framing_aborts(void) {
     link_abort_for(cases[i].in, cases[i].n, got, sizeof got);
     if (strcmp(got, cases[i].want) != 0) {
       fprintf(stderr, "FAIL framing abort %zu: got \"%s\"\n", i, got);
+      g_fail++;
+    }
+  }
+}
+
+static size_t unhex(const char *h, uint8_t *out, size_t cap) {
+  size_t n = 0;
+  unsigned v;
+  while (h[0] && h[1] && n < cap && sscanf(h, "%2x", &v) == 1) {
+    out[n++] = (uint8_t)v;
+    h += 2;
+  }
+  return n;
+}
+
+/* rpc.c++ reads each message through PointerReader, which refuses a
+ * pointer it cannot follow with these reasons. */
+static void test_link_pointer_aborts(void) {
+  static const struct {
+    const char *hex;
+    const char *want;
+  } cases[] = {
+      {"0000000000000000",
+       "0 expected segment != nullptr && "
+       "segment->checkObject(segment->getStartPtr(), ONE * WORDS); Message "
+       "did not contain a root pointer."},
+      {"00000000010000000200000009000000",
+       "0 expected segment != nullptr [0 != nullptr]; Message contains far "
+       "pointer to unknown segment."},
+      {"00000000030000000000000001000100080000000000000014000000"
+       "01000000",
+       "0 expected boundsCheck(segment, ptr, ref->structRef.wordSize()); "
+       "Message contained out-of-bounds struct pointer. This usually "
+       "indicates that the input data was corrupted, used a different "
+       "encoding than specified (e.g. packed vs. non-packed), or was not a "
+       "Cap'n Proto message to begin with. Note that this error is NOT due "
+       "to a schema mismatch; the input is invalid regardless of schema."},
+      {"00000000060000000000000001000100010000000000000000000000"
+       "01000200000000000000000000000000000000000700000000000000",
+       "0 expected ptr->isCapability(); unknown pointer type"},
+      {"000000000200000000000000010000000500000000000000",
+       "0 'Resolve' contained 'CapDescriptor.none'."},
+      {"0000000004000000000000000100010008000000000000000000000001000000"
+       "0000000000000000000000000b00000000000000010001000500000000000000"
+       "0000000001000100070000000000000000000000010001000400000000000000"
+       "00000000010001000000000000000000010000000f0000000400000001000000"
+       "1600000001000000",
+       "0 Unsupported pipeline op.; (uint)opReader.which() = 22"},
+      {"00000000050000000000000001000100080000000000000000000000"
+       "0100010000000000000000001400000001000000",
+       "0 This vat only supports a bootstrap interface, not the old "
+       "Cap'n-Proto-0.4-style named exports. | 2 Peer disconnected."},
+      {"00000000050000000000000001000100080000000000000000000000"
+       "0100010000000000000000000200000009000000",
+       "0 expected segment != nullptr [0 != nullptr]; Message contains far "
+       "pointer to unknown segment. | 2 Peer disconnected."},
+  };
+  uint8_t in[256];
+  char got[768];
+  size_t i, n;
+  for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+    n = unhex(cases[i].hex, in, sizeof in);
+    link_abort_for(in, n, got, sizeof got);
+    if (strcmp(got, cases[i].want) != 0) {
+      fprintf(stderr, "FAIL pointer abort %zu: got \"%s\"\n", i, got);
       g_fail++;
     }
   }
@@ -1108,7 +1200,9 @@ typedef struct {
   uint32_t count;
   /* For a call, the low byte is how many capTable entries of the params
    * name the caller's export 5, as senderHosted, or senderPromise with
-   * 0x100 set. Bits 24 to 27 pick a list of exports from `vf_id_lists`. */
+   * 0x100 set. Bits 24 to 27 pick a list of exports from `vf_id_lists`.
+   * 0x200 makes the last entry a descriptor arm no reader knows. Bits 28
+   * to 31 pick a pointer of the built frame for `vf_corrupt` to rewrite. */
   uint32_t pcaps;
 } vframe_t;
 
@@ -1401,6 +1495,40 @@ static const vscenario_t vat_diffs[] = {
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
       {VF_RELEASE, 0, 0, 0, 0, 0, 2, 0},
       {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"call with an amplified list of void as its capTable",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | (2u << 28)}}, 1, 99, 0, 0, 0},
+    {"call with an amplified list of empty structs as its capTable",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | (3u << 28)}}, 1, 99, 0, 0, 0},
+    {"call pipelined with an amplified list of void as its transform",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1, 2u << 28}}, 1, 99, 0, 0, 0},
+    {"call pipelined with an amplified list of empty structs as its transform",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1, 3u << 28}}, 1, 99, 0, 0, 0},
+    {"call with bit 31 set in its capTable tag",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | (11u << 28)},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"call with bit 31 set in an empty-struct capTable tag",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | (12u << 28)}}, 1, 1, 0, 0, 0},
+    {"call pipelined with bit 31 set in its transform tag",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 1, 11u << 28}}, 2, 2, 0, 0, 0},
+    {"message type 20 carrying a composite list with bit 31 set",
+     {{VF_TAG, 0, 0, 0, 0, 20, 0, 13u << 28}}, 1, 99, 0, 0, 0},
+    {"message type 20 carrying an amplified list of void",
+     {{VF_TAG, 0, 0, 0, 0, 20, 0, 4u << 28}}, 1, 99, 0, 0, 0},
+    {"message type 20 carrying the longest list a copy can read",
+     {{VF_TAG, 0, 0, 0, 0, 20, 0, 8u << 28}}, 1, 99, 0, 0, 0},
+    {"message type 20 carrying a list one word past that",
+     {{VF_TAG, 0, 0, 0, 0, 20, 0, 9u << 28}}, 1, 99, 0, 0, 0},
+    {"capability descriptor of an unknown arm in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | 0x200}}, 1, 99, 0, 0, 0},
+    {"capability then a descriptor of an unknown arm in the params",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 2u | 0x200}}, 1, 99, 0, 0, 0},
+    {"Disembargo of an unknown context with a corrupt target",
+     {{VF_DISEMBARGO, 0, VT_IMPORT, 0, 9, 0, 0, 5u << 28}}, 1, 99, 0, 0, 0},
+    {"Disembargo of an unknown context with a corrupt promisedAnswer",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 9, 1, 0, 6u << 28}}, 1, 99, 0, 0, 0},
+    {"Disembargo of an unknown context with a corrupt transform",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 9, 1, 0, 7u << 28}}, 1, 99, 0, 0, 0},
     {"Bootstrap of a vat with no bootstrap capability",
      {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
       {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 1},
@@ -1527,9 +1655,12 @@ static int build_vcall(const capnp_bptr_t *slot0, const vframe_t *f) {
   if (capnp_builder_set_list_struct(&payload, 1, 0, n, 1, 1, &table))
     return -1;
   for (i = 0; i < n; i++) {
+    uint16_t arm = (f->pcaps & 0x100) ? 2 : 1;
     e = table;
     e.word += (size_t)i * 2;
-    if (capnp_builder_set_u16(&e, 0, (f->pcaps & 0x100) ? 2 : 1) ||
+    if ((f->pcaps & 0x200) && i + 1 == n)
+      arm = 9;
+    if (capnp_builder_set_u16(&e, 0, arm) ||
         capnp_builder_set_u32(&e, 4, list ? vf_id_lists[list][i + 1] : 5))
       return -1;
   }
@@ -1563,7 +1694,7 @@ static int build_dis_promised(const capnp_bptr_t *target, const vframe_t *f) {
   return 0;
 }
 
-static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
+static int build_vframe_raw(const vframe_t *f, uint8_t **out, size_t *len) {
   capnp_builder_t b;
   capnp_bptr_t root, msg, slot, body, inner;
   int rc;
@@ -1692,6 +1823,129 @@ static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
   if (rc == 0)
     rc = capnp_builder_serialize(&b, out, len);
   capnp_builder_free(&b);
+  return rc;
+}
+
+#define VF_AMPLIFIED 20000000u
+#define VF_BODY_FITS 8388602u
+
+static uint64_t vf_word(const uint8_t *frame, size_t w) {
+  return capnp_load_le64(frame + 8 + w * 8);
+}
+
+static void vf_set_word(uint8_t *frame, size_t w, uint64_t v) {
+  capnp_store_le64(frame + 8 + w * 8, v);
+}
+
+/* A list pointer to the word after it, of `esize` and `count`. */
+static uint64_t vf_list_word(unsigned esize, uint32_t count) {
+  return 1u | ((uint64_t)esize << 32) | ((uint64_t)count << 35);
+}
+
+/* Rewrite one pointer of a built frame, which is one segment of
+ * single-word-aligned objects laid out in the order they were built:
+ *   2  the first list as an amplified list of void,
+ *   3  the first list as an amplified list of zero-sized structs,
+ *   4  a message body as an amplified list of void,
+ *   5  the Disembargo target, an offset past the segment,
+ *   6  the Disembargo promisedAnswer, an offset past the segment,
+ *   7  the Disembargo transform, an offset past the segment. */
+static int vf_corrupt(uint32_t bad, uint8_t **frame, size_t *len) {
+  size_t words = (*len - 8) / 8, w;
+  uint8_t *f = *frame;
+  switch (bad) {
+  case 8:
+  case 9:
+    vf_set_word(f, 2, vf_list_word(0, bad == 8 ? VF_BODY_FITS
+                                                : VF_BODY_FITS + 1));
+    return 0;
+  case 2:
+  case 3:
+    for (w = 0; w < words; w++) {
+      uint64_t v = vf_word(f, w);
+      if (w > 0 && (v & 3) == 1 && (v >> 32) != 0 && ((v >> 32) & 7) == 7) {
+        if (bad == 2) {
+          vf_set_word(f, w, vf_list_word(0, VF_AMPLIFIED));
+        } else {
+          uint8_t *grown = (uint8_t *)realloc(f, *len + 8);
+          if (grown == NULL)
+            return -1;
+          f = grown;
+          *frame = f;
+          vf_set_word(f, words, (uint64_t)VF_AMPLIFIED << 2);
+          capnp_store_le32(f + 4, (uint32_t)(words + 1));
+          *len += 8;
+          vf_set_word(f, w, 1u | ((uint64_t)(words - w - 1) << 2) |
+                                (7ull << 32));
+        }
+        return 0;
+      }
+    }
+    return -1;
+  case 4:
+    vf_set_word(f, 2, vf_list_word(0, VF_AMPLIFIED));
+    return 0;
+  case 5:
+    vf_set_word(f, 4, (vf_word(f, 4) & 0xffffffff00000000ull) |
+                          ((uint64_t)0x40000u << 2));
+    return 0;
+  case 6:
+    vf_set_word(f, 6, (vf_word(f, 6) & 0xffffffff00000000ull) |
+                          ((uint64_t)0x40000u << 2));
+    return 0;
+  case 7:
+    vf_set_word(f, 8, (vf_word(f, 8) & 0xffffffff00000000ull) |
+                          ((uint64_t)0x40000u << 2) | 1u);
+    return 0;
+  case 11:
+  case 12:
+    for (w = 0; w < words; w++) {
+      uint64_t v = vf_word(f, w);
+      if (w > 0 && (v & 3) == 1 && (v >> 32) != 0 && ((v >> 32) & 7) == 7) {
+        if (bad == 11) {
+          size_t tw = w + 1u + (size_t)((v >> 2) & 0x3fffffffu);
+          if (tw >= words)
+            return -1;
+          vf_set_word(f, tw, vf_word(f, tw) | 0x80000000ull);
+        } else {
+          uint8_t *grown = (uint8_t *)realloc(f, *len + 8);
+          if (grown == NULL)
+            return -1;
+          f = grown;
+          *frame = f;
+          vf_set_word(f, words, 0x80000000ull);
+          capnp_store_le32(f + 4, (uint32_t)(words + 1));
+          *len += 8;
+          vf_set_word(f, w, 1u | ((uint64_t)(words - w - 1) << 2) |
+                                (7ull << 32));
+        }
+        return 0;
+      }
+    }
+    return -1;
+  case 13: {
+    uint8_t *grown = (uint8_t *)realloc(f, *len + 16);
+    if (grown == NULL)
+      return -1;
+    f = grown;
+    *frame = f;
+    vf_set_word(f, words, (1ull << 32) | 0x80000000ull | (1ull << 2));
+    vf_set_word(f, words + 1, 0);
+    capnp_store_le32(f + 4, (uint32_t)(words + 2));
+    *len += 16;
+    vf_set_word(f, 2, 1u | ((uint64_t)(words - 3) << 2) | (7ull << 32) |
+                          (1ull << 35));
+    return 0;
+  }
+  default:
+    return -1;
+  }
+}
+
+static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
+  int rc = build_vframe_raw(f, out, len);
+  if (rc == 0 && f->pcaps >> 28)
+    rc = vf_corrupt(f->pcaps >> 28, out, len);
   return rc;
 }
 
@@ -2045,6 +2299,63 @@ static const struct {
      "params",
      "return 1 results 0 | release 5 x1 | abort: Tried to release "
      "invalid export ID."},
+    {"call with an amplified list of void as its capTable",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"call with an amplified list of empty structs as its capTable",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"call pipelined with an amplified list of void as its transform",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"call pipelined with an amplified list of empty structs as its "
+     "transform",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"call with bit 31 set in its capTable tag",
+     "return 1 results 42 | release 5 x1 | return 2 results 42"},
+    {"call with bit 31 set in an empty-struct capTable tag",
+     "return 1 results 42"},
+    {"call pipelined with bit 31 set in its transform tag",
+     "return 1 results 0 | return 2 results 42"},
+    {"message type 20 carrying a composite list with bit 31 set",
+     "unimplemented 20 | no end"},
+    {"message type 20 carrying an amplified list of void",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"message type 20 carrying the longest list a copy can read",
+     "unimplemented 20 | no end"},
+    {"message type 20 carrying a list one word past that",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"capability descriptor of an unknown arm in the params of a call",
+     "abort: unknown CapDescriptor type"},
+    {"capability then a descriptor of an unknown arm in the params",
+     "release 5 x1 | abort: unknown CapDescriptor type"},
+    {"Disembargo of an unknown context with a corrupt target",
+     "abort: expected boundsCheck(segment, ptr, "
+     "ref->structRef.wordSize()); Message contained out-of-bounds "
+     "struct pointer. This usually indicates that the input data was "
+     "corrupted, used a different encoding than specified (e.g. "
+     "packed vs. non-packed), or was not a Cap'n Proto message to "
+     "begin with. Note that this error is NOT due to a schema "
+     "mismatch; the input is invalid regardless of schema."},
+    {"Disembargo of an unknown context with a corrupt promisedAnswer",
+     "abort: expected boundsCheck(segment, ptr, "
+     "ref->structRef.wordSize()); Message contained out-of-bounds "
+     "struct pointer. This usually indicates that the input data was "
+     "corrupted, used a different encoding than specified (e.g. "
+     "packed vs. non-packed), or was not a Cap'n Proto message to "
+     "begin with. Note that this error is NOT due to a schema "
+     "mismatch; the input is invalid regardless of schema."},
+    {"Disembargo of an unknown context with a corrupt transform",
+     "abort: expected boundsCheck(segment, ptr, wordCount + "
+     "POINTER_SIZE_IN_WORDS); Message contains out-of-bounds list "
+     "pointer. This usually indicates that the input data was "
+     "corrupted, used a different encoding than specified (e.g. "
+     "packed vs. non-packed), or was not a Cap'n Proto message to "
+     "begin with. Note that this error is NOT due to a schema "
+     "mismatch; the input is invalid regardless of schema."},
 };
 
 static void test_vat_recorded(void) {
@@ -2081,6 +2392,7 @@ int main(int argc, char **argv) {
   test_frame_segment_limit();
   test_frame_alloc_limit();
   test_link_framing_aborts();
+  test_link_pointer_aborts();
   test_bootstrap_frame_little_endian();
   test_size_to_i32();
   test_write_pipe();

@@ -118,6 +118,15 @@ Pre-1.0 minor releases may include breaking API changes.
   any answer. The op used to be skipped.
 - Finish sets `requireEarlyCancellationWorkaround` to false, as rpc.c++
   does. It used to keep the schema default of true.
+- Each incoming message is read the way C++ PointerReader reads it. A
+  pointer it refuses aborts with the rpc.c++ reason, a null body reads
+  as defaults, and a refused Bootstrap object id is answered with that
+  reason. These messages used to be dropped or answered.
+- A list of void or of empty structs is charged to the traversal limit
+  for each element it claims, so a count past the limit aborts as
+  rpc.c++ does. A call with an unknown CapDescriptor arm aborts, and a
+  Disembargo of an unknown context with a pointer rpc.c++ refuses aborts
+  with that pointer's reason.
 - A Return naming a question id with the high bit set is ignored, as
   rpc.c++ keeps those ids for calls that want no Return. It used to
   abort as naming no question.

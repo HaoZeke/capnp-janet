@@ -96,13 +96,21 @@ static int trimmed_pwords(const capnp_ptr_t *p) {
       np--;
     return np;
   }
-  while (np > 0) {
-    capnp_ptr_t q;
-    if (capnp_getp(p, (uint16_t)(np - 1), &q) != CAPNP_OK)
-      break;
-    if (q.kind != CAPNP_PK_NULL)
-      break;
-    np--;
+  {
+    /* The copy reads each pointer it keeps; looking at the trailing ones
+     * to trim them is not a read the limiter counts. */
+    capnp_message_t *m = p->msg;
+    uint64_t left = m->traversal_left;
+    m->traversal_left = UINT64_MAX / 2;
+    while (np > 0) {
+      capnp_ptr_t q;
+      if (capnp_getp(p, (uint16_t)(np - 1), &q) != CAPNP_OK)
+        break;
+      if (q.kind != CAPNP_PK_NULL)
+        break;
+      np--;
+    }
+    m->traversal_left = left;
   }
   return np;
 }
