@@ -30,6 +30,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp-eval` splits text and JSON input into messages as `capnp` does,
+  counting brackets and comment starts inside strings, and input with no
+  tokens fails. Whitespace-only input used to succeed with no output.
 - `capnp-eval` reports a crash signal on an alternate stack and exits
   with status 1, as kj does, and writes each converted message at once.
   A pointer cycle used to kill it with the signal and lose the output of

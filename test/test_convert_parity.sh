@@ -352,6 +352,30 @@ done
 full=0
 in_fmt=binary
 
+# readOneText and readOneJson never enter their quote states, so brackets
+# and comment starts inside strings split the input. Input with no tokens
+# fails at once.
+full=1
+i=0
+for spec in 'text: ' 'text:
+' 'json:  ' 'text:(vText = "a)(b")' 'json:{"vText": "a}{b"}' \
+  'json:{"vText": "a#b"}
+{"vI8": 1}' 'json:{"vText": "a//b"}
+{"vI8": 1}' 'text:# only a comment
+' 'text:  (vI8 = 1)  ' 'json: {"vI8": 1}
+ {"vI8": 2} '; do
+  in_fmt=${spec%%:*}
+  printf '%s' "${spec#*:}" >"$TMP/in.bin"
+  for extra in "" --quiet; do
+    extra=($extra)
+    compare "chunk-$i" "$PARITY" Parity "text"
+  done
+  i=$((i + 1))
+done
+extra=()
+full=0
+in_fmt=binary
+
 if [[ $fails -ne 0 ]]; then
   echo "convert parity: $fails failure(s)" >&2
   exit 1

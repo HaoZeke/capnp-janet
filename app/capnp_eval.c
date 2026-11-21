@@ -737,25 +737,24 @@ static int read_flat_packed(const uint8_t *in, size_t len, uint8_t **out,
 }
 
 /* Split one top-level parenthesized or brace-delimited message from `s + *pos`
- * like readOneText / readOneJson in capnp.c++. */
+ * like readOneText / readOneJson in capnp.c++. Their quote states are never
+ * entered, so brackets and comment starts inside strings count too. */
 static int next_delimited_chunk(const char *s, size_t n, size_t *pos, int json,
                                 size_t *start_out, size_t *len_out) {
   char open_c = json ? '{' : '(';
   char close_c = json ? '}' : ')';
   int depth = 0;
   int saw_close = 0;
-  int state = 0; /* 0 normal, 1 comment, 2 sq, 3 sq_esc, 4 dq, 5 dq_esc, 6 slash */
+  int state = 0; /* 0 normal, 1 comment, 2 slash */
   size_t i = *pos;
 
-  while (i < n && isspace((unsigned char)s[i]))
-    i++;
   if (i >= n)
     return 0;
   *start_out = i;
   for (; i < n; i++) {
     char c = s[i];
     switch (state) {
-    case 6:
+    case 2:
       if (c == '/') {
         state = 1;
         break;
@@ -766,11 +765,7 @@ static int next_delimited_chunk(const char *s, size_t n, size_t *pos, int json,
       if (c == '#') {
         state = 1;
       } else if (json && c == '/') {
-        state = 6;
-      } else if (c == '\'') {
         state = 2;
-      } else if (c == '"') {
-        state = 4;
       } else if (c == open_c) {
         if (depth == 0 && saw_close) {
           *len_out = i - *start_out;
@@ -786,24 +781,6 @@ static int next_delimited_chunk(const char *s, size_t n, size_t *pos, int json,
     case 1:
       if (c == '\n')
         state = 0;
-      break;
-    case 2:
-      if (c == '\'')
-        state = 0;
-      else if (c == '\\')
-        state = 3;
-      break;
-    case 3:
-      state = 2;
-      break;
-    case 4:
-      if (c == '"')
-        state = 0;
-      else if (c == '\\')
-        state = 5;
-      break;
-    case 5:
-      state = 4;
       break;
     }
   }
