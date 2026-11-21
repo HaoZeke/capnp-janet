@@ -25,6 +25,8 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
 done
 [[ -n "$PORT" ]]
 "$DIAL" dial "$PORT"
+# The same frames to capnp-C++ and to the vat: replies must agree.
+"$DIAL" vat-diff "$PORT"
 kill $SPID 2>/dev/null || true
 wait $SPID 2>/dev/null || true
 trap - EXIT

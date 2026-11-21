@@ -237,6 +237,12 @@ int main(void)
   /* 2. Alice tells Carol where to go. Carol records the introduction
    *    rather than dialling: reaching Bob is the network's job, and here
    *    the connection already exists. */
+  /* The call below addresses Carol's export 0, which needs Alice to have
+   * bootstrapped Carol: rpc.c++ aborts a call to any other id. */
+  q = capnp_rpc_send_bootstrap(&alice_to_carol);
+  flush_wire(&a2c);
+  flush_wire(&c2a);
+  CHECK(capnp_rpc_is_answered(&alice_to_carol, q), "Alice bootstrapped Carol");
   tell_where_to_go(&alice_to_carol, &carol_to_alice, 90, "10.0.0.1", 5000, nonce, 7);
   CHECK(capnp_rpc_pending_introductions(&carol_to_alice, learned, 4) == 1,
         "introduction recorded");

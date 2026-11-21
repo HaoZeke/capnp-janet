@@ -48,6 +48,15 @@ Pre-1.0 minor releases may include breaking API changes.
   Return, as in rpc.c++. A Return for a question this vat does not
   have, or a second Return, now aborts with capnp-C++'s reason; such a
   Return used to be ignored.
+- Calls and bootstraps are refused as rpc.c++ refuses them. A call to an
+  export this vat lacks, an unknown target arm, `sendResultsTo.thirdParty`
+  or a question id still in use aborts with capnp-C++'s reason; these
+  used to be answered with an exception or served. A call pipelined on a
+  missing or failed answer fails with capnp-C++'s reason, a null target
+  means export 0, and a `deprecatedObjectId` bootstrap gets capnp-C++'s
+  exception. Exception answers are kept until Finish, as in rpc.c++.
+  `test_transport vat-diff` sends the same frames to a live capnp-C++
+  server and to this vat and compares the replies.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

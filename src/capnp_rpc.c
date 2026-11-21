@@ -7,6 +7,7 @@
 
 #include <capnp-janet/capnp_rpc.h>
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -283,7 +284,8 @@ static int resolve_promised_answer(capnp_rpc_conn_t *c,
   uint32_t qid;
   int i, n, eid = -1;
 
-  if (promised->kind != CAPNP_PK_STRUCT)
+  /* A null promisedAnswer reads as its default: question 0, no ops. */
+  if (promised->kind != CAPNP_PK_STRUCT && promised->kind != CAPNP_PK_NULL)
     return -1;
   qid = capnp_get_u32(promised, PA_QUESTIONID_OFF, 0);
   a = answer_find(c, qid);
@@ -345,6 +347,45 @@ static int resolve_promised_answer(capnp_rpc_conn_t *c,
 out:
   capnp_message_free(&stored);
   return eid;
+}
+
+#define NO_PIPELINE_REASON                                                     \
+  "Pipeline call on a request that returned no capabilities or was "          \
+  "already closed."
+
+/* Why a call pipelined on `promised` cannot be routed, as rpc.c++ words
+ * it: a missing answer has no pipeline, and a failed one breaks every
+ * call made on it with its own exception. Copies into `buf`. */
+static const char *promised_failure(capnp_rpc_conn_t *c,
+                                    const capnp_ptr_t *promised, char *buf,
+                                    size_t cap)
+{
+  capnp_rpc_answer_t *a;
+  capnp_message_t stored = {0};
+  capnp_ptr_t root, ret, exc;
+  const char *text = NULL;
+  size_t n = 0;
+  const char *reason = "no such export";
+
+  if (promised->kind != CAPNP_PK_STRUCT && promised->kind != CAPNP_PK_NULL)
+    return reason;
+  a = answer_find(c, capnp_get_u32(promised, PA_QUESTIONID_OFF, 0));
+  if (a == NULL)
+    return NO_PIPELINE_REASON;
+  if (capnp_message_from_flat(&stored, frame_bytes(a->frame, a->len),
+                              a->len) == CAPNP_OK &&
+      capnp_root(&stored, &root) == CAPNP_OK &&
+      capnp_getp(&root, 0, &ret) == CAPNP_OK &&
+      capnp_get_u16(&ret, RETURN_TAG_OFF, 0) == RETURN_TAG_EXCEPTION &&
+      capnp_getp(&ret, 0, &exc) == CAPNP_OK &&
+      capnp_get_text(&exc, 0, &text, &n) == CAPNP_OK && text != NULL &&
+      n < cap) {
+    memcpy(buf, text, n);
+    buf[n] = '\0';
+    reason = buf;
+  }
+  capnp_message_free(&stored);
+  return reason;
 }
 
 /* Start a Return message: root Message, its Return, and its Payload. */
@@ -536,10 +577,12 @@ static int write_exception(const capnp_bptr_t *body, uint16_t dwords,
   return CAPNP_OK;
 }
 
-/* A failed call that asked for sendResultsTo.yourself keeps its
- * exception for takeFromOtherQuestion, like any other result. */
-static int redirect_exception(capnp_rpc_conn_t *c, uint32_t qid,
-                              const char *reason)
+/* Answer a call or bootstrap with an exception, kept until Finish as
+ * rpc.c++ keeps the answer: its question id stays in use, and a call
+ * pipelined on it fails with the same reason. A call that asked for
+ * sendResultsTo.yourself keeps it for takeFromOtherQuestion. */
+static int answer_exception(capnp_rpc_conn_t *c, uint32_t qid,
+                            const char *reason, int redirect)
 {
   capnp_builder_t b;
   capnp_bptr_t ret;
@@ -549,7 +592,7 @@ static int redirect_exception(capnp_rpc_conn_t *c, uint32_t qid,
   if (rc == CAPNP_OK)
     rc = write_exception(&ret, RETURN_DW, 0, reason);
   if (rc == CAPNP_OK)
-    rc = keep_answer(c, &b, qid, 1);
+    rc = keep_answer(c, &b, qid, redirect);
   capnp_builder_free(&b);
   return rc;
 }
@@ -613,14 +656,32 @@ static int handle_bootstrap(capnp_rpc_conn_t *c, const capnp_ptr_t *boot)
 {
   capnp_builder_t b;
   capnp_bptr_t ret, payload;
+  capnp_ptr_t object_id;
   uint32_t qid = capnp_get_u32(boot, QUESTIONID_OFF, 0);
   int eid, rc;
 
+  if (answer_find(c, qid) != NULL) {
+    char reason[96];
+    snprintf(reason, sizeof reason,
+             "expected !answer.active; questionId is already in use; "
+             "answerId = %u",
+             (unsigned)qid);
+    return protocol_abort(c, reason);
+  }
+  /* rpc.c++ answers a 0.4-style named export with this exception when,
+   * like this vat, it has no restorer. */
+  if (capnp_getp(boot, 0, &object_id) == CAPNP_OK &&
+      object_id.kind != CAPNP_PK_NULL)
+    return answer_exception(c, qid,
+                            "This vat only supports a bootstrap interface, "
+                            "not the old Cap'n-Proto-0.4-style named "
+                            "exports.",
+                            0);
   if (c->bootstrap == NULL)
-    return send_return_exception(c, qid, "no bootstrap capability");
+    return answer_exception(c, qid, "no bootstrap capability", 0);
   eid = capnp_rpc_export(c, c->bootstrap, c->bootstrap_dispatch);
   if (eid < 0)
-    return send_return_exception(c, qid, "export table full");
+    return answer_exception(c, qid, "export table full", 0);
 
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
@@ -761,9 +822,44 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
   capnp_bptr_t ret, payload, results;
   capnp_ptr_t target, params_payload, params;
   uint32_t qid = capnp_get_u32(call, QUESTIONID_OFF, 0);
-  int eid, rc, yourself;
+  uint16_t send_to, which = TARGET_TAG_IMPORTEDCAP;
+  const char *failure = NULL;
+  char reason[256];
+  int eid = -1, rc, yourself;
 
+  /* The checks and their order are rpc.c++ handleCall's: the target,
+   * then sendResultsTo, then the question id. A null target reads as
+   * the default MessageTarget, importedCap 0. */
   memset(&params, 0, sizeof params);
+  if (capnp_getp(call, 0, &target) != CAPNP_OK)
+    memset(&target, 0, sizeof target);
+  if (target.kind == CAPNP_PK_STRUCT)
+    which = capnp_get_u16(&target, TARGET_TAG_OFF, 0);
+  if (which == TARGET_TAG_IMPORTEDCAP) {
+    uint32_t id = target.kind == CAPNP_PK_STRUCT
+                      ? capnp_get_u32(&target, TARGET_IMPORTEDCAP_OFF, 0)
+                      : 0;
+    if (id >= CAPNP_RPC_MAX_EXPORTS || !c->exports[id].used)
+      return protocol_abort(c, "Message target is not a current export ID.");
+    eid = (int)id;
+  } else if (which == TARGET_TAG_PROMISEDANSWER) {
+    capnp_ptr_t pa;
+    if (capnp_getp(&target, 0, &pa) != CAPNP_OK)
+      memset(&pa, 0, sizeof pa);
+    eid = resolve_promised_answer(c, &pa);
+    if (eid < 0)
+      failure = promised_failure(c, &pa, reason, sizeof reason);
+  } else {
+    /* rpc.c++ prints the target, and a MessageTarget with an unknown arm
+     * prints as "()". */
+    return protocol_abort(c, "Unknown message target type.; target = ()");
+  }
+
+  send_to = capnp_get_u16(call, CALL_SENDRESULTSTO_OFF, 0);
+  if (send_to > CALL_SENDRESULTSTO_YOURSELF)
+    return protocol_abort(c, "Unsupported `Call.sendResultsTo`.");
+  yourself = send_to == CALL_SENDRESULTSTO_YOURSELF;
+
   /* The cap table describes the message, not the dispatch: a call this
    * vat cannot route still told us where a third party's capability
    * lives. */
@@ -772,15 +868,24 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
     note_introductions(c, &params_payload);
   }
 
-  yourself = capnp_get_u16(call, CALL_SENDRESULTSTO_OFF, 0) ==
-             CALL_SENDRESULTSTO_YOURSELF;
-  if (capnp_getp(call, 0, &target) != CAPNP_OK)
-    return yourself ? redirect_exception(c, qid, "call has no target")
-                    : send_return_exception(c, qid, "call has no target");
-  eid = resolve_target(c, &target);
-  if (eid < 0)
-    return yourself ? redirect_exception(c, qid, "no such export")
-                    : send_return_exception(c, qid, "no such export");
+  if (answer_find(c, qid) != NULL) {
+    /* rpc.c++ has already made the call's context by then, and that
+     * context answers as it unwinds, before the Abort: canceled, or
+     * resultsSentElsewhere for results sent to the callee. */
+    capnp_builder_t b;
+    capnp_bptr_t ret;
+    capnp_builder_init(&b);
+    if (build_return_tag(&b, qid,
+                         yourself ? RETURN_TAG_RESULTS_SENT_ELSEWHERE
+                                  : RETURN_TAG_CANCELED,
+                         &ret) == CAPNP_OK)
+      (void)flush(c, &b);
+    capnp_builder_free(&b);
+    return protocol_abort(c, "expected !answer.active; questionId is "
+                             "already in use");
+  }
+  if (failure != NULL)
+    return answer_exception(c, qid, failure, yourself);
 
   capnp_builder_init(&b);
   rc = begin_return(&b, qid, &ret, &payload);
@@ -796,8 +901,7 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
       /* A method that fails is answered with an exception, as rpc.c++
        * does when one throws; otherwise the caller waits forever. */
       capnp_builder_free(&b);
-      return yourself ? redirect_exception(c, qid, "method failed")
-                      : send_return_exception(c, qid, "method failed");
+      return answer_exception(c, qid, "method failed", yourself);
     }
   }
   if (rc == CAPNP_OK)

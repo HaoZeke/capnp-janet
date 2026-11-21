@@ -22,6 +22,8 @@
 #ifdef CAPNP_HAS_MALLINFO2
 #include <malloc.h>
 #endif
+#include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -1003,6 +1005,412 @@ static void test_write_sigpipe_two_threads(void) {
 }
 #endif
 
+/* --- vat-diff: the same frames to capnp-C++ and to this vat ---------- */
+
+enum { VF_BOOT, VF_CALL, VF_RELEASE, VF_UNIMPL, VF_FINISH, VF_RETURN };
+enum { VT_IMPORT, VT_PROMISED, VT_UNKNOWN, VT_NULL };
+#define NULL_ANSWER 0xffffffffu
+
+typedef struct {
+  int kind;
+  /* Question id, or the export a Release names. */
+  uint32_t qid;
+  int target;
+  /* The export or question a call targets. */
+  uint32_t tval;
+  uint16_t send_to;
+  uint16_t method;
+  /* Release count; for a Bootstrap, nonzero sends a deprecatedObjectId. */
+  uint32_t count;
+} vframe_t;
+
+/* After a Bootstrap on question 0 has been answered, `frames` go to each
+ * vat, and the replies up to an Abort or the Return for `until` are
+ * compared. `opaque` compares only which exception reasons repeat, for
+ * a method whose own error text is the server's business. `known` marks
+ * a difference listed in the notes, printed without failing. */
+typedef struct {
+  const char *name;
+  vframe_t frames[3];
+  int nframes;
+  uint32_t until;
+  int opaque;
+  int known;
+} vscenario_t;
+
+static const vscenario_t vat_diffs[] = {
+    {"call to an unknown export",
+     {{VF_CALL, 1, VT_IMPORT, 99, 0, 0, 0}}, 1, 1, 0, 0},
+    {"call pipelined on a missing answer",
+     {{VF_CALL, 1, VT_PROMISED, 50, 0, 0, 0}}, 1, 1, 0, 0},
+    {"call pipelined on the bootstrap answer",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 0}}, 1, 1, 0, 0},
+    {"call pipelined on a finished answer",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0}}, 3, 2, 0, 0},
+    {"call pipelined on a failed answer",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0}}, 2, 2, 1, 0},
+    {"call with a null target",
+     {{VF_CALL, 1, VT_NULL, 0, 0, 0, 0}}, 1, 1, 0, 0},
+    {"call with an unknown target arm",
+     {{VF_CALL, 1, VT_UNKNOWN, 0, 0, 0, 0}}, 1, 1, 0, 0},
+    {"sendResultsTo.thirdParty",
+     {{VF_CALL, 1, VT_IMPORT, 0, 2, 0, 0}}, 1, 1, 0, 0},
+    {"sendResultsTo unknown arm",
+     {{VF_CALL, 1, VT_IMPORT, 0, 7, 0, 0}}, 1, 1, 0, 0},
+    {"call reusing an active question",
+     {{VF_CALL, 0, VT_IMPORT, 0, 0, 0, 0}}, 1, 99, 0, 0},
+    {"call with results sent to yourself reusing an active question",
+     {{VF_CALL, 0, VT_IMPORT, 0, 1, 0, 0}}, 1, 99, 0, 0},
+    {"call on a null promisedAnswer",
+     {{VF_CALL, 1, VT_PROMISED, NULL_ANSWER, 0, 0, 0}}, 1, 1, 0, 0},
+    {"bootstrap reusing an active question",
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0}}, 1, 0, 0, 0},
+    {"bootstrap with deprecatedObjectId",
+     {{VF_BOOT, 1, 0, 0, 0, 0, 1}}, 1, 1, 0, 0},
+    {"Finish for an unknown question",
+     {{VF_FINISH, 33, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Return for an unknown question",
+     {{VF_RETURN, 5, 0, 0, 0, 0, 0}}, 1, 5, 0, 0},
+};
+#define N_VAT_DIFFS (sizeof vat_diffs / sizeof vat_diffs[0])
+
+/* Method 0 adds; any other method fails, as an unknown one does in C++. */
+static int vd_dispatch(void *server, uint64_t interface_id, uint16_t method_id,
+                       const capnp_ptr_t *params, const capnp_bptr_t *results) {
+  if (method_id != 0)
+    return CAPNP_ERR_ARG;
+  return adder_dispatch(server, interface_id, method_id, params, results);
+}
+
+static int build_target(const capnp_bptr_t *call, const vframe_t *f) {
+  capnp_bptr_t slot, target, pa;
+  if (f->target == VT_NULL)
+    return 0;
+  if (capnp_builder_slot(call, 3, 0, &slot) ||
+      capnp_builder_struct(&slot, 1, 1, &target))
+    return -1;
+  switch (f->target) {
+  case VT_IMPORT:
+    return capnp_builder_set_u32(&target, 0, f->tval);
+  case VT_PROMISED:
+    /* A `tval` of NULL_ANSWER leaves the promisedAnswer null. */
+    if (f->tval == NULL_ANSWER)
+      return capnp_builder_set_u16(&target, 4, 1);
+    return capnp_builder_set_u16(&target, 4, 1) ||
+           capnp_builder_slot(&target, 1, 0, &slot) ||
+           capnp_builder_struct(&slot, 1, 1, &pa) ||
+           capnp_builder_set_u32(&pa, 0, f->tval);
+  default:
+    return capnp_builder_set_u16(&target, 4, 2);
+  }
+}
+
+static int build_vcall(const capnp_bptr_t *slot0, const vframe_t *f) {
+  capnp_bptr_t call, slot, payload, content;
+  return capnp_builder_struct(slot0, 3, 3, &call) ||
+         capnp_builder_set_u32(&call, 0, f->qid) ||
+         capnp_builder_set_u16(&call, 4, f->method) ||
+         capnp_builder_set_u16(&call, 6, f->send_to) ||
+         capnp_builder_set_u64(&call, 8, ADDER_IFACE) ||
+         build_target(&call, f) ||
+         capnp_builder_slot(&call, 3, 1, &slot) ||
+         capnp_builder_struct(&slot, 0, 2, &payload) ||
+         capnp_builder_slot(&payload, 0, 0, &slot) ||
+         capnp_builder_struct(&slot, 2, 0, &content) ||
+         capnp_builder_set_u64(&content, 0, 20) ||
+         capnp_builder_set_u64(&content, 8, 22);
+}
+
+static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, body, inner;
+  int rc;
+  if (f->kind == VF_RETURN)
+    return build_return(f->qid, 0, 0, out, len);
+  capnp_builder_init(&b);
+  rc = capnp_builder_root(&b, &root) ||
+       capnp_builder_struct(&root, 1, 1, &msg) ||
+       capnp_builder_slot(&msg, 1, 0, &slot);
+  if (rc == 0) {
+    switch (f->kind) {
+    case VF_BOOT:
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_BOOTSTRAP) ||
+           capnp_builder_struct(&slot, 1, 1, &body) ||
+           capnp_builder_set_u32(&body, 0, f->qid);
+      if (rc == 0 && f->count)
+        rc = capnp_builder_slot(&body, 1, 0, &slot) ||
+             capnp_builder_struct(&slot, 1, 0, &inner) ||
+             capnp_builder_set_u32(&inner, 0, f->count);
+      break;
+    case VF_CALL:
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_CALL) ||
+           build_vcall(&slot, f);
+      break;
+    case VF_RELEASE:
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RELEASE) ||
+           capnp_builder_struct(&slot, 1, 0, &body) ||
+           capnp_builder_set_u32(&body, 0, f->qid) ||
+           capnp_builder_set_u32(&body, 4, f->count);
+      break;
+    case VF_UNIMPL:
+      /* Unimplemented carries the refused message: a Call here. */
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_UNIMPLEMENTED) ||
+           capnp_builder_struct(&slot, 1, 1, &inner) ||
+           capnp_builder_set_u16(&inner, 0, CAPNP_RPC_MSG_CALL) ||
+           capnp_builder_slot(&inner, 1, 0, &slot) || build_vcall(&slot, f);
+      break;
+    default:
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_FINISH) ||
+           capnp_builder_struct(&slot, 1, 0, &body) ||
+           capnp_builder_set_u32(&body, 0, f->qid);
+      break;
+    }
+  }
+  if (rc == 0)
+    rc = capnp_builder_serialize(&b, out, len);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+/* Append one reply to `out`; 1 when it ends the exchange. */
+static int describe_reply(const uint8_t *frame, size_t n, uint32_t until,
+                          char *out, size_t cap) {
+  capnp_message_t m = {0};
+  capnp_ptr_t root, body, p, content;
+  char ev[320];
+  const char *text = NULL;
+  size_t tn = 0;
+  int end = 0;
+  uint16_t tag;
+  snprintf(ev, sizeof ev, "unreadable");
+  if (capnp_message_from_flat(&m, frame, n) == CAPNP_OK &&
+      capnp_root(&m, &root) == CAPNP_OK) {
+    tag = capnp_get_u16(&root, 0, 0);
+    if (capnp_getp(&root, 0, &body) != CAPNP_OK)
+      memset(&body, 0, sizeof body);
+    if (tag == CAPNP_RPC_MSG_ABORT) {
+      if (capnp_get_text(&body, 0, &text, &tn) != CAPNP_OK || text == NULL)
+        tn = 0;
+      snprintf(ev, sizeof ev, "abort: %.*s", (int)tn, tn ? text : "");
+      end = 1;
+    } else if (tag == CAPNP_RPC_MSG_RETURN) {
+      uint32_t aid = capnp_get_u32(&body, 0, 0);
+      uint16_t arm = capnp_get_u16(&body, 6, 0);
+      if (arm == 0) {
+        long long sum = -1;
+        if (capnp_getp(&body, 0, &p) == CAPNP_OK &&
+            capnp_getp(&p, 0, &content) == CAPNP_OK &&
+            content.kind == CAPNP_PK_STRUCT)
+          sum = (long long)capnp_get_u64(&content, 0, 0);
+        snprintf(ev, sizeof ev, "return %u results %lld", (unsigned)aid,
+                 sum);
+      } else if (arm == 1) {
+        if (capnp_getp(&body, 0, &p) != CAPNP_OK ||
+            capnp_get_text(&p, 0, &text, &tn) != CAPNP_OK || text == NULL)
+          tn = 0;
+        snprintf(ev, sizeof ev, "return %u exception: %.*s", (unsigned)aid,
+                 (int)tn, tn ? text : "");
+      } else {
+        snprintf(ev, sizeof ev, "return %u arm %u", (unsigned)aid,
+                 (unsigned)arm);
+      }
+      end = aid == until;
+    } else {
+      snprintf(ev, sizeof ev, "message %u", (unsigned)tag);
+    }
+  }
+  capnp_message_free(&m);
+  if (out[0] && strlen(out) + 2 < cap)
+    strcat(out, " | ");
+  strncat(out, ev, cap - strlen(out) - 1);
+  return end;
+}
+
+/* Replace each distinct exception reason with R1, R2, ... in order. */
+static void opaque_reasons(char *s) {
+  char seen[4][256];
+  int nseen = 0;
+  char out[1024] = "";
+  char *p = s;
+  for (;;) {
+    char *e = strstr(p, "exception: "), *stop;
+    size_t len;
+    int k;
+    if (e == NULL) {
+      strncat(out, p, sizeof out - strlen(out) - 1);
+      break;
+    }
+    e += strlen("exception: ");
+    strncat(out, p, (size_t)(e - p) < sizeof out - strlen(out) - 1
+                        ? (size_t)(e - p)
+                        : sizeof out - strlen(out) - 1);
+    stop = strstr(e, " | ");
+    len = stop ? (size_t)(stop - e) : strlen(e);
+    if (len > 255)
+      len = 255;
+    for (k = 0; k < nseen; k++)
+      if (strlen(seen[k]) == len && memcmp(seen[k], e, len) == 0)
+        break;
+    if (k == nseen && nseen < 4) {
+      memcpy(seen[nseen], e, len);
+      seen[nseen][len] = 0;
+      nseen++;
+    }
+    {
+      char tok[16];
+      snprintf(tok, sizeof tok, "R%d", k + 1);
+      strncat(out, tok, sizeof out - strlen(out) - 1);
+    }
+    p = e + (stop ? (size_t)(stop - e) : strlen(e));
+  }
+  strcpy(s, out);
+}
+
+#define VD_MAX_SENT 16
+static uint8_t *g_vd_sent[VD_MAX_SENT];
+static size_t g_vd_len[VD_MAX_SENT];
+static int g_vd_n;
+
+static int vd_capture(void *ctx, const uint8_t *data, size_t len) {
+  (void)ctx;
+  if (g_vd_n >= VD_MAX_SENT)
+    return 0;
+  g_vd_sent[g_vd_n] = (uint8_t *)malloc(len);
+  if (g_vd_sent[g_vd_n] == NULL)
+    return -1;
+  memcpy(g_vd_sent[g_vd_n], data, len);
+  g_vd_len[g_vd_n++] = len;
+  return 0;
+}
+
+static void vd_clear(void) {
+  while (g_vd_n > 0)
+    free(g_vd_sent[--g_vd_n]);
+}
+
+static void vd_local(const vscenario_t *s, char *out, size_t cap) {
+  static capnp_rpc_conn_t c;
+  uint8_t *f = NULL;
+  size_t n = 0;
+  int i, end = 0;
+  vframe_t boot = {VF_BOOT, 0, 0, 0, 0, 0, 0};
+  out[0] = 0;
+  capnp_rpc_init(&c, vd_capture, NULL);
+  capnp_rpc_set_bootstrap(&c, &g_server_obj, vd_dispatch);
+  if (build_vframe(&boot, &f, &n) == 0)
+    (void)capnp_rpc_handle(&c, f, n);
+  free(f);
+  vd_clear();
+  for (i = 0; i < s->nframes; i++) {
+    f = NULL;
+    if (build_vframe(&s->frames[i], &f, &n) == 0)
+      (void)capnp_rpc_handle(&c, f, n);
+    free(f);
+  }
+  for (i = 0; i < g_vd_n && !end; i++)
+    end = describe_reply(g_vd_sent[i], g_vd_len[i], s->until, out, cap);
+  if (!end)
+    strncat(out, out[0] ? " | no end" : "no end", cap - strlen(out) - 1);
+  vd_clear();
+  capnp_rpc_free(&c);
+}
+
+static int vd_read(int fd, uint8_t **frame, size_t *n) {
+  struct pollfd p;
+  p.fd = fd;
+  p.events = POLLIN;
+  if (poll(&p, 1, 1500) <= 0)
+    return -1;
+  return capnp_read_frame_alloc(fd, frame, n) == CAPNP_OK ? 0 : -2;
+}
+
+static void vd_remote(uint16_t port, const vscenario_t *s, char *out,
+                      size_t cap) {
+  struct sockaddr_in addr;
+  uint8_t *f = NULL;
+  size_t n = 0;
+  int fd, i, end = 0, got_boot = 0;
+  vframe_t boot = {VF_BOOT, 0, 0, 0, 0, 0, 0};
+  out[0] = 0;
+  fd = socket(AF_INET, SOCK_STREAM, 0);
+  memset(&addr, 0, sizeof addr);
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  addr.sin_addr.s_addr = htonl(0x7f000001);
+  if (fd < 0 || connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
+    snprintf(out, cap, "connect failed");
+    if (fd >= 0)
+      close(fd);
+    return;
+  }
+  if (build_vframe(&boot, &f, &n) == 0)
+    (void)capnp_write_all(fd, f, n);
+  free(f);
+  while (!got_boot) {
+    char tmp[320] = "";
+    f = NULL;
+    if (vd_read(fd, &f, &n) != 0) {
+      snprintf(out, cap, "no bootstrap Return");
+      close(fd);
+      return;
+    }
+    got_boot = describe_reply(f, n, 0, tmp, sizeof tmp);
+    free(f);
+  }
+  for (i = 0; i < s->nframes; i++) {
+    f = NULL;
+    if (build_vframe(&s->frames[i], &f, &n) == 0)
+      (void)capnp_write_all(fd, f, n);
+    free(f);
+  }
+  while (!end) {
+    int r;
+    f = NULL;
+    r = vd_read(fd, &f, &n);
+    if (r != 0) {
+      const char *why = r == -1 ? "no end" : "closed";
+      if (out[0])
+        strncat(out, " | ", cap - strlen(out) - 1);
+      strncat(out, why, cap - strlen(out) - 1);
+      break;
+    }
+    end = describe_reply(f, n, s->until, out, cap);
+    free(f);
+  }
+  close(fd);
+}
+
+/* `vat-diff <port>`: each scenario against `rpc_peer_server <port>` and
+ * against this vat, printing both outcomes. */
+static int vat_diff(uint16_t port) {
+  size_t i;
+  int failed = 0;
+  for (i = 0; i < N_VAT_DIFFS; i++) {
+    char cpp[1024], ours[1024];
+    vd_remote(port, &vat_diffs[i], cpp, sizeof cpp);
+    vd_local(&vat_diffs[i], ours, sizeof ours);
+    if (vat_diffs[i].opaque) {
+      opaque_reasons(cpp);
+      opaque_reasons(ours);
+    }
+    if (strcmp(cpp, ours) == 0) {
+      printf("same %s: %s\n", vat_diffs[i].name, cpp);
+    } else if (vat_diffs[i].known) {
+      printf("known difference %s: capnp-C++ \"%s\", this vat \"%s\"\n",
+             vat_diffs[i].name, cpp, ours);
+    } else {
+      fprintf(stderr, "FAIL %s: capnp-C++ \"%s\", this vat \"%s\"\n",
+              vat_diffs[i].name, cpp, ours);
+      failed++;
+    }
+  }
+  return failed != 0;
+}
+
 int main(int argc, char **argv) {
   if (argc >= 3 && strcmp(argv[1], "dial") == 0)
     return dial_peer((uint16_t)atoi(argv[2]));
@@ -1010,6 +1418,8 @@ int main(int argc, char **argv) {
     return serve_peer((uint16_t)atoi(argv[2]));
   if (argc >= 3 && strcmp(argv[1], "bad-return") == 0)
     return serve_bad_returns((uint16_t)atoi(argv[2]));
+  if (argc >= 3 && strcmp(argv[1], "vat-diff") == 0)
+    return vat_diff((uint16_t)atoi(argv[2]));
   test_ipv4_literal();
   test_frame_little_endian();
   test_frame_segment_limit();

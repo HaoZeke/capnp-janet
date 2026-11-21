@@ -264,12 +264,40 @@ int main(void)
   }
   CHECK(doubler_calls == 1, "one dispatch");
 
-  /* A call the vat cannot route comes back failed, not silent. */
+  /* A call to an export the vat does not have aborts, as rpc.c++ does,
+   * and so does a sendResultsTo arm other than caller and yourself. */
   q = capnp_rpc_send_call(&client, 99, 0, 0, 1, 1, NULL, NULL);
   pump(&vat, &g_to_vat);
+  CHECK(sent_abort(&g_to_client, "Message target is not a current export ID."),
+        "unroutable call aborts");
+  {
+    capnp_builder_t b;
+    capnp_bptr_t root, msg, slot, call, target;
+    uint8_t *flat = NULL;
+    size_t len = 0;
+    capnp_builder_init(&b);
+    CHECK(capnp_builder_root(&b, &root) == CAPNP_OK &&
+              capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK &&
+              capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_CALL) == CAPNP_OK &&
+              capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK &&
+              capnp_builder_struct(&slot, 3, 3, &call) == CAPNP_OK &&
+              capnp_builder_set_u32(&call, 0, 500) == CAPNP_OK &&
+              capnp_builder_set_u16(&call, 6, 2) == CAPNP_OK &&
+              capnp_builder_slot(&call, 3, 0, &slot) == CAPNP_OK &&
+              capnp_builder_struct(&slot, 1, 1, &target) == CAPNP_OK &&
+              capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK,
+          "thirdParty call built");
+    CHECK(capnp_rpc_handle(&vat, flat, len) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_client, "Unsupported `Call.sendResultsTo`."),
+          "sendResultsTo.thirdParty aborts");
+    free(flat);
+    capnp_builder_free(&b);
+  }
+  q = capnp_rpc_send_call(&client, 0, 0x1234, 1, 1, 1, fill_u32, &arg);
+  pump(&vat, &g_to_vat);
   pump(&client, &g_to_client);
-  CHECK(capnp_rpc_is_answered(&client, q), "unroutable call answered");
-  CHECK(capnp_rpc_is_failed(&client, q), "unroutable call failed");
+  CHECK(capnp_rpc_is_answered(&client, q) && !capnp_rpc_is_failed(&client, q),
+        "vat still answers after refusing");
 
   /* A method that fails is answered with an exception. */
   doubler_fail_from = doubler_calls + 1;

@@ -236,7 +236,9 @@ CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
  * connection: every unanswered question fails and nothing is sent back.
  * A Return that rpc.c++ refuses, including one naming no question we
  * hold, also ends it with CAPNP_ERR_KIND, after an Abort carrying the
- * rpc.c++ reason. */
+ * rpc.c++ reason. So does a Call or Bootstrap rpc.c++ refuses: one
+ * naming an export we lack, an unknown target or sendResultsTo arm, or
+ * a question id still in use. */
 CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
 
 /* --- client side -------------------------------------------------- */
