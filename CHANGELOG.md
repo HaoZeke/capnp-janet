@@ -30,6 +30,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- The text decoder rejects single-quoted strings, which the capnp lexer
+  does not know. They used to decode like double-quoted ones.
 - The JSON decoder reads any value as `Void`, in fields, lists and union
   members, as `JsonCodec` does. Only `null` used to be accepted.
 - JSON `\u` escapes decode one unit at a time, as `JsonCodec` does, so

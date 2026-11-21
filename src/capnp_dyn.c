@@ -3994,7 +3994,7 @@ static int op_ends(const scan_t *sc) {
 static int parse_text_quoted_one(scan_t *sc, buf_t *b) {
   char q;
   tskip(sc);
-  if (sc->i >= sc->n || (sc->s[sc->i] != '"' && sc->s[sc->i] != '\''))
+  if (sc->i >= sc->n || sc->s[sc->i] != '"')
     return -1;
   q = sc->s[sc->i++];
   while (sc->i < sc->n && sc->s[sc->i] != q) {
@@ -4370,11 +4370,11 @@ static vnode_t *parse_text_expr(scan_t *sc) {
       sc->s[sc->i + 2] == '"') {
     return parse_text_hex_binary(sc);
   }
-  if (c == '"' || c == '\'') {
+  if (c == '"') {
     buf_t b;
     vnode_t *v;
     memset(&b, 0, sizeof(b));
-    while (tpeek(sc) == '"' || tpeek(sc) == '\'') {
+    while (tpeek(sc) == '"') {
       if (parse_text_quoted_one(sc, &b)) {
         free(b.data);
         return NULL;

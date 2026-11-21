@@ -259,6 +259,15 @@ for v in '(vI32 =-5)' '(vI32 =- 5)' '(vF64 =-inf)' '(vF64 =.5)' '(vI32 =+5)' \
   compare "text-operator-$((i++))" "$PARITY" Parity "text binary"
 done
 
+# The capnp lexer has no single-quoted strings, so the run stops there.
+full=1
+for v in "(vText = 'a')" "(vText = \"a\" 'b')" "(lText = ['x'])" \
+  "(vText = \"it's\") # it's"; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-quote-$((i++))" "$PARITY" Parity "text binary"
+done
+full=0
+
 # kj parses integer literals modulo 2^64.
 for v in '(vU64 = 99999999999999999999)' '(vU64 = 18446744073709551616)' \
   '(vU64 = 0x1ffffffffffffffff)' '(vU64 = 02777777777777777777777)' \
