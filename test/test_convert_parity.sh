@@ -28,9 +28,10 @@ EOF
 }
 
 # compare NAME SCHEMA ROOT FORMATS: converts $TMP/in.bin from $in_fmt with
-# "${extra[@]}"
+# "${extra[@]}". With full=1 the output has to match on failure too.
 extra=()
 in_fmt=binary
+full=0
 compare() {
   local name="$1" schema="$2" root="$3" fmts="$4" fmt ref_rc our_rc
   for fmt in $fmts; do
@@ -43,7 +44,8 @@ compare() {
     if [[ $((ref_rc == 0)) -ne $((our_rc == 0)) ]]; then
       echo "FAIL $name $fmt: status capnp=$ref_rc capnp-eval=$our_rc" >&2
       fails=$((fails + 1))
-    elif [[ $ref_rc -eq 0 ]] && ! cmp -s "$TMP/ref.out" "$TMP/our.out"; then
+    elif [[ $ref_rc -eq 0 || $full -eq 1 ]] &&
+      ! cmp -s "$TMP/ref.out" "$TMP/our.out"; then
       echo "FAIL $name $fmt: output differs" >&2
       fails=$((fails + 1))
     fi
@@ -243,6 +245,32 @@ out = open(sys.argv[1], "wb")
 out.write(struct.pack("<II", 0, len(w)) + b"".join(struct.pack("<Q", x) for x in w))
 EOF
 compare amplified-reads "$NODE" Node "binary"
+
+# Without --quiet, `capnp` refuses empty input and input whose first
+# bytes cannot be in the format; implausible input only warns.
+full=1
+: >"$TMP/in.bin"
+for in_fmt in binary packed flat flat-packed canonical text json; do
+  extra=()
+  compare "empty-$in_fmt" "$PARITY" Parity "text binary"
+  extra=(--quiet)
+  compare "empty-quiet-$in_fmt" "$PARITY" Parity "text binary"
+done
+extra=()
+i=0
+for spec in binary:0000010001000000 binary:0000000001000000fffffffe00000000 \
+  binary:0000000001000000ffffffff00000000 packed:0100 packed:1f010203040500 \
+  flat:0300000000000000 flat:0100000000000000 flat-packed:0300 \
+  canonical:0200000001000000 text:20410a28 text:0a2328612c0a2900 \
+  text:280128 json:7b0122 json:41 json:2f2f0a41 json:7b7d text:2829 \
+  flat:ffffff7f00000000; do
+  in_fmt=${spec%%:*}
+  python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.argv[1]))' \
+    "${spec#*:}" >"$TMP/in.bin"
+  compare "plausible-$((i++))" "$PARITY" Parity "text"
+done
+full=0
+in_fmt=binary
 
 if [[ $fails -ne 0 ]]; then
   echo "convert parity: $fails failure(s)" >&2

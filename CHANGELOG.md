@@ -30,6 +30,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp-eval` refuses empty input, and input whose first bytes cannot be
+  in the source format, unless `--quiet` is given, as `capnp` does. Empty
+  input used to succeed with no output.
 - Text and JSON float literals have no length limit. Literals of 128
   characters or more used to fail to parse.
 - The builder emits any number of segments, like `MallocMessageBuilder`.

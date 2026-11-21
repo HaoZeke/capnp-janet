@@ -617,6 +617,137 @@ static int next_delimited_chunk(const char *s, size_t n, size_t *pos, int json,
   return 1;
 }
 
+/* The IMPOSSIBLE verdicts of checkPlausibility in capnp.c++, which
+ * refuses such input before reading it. Its other verdicts only warn. */
+static int flat_impossible(const uint8_t *p, size_t n, uint32_t nsegs) {
+  if (n < 8)
+    return 0;
+  if ((p[0] & 3) == 2) {
+    uint32_t seg = capnp_load_le32(p + 4);
+    return seg == 0 || seg >= nsegs;
+  }
+  if ((p[0] & 3) != 0)
+    return 1;
+  if (p[3] & 0x80)
+    return !(p[0] == 0xff && p[1] == 0xff && p[2] == 0xff && p[3] == 0xff &&
+             capnp_load_le32(p + 4) == 0);
+  return 0;
+}
+
+static int binary_impossible(const uint8_t *p, size_t n) {
+  uint32_t count, off;
+  if (n < 8)
+    return 0;
+  count = capnp_load_le32(p) + 1u;
+  if (count > 65536u)
+    return 1;
+  if (count > 256u || capnp_load_le32(p + 4) > (1u << 27))
+    return 0;
+  off = 4u + count * 4u;
+  if (off % 8u)
+    off += 4u;
+  if (n < (size_t)off + 8u)
+    return 0;
+  return flat_impossible(p + off, n - off, count);
+}
+
+/* The checks read at most 1040 unpacked bytes, so only the length past
+ * this buffer is kept. */
+static void put_unpacked(uint8_t *out, size_t *len, const uint8_t *src,
+                         size_t n) {
+  size_t room = *len < 2048 ? 2048 - *len : 0;
+  size_t k = n < room ? n : room;
+  if (src)
+    memcpy(out + *len, src, k);
+  else
+    memset(out + *len, 0, k);
+  *len += n;
+}
+
+static int packed_impossible(const uint8_t *p, size_t n, int flat) {
+  uint8_t out[2048];
+  size_t pos = 0, len = 0, end = n > 1024 ? 1024 : n;
+  while (pos < end) {
+    uint8_t tag = p[pos++];
+    unsigned i;
+    for (i = 0; i < 8 && pos < end; i++) {
+      if (tag & (1u << i)) {
+        if (p[pos] == 0)
+          return 1;
+        put_unpacked(out, &len, p + pos++, 1);
+      } else {
+        put_unpacked(out, &len, NULL, 1);
+      }
+    }
+    if (pos == end)
+      break;
+    if (tag == 0) {
+      put_unpacked(out, &len, NULL, (size_t)p[pos++] * 8u);
+    } else if (tag == 0xff) {
+      size_t count = (size_t)p[pos++] * 8u;
+      if (count > end - pos)
+        count = end - pos;
+      put_unpacked(out, &len, p + pos, count);
+      pos += count;
+    }
+  }
+  if (len > sizeof(out))
+    len = sizeof(out);
+  return flat ? flat_impossible(out, len, 1) : binary_impossible(out, len);
+}
+
+static int text_impossible(const uint8_t *p, size_t n, int json) {
+  enum { PREAMBLE, COMMENT, BODY } state = PREAMBLE;
+  size_t i;
+  for (i = 0; i < n; i++) {
+    uint8_t c = p[i];
+    if (state == PREAMBLE) {
+      if (c == (json ? '{' : '(')) {
+        state = BODY;
+        continue;
+      }
+      if (c == '#' || (json && c == '/')) {
+        state = COMMENT;
+        continue;
+      }
+      if (c != ' ' && c != '\n' && c != '\r' && c != '\t' && c != '\v')
+        return 1;
+    } else if (state == COMMENT) {
+      if (c == '\n') {
+        state = PREAMBLE;
+        continue;
+      }
+    } else if (c == '"' || (!json && c == '\'')) {
+      return 0;
+    }
+    /* The JSON check compares a signed char, so NUL and bytes from 0x80
+     * pass there. */
+    if (((json ? (c > 0 && c < 0x20) : c < 0x20) && c != '\n' && c != '\r' &&
+         c != '\t' && c != '\v') ||
+        c == 0x7f)
+      return 1;
+  }
+  return 0;
+}
+
+static int input_impossible(int fmt, const uint8_t *p, size_t n) {
+  if (n > 8192)
+    n = 8192;
+  switch (fmt) {
+  case FMT_BINARY:
+    return binary_impossible(p, n);
+  case FMT_PACKED:
+    return packed_impossible(p, n, 0);
+  case FMT_FLAT_PACKED:
+    return packed_impossible(p, n, 1);
+  case FMT_TEXT:
+  case FMT_JSON:
+    return text_impossible(p, n, fmt == FMT_JSON);
+  default:
+    return flat_impossible(p, n, 1);
+  }
+}
+
 /* `capnp` lifts the nesting and traversal limits for every conversion,
  * since it is a debugging tool. */
 static void lift_limits(capnp_message_t *m) {
@@ -625,13 +756,26 @@ static void lift_limits(capnp_message_t *m) {
 }
 
 static int run_convert(capnp_dyn_t *dyn, const char *type_name,
-                       int from_fmt, int to_fmt, int pretty, size_t seg_words) {
+                       int from_fmt, int to_fmt, int pretty, size_t seg_words,
+                       int quiet) {
   size_t in_len = 0;
   char *in_buf;
   capnp_dyn_set_max_depth(INT_MAX);
   in_buf = read_all(stdin, &in_len);
   if (!in_buf)
     return 1;
+  /* Without --quiet, `capnp` reads a first buffer to judge the format,
+   * so empty input is a premature end of file. */
+  if (!quiet && in_len == 0) {
+    fprintf(stderr, "capnp-eval: premature EOF\n");
+    free(in_buf);
+    return 1;
+  }
+  if (!quiet && input_impossible(from_fmt, (const uint8_t *)in_buf, in_len)) {
+    fprintf(stderr, "capnp-eval: the input is not in the requested format\n");
+    free(in_buf);
+    return 1;
+  }
   if (in_len == 0) {
     free(in_buf);
     return 0;
@@ -881,7 +1025,8 @@ int main(int argc, char **argv) {
         return 1;
       type_name = pos_args[3];
     }
-    rc = run_convert(dyn, type_name, from_fmt, to_fmt, pretty, seg_words);
+    rc = run_convert(dyn, type_name, from_fmt, to_fmt, pretty, seg_words,
+                     flag_quiet);
     capnp_dyn_free(dyn);
     return rc;
   }
@@ -896,7 +1041,8 @@ int main(int argc, char **argv) {
       return 1;
     if (compile_schema(pos_args[1], import_dirs, nimports, &dyn))
       return 1;
-    rc = run_convert(dyn, pos_args[2], from_fmt, FMT_TEXT, pretty, seg_words);
+    rc = run_convert(dyn, pos_args[2], from_fmt, FMT_TEXT, pretty, seg_words,
+                     flag_quiet);
     capnp_dyn_free(dyn);
     return rc;
   }
@@ -911,7 +1057,8 @@ int main(int argc, char **argv) {
       return 1;
     if (compile_schema(pos_args[1], import_dirs, nimports, &dyn))
       return 1;
-    rc = run_convert(dyn, pos_args[2], FMT_TEXT, to_fmt, pretty, seg_words);
+    rc = run_convert(dyn, pos_args[2], FMT_TEXT, to_fmt, pretty, seg_words,
+                     0);
     capnp_dyn_free(dyn);
     return rc;
   }
