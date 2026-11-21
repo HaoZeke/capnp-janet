@@ -112,6 +112,8 @@ Pre-1.0 minor releases may include breaking API changes.
 - A Call or Disembargo whose promisedAnswer transform has an op other
   than `noop` or `getPointerField` aborts with the rpc.c++ reason, on
   any answer. The op used to be skipped.
+- Finish sets `requireEarlyCancellationWorkaround` to false, as rpc.c++
+  does. It used to keep the schema default of true.
 - A Return naming a question id with the high bit set is ignored, as
   rpc.c++ keeps those ids for calls that want no Return. It used to
   abort as naming no question.

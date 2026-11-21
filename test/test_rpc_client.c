@@ -429,6 +429,25 @@ static int frame_abort(queue_t *q, int i, const char *reason, uint16_t type)
   return ok;
 }
 
+/* Finish.requireEarlyCancellationWorkaround of frame `i`, or -1 when
+ * frame `i` is no Finish. The field defaults to true, so the wire bit is
+ * its complement. */
+#define FINISH_WORKAROUND_BIT 33
+static int frame_finish_workaround(queue_t *q, int i)
+{
+  capnp_message_t m = {0};
+  capnp_ptr_t r, fin;
+  int bit = -1;
+  if (i < q->tail &&
+      capnp_message_from_flat(&m, q->data[i], q->len[i]) == CAPNP_OK &&
+      capnp_root(&m, &r) == CAPNP_OK &&
+      capnp_get_u16(&r, 0, 0) == CAPNP_RPC_MSG_FINISH &&
+      capnp_getp(&r, 0, &fin) == CAPNP_OK)
+    bit = !capnp_get_bool(&fin, FINISH_WORKAROUND_BIT, 0);
+  capnp_message_free(&m);
+  return bit;
+}
+
 /* The one frame queued is such an Abort. */
 static int sent_abort_typed(queue_t *q, const char *reason, uint16_t type)
 {
@@ -957,6 +976,8 @@ int main(void)
     CHECK(capnp_rpc_send_finish(&client, qf) == CAPNP_OK &&
               g_to_vat.tail == 1,
           "results with a capability are finished");
+    CHECK(frame_finish_workaround(&g_to_vat, 0) == 0,
+          "Finish clears requireEarlyCancellationWorkaround");
     pump(&vat, &g_to_vat);
   }
 

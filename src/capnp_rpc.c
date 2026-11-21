@@ -107,6 +107,8 @@ enum { KEEP_SEND, KEEP_REDIRECT, KEEP_QUIET };
 #define FINISH_PW 0
 /* Finish.releaseResultCaps, stored XOR its default of true. */
 #define FINISH_RELEASE_CAPS_BIT 32
+/* Finish.requireEarlyCancellationWorkaround, also stored XOR true. */
+#define FINISH_WORKAROUND_BIT 33
 /* Return.releaseParamCaps, stored inverted: its default is true. */
 #define RETURN_RELEASE_PARAMS_BIT 32
 #define RETURN_NO_FINISH_BIT 33
@@ -2421,6 +2423,9 @@ int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id)
    * them. */
   if (rc == CAPNP_OK && keep_caps)
     rc = capnp_builder_set_bool(&fin, FINISH_RELEASE_CAPS_BIT, 1);
+  /* rpc.c++ sets requireEarlyCancellationWorkaround to false. */
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_bool(&fin, FINISH_WORKAROUND_BIT, 1);
   if (rc == CAPNP_OK)
     rc = flush(c, &b);
   capnp_builder_free(&b);
