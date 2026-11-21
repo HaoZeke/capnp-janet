@@ -7,6 +7,8 @@
 
 #include <capnp-janet/capnp_rpc.h>
 
+#include "capnp_internal.h"
+
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -65,6 +67,7 @@ enum { KEEP_SEND, KEEP_REDIRECT, KEEP_QUIET };
 #define EXCEPTION_PW 2
 #define EXCEPTION_TYPE_OFF 4
 #define EXCEPTION_TYPE_FAILED 0
+#define EXCEPTION_TYPE_DISCONNECTED 2
 /* MessageTarget: importedCap @0 (u32), union tag at byte 4. */
 #define TARGET_IMPORTEDCAP_OFF 0
 #define TARGET_TAG_OFF 4
@@ -262,6 +265,7 @@ typedef struct rpc_side {
   uint64_t next_key;
   rpc_hold_t *holds;
   size_t nholds, cholds;
+  capnp_rpc_inbuf_t in;
 } rpc_side_t;
 
 static pthread_mutex_t side_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -300,8 +304,22 @@ static void side_drop(const capnp_rpc_conn_t *c)
   if (s != NULL) {
     free(s->imports);
     free(s->holds);
+    free(s->in.data);
   }
   free(s);
+}
+
+capnp_rpc_inbuf_t *capnp_rpc_inbuf(const capnp_rpc_conn_t *c)
+{
+  rpc_side_t *s = side_get(c, 1);
+  if (s == NULL)
+    return NULL;
+  if (s->in.data == NULL) {
+    s->in.data = (uint8_t *)malloc(CAPNP_RPC_INBUF_WORDS * CAPNP_WORD_BYTES);
+    if (s->in.data == NULL)
+      return NULL;
+  }
+  return &s->in;
 }
 
 static rpc_import_t *import_find(rpc_side_t *s, uint32_t id)
@@ -1045,7 +1063,8 @@ static int answer_exception(capnp_rpc_conn_t *c, uint32_t qid,
 
 /* Abort with rpc.c++'s reason for refusing a message: the connection is
  * over, so every unanswered question fails. */
-static int protocol_abort(capnp_rpc_conn_t *c, const char *reason)
+static int protocol_abort_typed(capnp_rpc_conn_t *c, uint16_t type,
+                                const char *reason)
 {
   capnp_builder_t b;
   capnp_bptr_t root, msg;
@@ -1057,11 +1076,26 @@ static int protocol_abort(capnp_rpc_conn_t *c, const char *reason)
       capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK &&
       capnp_builder_set_u16(&msg, MESSAGE_TAG_OFF, CAPNP_RPC_MSG_ABORT) ==
           CAPNP_OK &&
-      write_exception(&msg, MESSAGE_DW, 0, reason) == CAPNP_OK)
+      write_exception_typed(&msg, MESSAGE_DW, 0, reason, strlen(reason),
+                            type) == CAPNP_OK)
     (void)flush(c, &b);
   capnp_builder_free(&b);
   questions_fail_all(c);
   return CAPNP_ERR_KIND;
+}
+
+static int protocol_abort(capnp_rpc_conn_t *c, const char *reason)
+{
+  return protocol_abort_typed(c, EXCEPTION_TYPE_FAILED, reason);
+}
+
+int capnp_rpc_abort_typed(capnp_rpc_conn_t *c, uint16_t type,
+                          const char *reason)
+{
+  rpc_side_t *s = side_get(c, 0);
+  if (s != NULL && s->aborted)
+    return CAPNP_ERR_KIND;
+  return protocol_abort_typed(c, type, reason);
 }
 
 #define REMOTE_PREFIX "remote exception: "

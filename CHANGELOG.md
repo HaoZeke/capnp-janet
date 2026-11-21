@@ -48,6 +48,10 @@ Pre-1.0 minor releases may include breaking API changes.
 - `capnp_rpc_fail` and `capnp_rpc_unimplemented` let a dispatch function
   choose the exception a failing method is answered with, and Janet
   handlers can call `capnp/rpc-fail`.
+- `capnp_rpc_recv_fd` reads and handles one frame from a socket the way
+  C++ BufferedMessageStream reads it. `capnp_link_recv` and
+  `capnp/rpc-recv` use it, so an ended stream or a frame C++ refuses is
+  answered with the Abort rpc.c++ sends.
 
 ### Fixed
 

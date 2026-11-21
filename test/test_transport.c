@@ -694,6 +694,75 @@ static void test_frame_alloc_limit(void) {
   }
 }
 
+/* Sends `n` bytes to a link vat and closes the stream. `out` gets
+ * "type reason" of the one Abort the vat sends back, or "" for none. */
+static void link_abort_for(const uint8_t *in, size_t n, char *out,
+                           size_t cap) {
+  capnp_link_t *link = (capnp_link_t *)calloc(1, sizeof(*link));
+  static uint8_t back[4096];
+  capnp_message_t m = {0};
+  capnp_ptr_t root, exc;
+  const char *text = NULL;
+  size_t got = 0, tn = 0;
+  ssize_t r;
+  int sv[2];
+  out[0] = 0;
+  if (!link || socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+    free(link);
+    return;
+  }
+  capnp_link_from_fd(link, sv[1]);
+  capnp_rpc_set_bootstrap(&link->conn, &g_server_obj, adder_dispatch);
+  if (n)
+    capnp_write_all(sv[0], in, n);
+  shutdown(sv[0], SHUT_WR);
+  while (capnp_link_recv(link) == CAPNP_OK)
+    ;
+  capnp_link_close(link);
+  free(link);
+  while ((r = read(sv[0], back + got, sizeof(back) - got)) > 0)
+    got += (size_t)r;
+  close(sv[0]);
+  if (got && capnp_message_from_flat(&m, back, got) == CAPNP_OK &&
+      capnp_root(&m, &root) == CAPNP_OK &&
+      capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_ABORT &&
+      capnp_getp(&root, 0, &exc) == CAPNP_OK &&
+      capnp_get_text(&exc, 0, &text, &tn) == CAPNP_OK && tn + 3 < cap)
+    snprintf(out, cap, "%u %.*s", (unsigned)capnp_get_u16(&exc, 4, 0),
+             (int)tn, text);
+  capnp_message_free(&m);
+}
+
+/* rpc.c++ answers a stream that ends, or a frame its reader refuses,
+ * with an Abort: type 2 is disconnected, 0 failed. */
+static void test_link_framing_aborts(void) {
+  static const struct {
+    uint8_t in[24];
+    size_t n;
+    const char *want;
+  } cases[] = {
+      {{0}, 0, "2 Peer disconnected."},
+      {{0, 0, 0}, 3, "2 stream disconnected prematurely"},
+      {{0, 0, 0, 0, 2, 0, 0, 0, 0, 0}, 10,
+       "2 stream disconnected prematurely"},
+      {{0, 0, 0, 0, 0, 0, 0x88, 0}, 8,
+       "0 expected expectedSizeInWords <= options.traversalLimitInWords "
+       "[8912897 <= 8388608]; incoming RPC message exceeds size limit"},
+      {{0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0}, 8,
+       "0 expected segmentCount != 0 [0 != 0]; Message segment count too "
+       "large, caused overflow."},
+  };
+  char got[512];
+  size_t i;
+  for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+    link_abort_for(cases[i].in, cases[i].n, got, sizeof got);
+    if (strcmp(got, cases[i].want) != 0) {
+      fprintf(stderr, "FAIL framing abort %zu: got \"%s\"\n", i, got);
+      g_fail++;
+    }
+  }
+}
+
 static uint8_t g_boot[256];
 static size_t g_boot_len;
 
@@ -2011,6 +2080,7 @@ int main(int argc, char **argv) {
   test_frame_little_endian();
   test_frame_segment_limit();
   test_frame_alloc_limit();
+  test_link_framing_aborts();
   test_bootstrap_frame_little_endian();
   test_size_to_i32();
   test_write_pipe();

@@ -86,4 +86,22 @@ CAPNP_JANET_HIDDEN int capnp_canonicalize_recover(const capnp_ptr_t *root,
                                                   uint8_t **out,
                                                   size_t *out_len, int *soft);
 
+/* Bytes read ahead of the frame being handled, as C++
+ * BufferedMessageStream buffers them: `data[begin..end)` is unread. */
+#define CAPNP_RPC_INBUF_WORDS 8192u
+typedef struct {
+  uint8_t *data;
+  size_t begin, end;
+} capnp_rpc_inbuf_t;
+
+struct capnp_rpc_conn;
+/* The read-ahead buffer of a connection, NULL when out of memory. */
+CAPNP_JANET_HIDDEN capnp_rpc_inbuf_t *
+capnp_rpc_inbuf(const struct capnp_rpc_conn *c);
+/* Send an Abort of Exception.type `type`, as rpc.c++ disconnect does,
+ * unless this vat has sent one already, and fail every open question. */
+CAPNP_JANET_HIDDEN int capnp_rpc_abort_typed(struct capnp_rpc_conn *c,
+                                             uint16_t type,
+                                             const char *reason);
+
 #endif

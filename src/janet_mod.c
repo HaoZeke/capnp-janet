@@ -1919,16 +1919,14 @@ static Janet cfun_rpc_dial_unix(int32_t argc, Janet *argv) {
 
 static Janet cfun_rpc_recv(int32_t argc, Janet *argv) {
   rpc_conn_wrap *w = get_rpc(argv, 0);
-  uint8_t *buf = NULL;
-  size_t n = 0;
   int bad;
   janet_fixarity(argc, 1);
   if (w->fd < 0)
     janet_panic("capnp/rpc-recv: connection has no socket");
-  if (capnp_read_frame_alloc(w->fd, &buf, &n) != CAPNP_OK)
+  bad = capnp_rpc_recv_fd(&w->conn, w->fd);
+  if (bad == CAPNP_ERR_FRAMING || bad == CAPNP_ERR_BOUNDS ||
+      bad == CAPNP_ERR_IO || bad == CAPNP_ERR_ALLOC)
     janet_panic("capnp/rpc-recv: short frame");
-  bad = capnp_rpc_handle(&w->conn, buf, n);
-  free(buf);
   if (bad) {
     raise_pending(w);
     janet_panic("capnp/rpc-recv: rejected frame");

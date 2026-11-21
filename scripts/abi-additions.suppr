@@ -28,3 +28,7 @@
 [suppress_function]
   change_kind = added-function
   name = capnp_rpc_unimplemented
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_recv_fd
