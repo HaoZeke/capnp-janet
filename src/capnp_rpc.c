@@ -252,6 +252,11 @@ typedef struct {
 /* A call that keeps the import keyed `key` until it is finished. */
 typedef struct {
   uint32_t qid;
+  /* Finished with requireEarlyCancellationWorkaround: dropped at the
+   * next idle report, as rpc.c++ cancels such a call from evalLast. */
+  int at_idle;
+  /* Which idle action this was finished by; later ones run first. */
+  uint64_t seq;
   uint64_t key;
 } rpc_hold_t;
 
@@ -271,6 +276,10 @@ typedef struct rpc_side {
    * for it, as rpc.c++ runs that check from evalLast. */
   int defer_loopback;
   char *loopback;
+  /* What rpc.c++ hands to kj::evalLast runs last in, first out. Each
+   * action that waits for the idle report takes the next number. */
+  uint64_t idle_seq;
+  uint64_t loopback_seq;
 } rpc_side_t;
 
 static pthread_mutex_t side_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -471,13 +480,16 @@ static void holds_keep(capnp_rpc_conn_t *c, uint32_t qid, const uint64_t *keys,
   }
   for (i = 0; i < n; i++) {
     s->holds[s->nholds].qid = qid;
+    s->holds[s->nholds].at_idle = 0;
     s->holds[s->nholds].key = keys[i];
     s->nholds++;
   }
 }
 
-/* The answer to question `qid` is finished: the call's params go. */
-static int holds_finish(capnp_rpc_conn_t *c, uint32_t qid)
+/* Drops the holds of call `qid`, or with `qid` NULL those finished for
+ * idle action `seq`. */
+static int holds_release(capnp_rpc_conn_t *c, const uint32_t *qid,
+                         uint64_t seq)
 {
   rpc_side_t *s = side_get(c, 0);
   uint64_t *keys;
@@ -489,7 +501,8 @@ static int holds_finish(capnp_rpc_conn_t *c, uint32_t qid)
   if (keys == NULL)
     return CAPNP_ERR_ALLOC;
   for (i = 0; i < s->nholds; i++) {
-    if (s->holds[i].qid == qid)
+    if (qid == NULL ? s->holds[i].at_idle && s->holds[i].seq == seq
+                    : !s->holds[i].at_idle && s->holds[i].qid == *qid)
       keys[n++] = s->holds[i].key;
     else
       s->holds[j++] = s->holds[i];
@@ -498,6 +511,26 @@ static int holds_finish(capnp_rpc_conn_t *c, uint32_t qid)
   rc = holds_drop(c, keys, n);
   free(keys);
   return rc;
+}
+
+/* The answer to question `qid` is finished: the call's params go, or with
+ * `later` set they wait for the idle report. */
+static int holds_take(capnp_rpc_conn_t *c, uint32_t qid, int later)
+{
+  rpc_side_t *s = side_get(c, 0);
+  size_t i;
+  if (s == NULL || s->nholds == 0)
+    return CAPNP_OK;
+  if (!later)
+    return holds_release(c, &qid, 0);
+  s->idle_seq++;
+  for (i = 0; i < s->nholds; i++) {
+    if (!s->holds[i].at_idle && s->holds[i].qid == qid) {
+      s->holds[i].at_idle = 1;
+      s->holds[i].seq = s->idle_seq;
+    }
+  }
+  return CAPNP_OK;
 }
 
 void capnp_rpc_init(capnp_rpc_conn_t *c, capnp_rpc_send_fn send, void *send_ctx)
@@ -1668,7 +1701,6 @@ void capnp_rpc_defer_loopback(capnp_rpc_conn_t *c)
 int capnp_rpc_idle(capnp_rpc_conn_t *c)
 {
   rpc_side_t *s;
-  char *reason;
   int rc = CAPNP_OK;
   if (c == NULL)
     return CAPNP_ERR_ARG;
@@ -1676,30 +1708,55 @@ int capnp_rpc_idle(capnp_rpc_conn_t *c)
   if (s == NULL)
     return CAPNP_ERR_ALLOC;
   s->defer_loopback = 1;
-  reason = s->loopback;
-  s->loopback = NULL;
-  if (reason != NULL && !s->aborted) {
-    protocol_abort(c, reason);
-    rc = CAPNP_ERR_KIND;
+  /* kj::evalLast runs what was queued last first, and an Abort ends the
+   * connection before the rest of them can send. */
+  while (!s->aborted) {
+    uint64_t latest = 0;
+    size_t i;
+    for (i = 0; i < s->nholds; i++)
+      if (s->holds[i].at_idle && s->holds[i].seq > latest)
+        latest = s->holds[i].seq;
+    if (s->loopback != NULL && s->loopback_seq > latest) {
+      char *reason = s->loopback;
+      s->loopback = NULL;
+      protocol_abort(c, reason);
+      free(reason);
+      return CAPNP_ERR_KIND;
+    }
+    if (latest == 0)
+      break;
+    rc = holds_release(c, NULL, latest);
+    if (rc != CAPNP_OK)
+      return rc;
   }
-  free(reason);
+  free(s->loopback);
+  s->loopback = NULL;
   return rc;
 }
 
-/* The brand check of a senderLoopback Disembargo, held for the next idle
- * report when the reader gives one. */
+static int finish_waits(const capnp_rpc_conn_t *c)
+{
+  rpc_side_t *s = side_get(c, 0);
+  return s != NULL && s->defer_loopback;
+}
+
+/* The brand check of a senderLoopback Disembargo, left for the next idle
+ * report when the reader gives one. Each Disembargo queues its own check,
+ * and the last one queued runs first. */
 static int loopback_abort(capnp_rpc_conn_t *c, const char *reason)
 {
   rpc_side_t *s = side_get(c, 0);
   size_t n = strlen(reason) + 1;
+  char *copy;
   if (s == NULL || !s->defer_loopback)
     return protocol_abort(c, reason);
-  if (s->loopback == NULL) {
-    s->loopback = (char *)malloc(n);
-    if (s->loopback == NULL)
-      return protocol_abort(c, reason);
-    memcpy(s->loopback, reason, n);
-  }
+  copy = (char *)malloc(n);
+  if (copy == NULL)
+    return protocol_abort(c, reason);
+  memcpy(copy, reason, n);
+  free(s->loopback);
+  s->loopback = copy;
+  s->loopback_seq = ++s->idle_seq;
   return CAPNP_OK;
 }
 
@@ -3754,6 +3811,12 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
     {
       uint32_t qid = capnp_get_u32(&body, QUESTIONID_OFF, 0);
       capnp_rpc_answer_t *a = answer_find(c, qid);
+      /* rpc.c++ defers cancelling a call that is still running when the
+       * Finish asks for the workaround; an onlyPromisePipeline call never
+       * stops running. */
+      int later = a != NULL && a->used == SLOT_QUIET &&
+                  !capnp_get_bool(&body, FINISH_WORKAROUND_BIT, 0) &&
+                  finish_waits(c);
       /* Redirected results nobody took: rpc.c++ answers the call as it
        * tears it down. The call's params go with it, and only then are
        * the results' exports released, which aborts on one that is not
@@ -3761,7 +3824,7 @@ int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len)
       if (a != NULL && a->used == SLOT_MARKED)
         rc = send_results_sent_elsewhere(c, qid);
       if (rc == CAPNP_OK)
-        rc = holds_finish(c, qid);
+        rc = holds_take(c, qid, later);
       if (rc == CAPNP_OK && !capnp_get_bool(&body, FINISH_RELEASE_CAPS_BIT, 0))
         rc = answer_release_caps(c, qid);
       answer_drop(c, qid);

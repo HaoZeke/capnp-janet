@@ -121,6 +121,11 @@ Pre-1.0 minor releases may include breaking API changes.
   any answer. The op used to be skipped.
 - Finish sets `requireEarlyCancellationWorkaround` to false, as rpc.c++
   does. It used to keep the schema default of true.
+- A Finish with `requireEarlyCancellationWorkaround` set for a running
+  onlyPromisePipeline call releases its params capabilities at the next
+  idle report, as rpc.c++ cancels it from `evalLast`.
+- Actions that wait for the idle report run last in, first out, as
+  `kj::evalLast` runs them.
 - Each incoming message is read the way C++ PointerReader reads it. A
   pointer it refuses aborts with the rpc.c++ reason, a null body reads
   as defaults, and a refused Bootstrap object id is answered with that

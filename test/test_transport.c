@@ -1264,15 +1264,17 @@ typedef struct {
   uint16_t send_to;
   uint16_t method;
   /* Release count; for a Bootstrap, nonzero sends a deprecatedObjectId;
+   * for a Finish, nonzero clears requireEarlyCancellationWorkaround;
    * for a promised target, how many getPointerField 0 steps follow. For
    * an Unimplemented Resolve, `method` is the descriptor arm naming
    * export `tval`, and `send_to` nonzero sends an exception. */
   uint32_t count;
   /* For a call, the low byte is how many capTable entries of the params
    * name the caller's export 5, as senderHosted, or senderPromise with
-   * 0x100 set. Bits 24 to 27 pick a list of exports from `vf_id_lists`.
-   * 0x200 makes the last entry a descriptor arm no reader knows. Bits 28
-   * to 31 pick a pointer of the built frame for `vf_corrupt` to rewrite. */
+   * 0x100 set. Bits 16 to 23 name another export than 5, and bits 24 to
+   * 27 pick a list of exports from `vf_id_lists`. 0x200 makes the last
+   * entry a descriptor arm no reader knows. Bits 28 to 31 pick a pointer
+   * of the built frame for `vf_corrupt` to rewrite. */
   uint32_t pcaps;
 } vframe_t;
 
@@ -1284,7 +1286,7 @@ typedef struct {
  * stops differing fails, so the list stays true. */
 typedef struct {
   const char *name;
-  vframe_t frames[3];
+  vframe_t frames[5];
   int nframes;
   uint32_t until;
   int opaque;
@@ -1500,10 +1502,15 @@ static const vscenario_t vat_diffs[] = {
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
       {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
     {"capability in the params of an onlyPromisePipeline call, released "
-     "later by capnp-C++",
+     "once capnp-C++ is idle",
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
       {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
-      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 99, 0, 1, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"capability in the params of an onlyPromisePipeline call, released "
+     "by a Finish without the early cancellation workaround",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 1, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
     {"capability in the params of an onlyPromisePipeline call, Finish alone",
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
       {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
@@ -1565,6 +1572,20 @@ static const vscenario_t vat_diffs[] = {
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
       {VF_RELEASE, 0, 0, 0, 0, 0, 2, 0},
       {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Disembargo after a Finish that waits for capnp-C++ to be idle",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_DISEMBARGO, 0, 0, 0, 0, 0, 3, 0}}, 3, 99, 0, 0, 0},
+    {"Finishes of two onlyPromisePipeline calls, first then second",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 1, 1u | (6u << 16)},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_FINISH, 2, 0, 0, 0, 0, 0, 0}}, 4, 99, 0, 0, 0},
+    {"Finishes of two onlyPromisePipeline calls, second then first",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 1, 1u | (6u << 16)},
+      {VF_FINISH, 2, 0, 0, 0, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 4, 99, 0, 0, 0},
     {"call with an amplified list of void as its capTable",
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | (2u << 28)}}, 1, 99, 0, 0, 0},
     {"call with an amplified list of empty structs as its capTable",
@@ -1599,6 +1620,19 @@ static const vscenario_t vat_diffs[] = {
      {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 9, 1, 0, 6u << 28}}, 1, 99, 0, 0, 0},
     {"Disembargo of an unknown context with a corrupt transform",
      {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 9, 1, 0, 7u << 28}}, 1, 99, 0, 0, 0},
+    {"Disembargo before a call whose Finish waits for capnp-C++ to be idle",
+     {{VF_DISEMBARGO, 0, 0, 0, 0, 0, 3, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Disembargo between a call and its Finish that waits to be idle",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_DISEMBARGO, 0, 0, 0, 0, 0, 3, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"two Disembargoes, a call and its Finish that waits to be idle",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_DISEMBARGO, 0, 0, 0, 0, 0, 3, 0},
+      {VF_DISEMBARGO, 0, 0, 0, 0, 0, 4, 0}}, 4, 99, 0, 0, 0},
     {"Bootstrap of a vat with no bootstrap capability",
      {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
       {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 1},
@@ -1705,6 +1739,7 @@ static int build_vcall(const capnp_bptr_t *slot0, const vframe_t *f) {
   uint32_t hints = f->target == VT_PROMISED ? 0 : f->count;
   uint32_t list = (f->pcaps >> 24) & 0xf;
   uint32_t i, n = list ? vf_id_lists[list][0] : f->pcaps & 0xff;
+  uint32_t base = (f->pcaps >> 16) & 0xff ? (f->pcaps >> 16) & 0xff : 5;
   if (capnp_builder_struct(slot0, 3, 3, &call) ||
       capnp_builder_set_bool(&call, 130, (hints & 1) != 0) ||
       capnp_builder_set_bool(&call, 129, (hints & 2) != 0) ||
@@ -1731,7 +1766,7 @@ static int build_vcall(const capnp_bptr_t *slot0, const vframe_t *f) {
     if ((f->pcaps & 0x200) && i + 1 == n)
       arm = 9;
     if (capnp_builder_set_u16(&e, 0, arm) ||
-        capnp_builder_set_u32(&e, 4, list ? vf_id_lists[list][i + 1] : 5))
+        capnp_builder_set_u32(&e, 4, list ? vf_id_lists[list][i + 1] : base))
       return -1;
   }
   return 0;
@@ -1886,7 +1921,8 @@ static int build_vframe_raw(const vframe_t *f, uint8_t **out, size_t *len) {
     default:
       rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_FINISH) ||
            capnp_builder_struct(&slot, 1, 0, &body) ||
-           capnp_builder_set_u32(&body, 0, f->qid);
+           capnp_builder_set_u32(&body, 0, f->qid) ||
+           capnp_builder_set_bool(&body, 33, f->count != 0);
       break;
     }
   }
@@ -2193,12 +2229,14 @@ static void vd_local(const vscenario_t *s, char *out, size_t cap) {
     free(f);
     vd_clear();
   }
+  (void)capnp_rpc_idle(&c);
   for (i = 0; i < s->nframes; i++) {
     f = NULL;
     if (build_vframe(&s->frames[i], &f, &n) == 0)
       (void)capnp_rpc_handle(&c, f, n);
     free(f);
   }
+  (void)capnp_rpc_idle(&c);
   for (i = 0; i < g_vd_n && !end; i++)
     end = describe_reply(g_vd_sent[i], g_vd_len[i], s->until, out, cap);
   if (!end)
@@ -2250,11 +2288,19 @@ static void vd_remote(uint16_t port, const vscenario_t *s, char *out,
     got_boot = describe_reply(f, n, 0, tmp, sizeof tmp);
     free(f);
   }
-  for (i = 0; i < s->nframes; i++) {
-    f = NULL;
-    if (build_vframe(&s->frames[i], &f, &n) == 0)
-      (void)capnp_write_all(fd, f, n);
-    free(f);
+  {
+    /* One write, so capnp-C++ reads every frame before it is idle. */
+    uint8_t all[4096];
+    size_t used = 0;
+    for (i = 0; i < s->nframes; i++) {
+      f = NULL;
+      if (build_vframe(&s->frames[i], &f, &n) == 0 && used + n <= sizeof all) {
+        memcpy(all + used, f, n);
+        used += n;
+      }
+      free(f);
+    }
+    (void)capnp_write_all(fd, all, used);
   }
   while (!end) {
     int r;
@@ -2279,8 +2325,8 @@ static void mask_addresses(char *s) {
   char *p = s;
   while ((p = strchr(p, '[')) != NULL) {
     size_t a = strspn(p + 1, "0123456789abcdef"), b;
-    if (a >= 8 && strncmp(p + 1 + a, " == ", 4) == 0 &&
-        (b = strspn(p + 5 + a, "0123456789abcdef")) >= 8 &&
+    if (a >= 1 && strncmp(p + 1 + a, " == ", 4) == 0 &&
+        (b = strspn(p + 5 + a, "0123456789abcdef")) >= 1 &&
         p[5 + a + b] == ']') {
       memmove(p + 1, p + 5 + a + b, strlen(p + 5 + a + b) + 1);
       memmove(p + 8, p + 1, strlen(p + 1) + 1);
@@ -2355,6 +2401,12 @@ static const struct {
      "abort: Unsupported pipeline op.; (uint)opReader.which() = 5"},
     {"Disembargo senderLoopback on a missing answer with an unknown op",
      "abort: Unsupported pipeline op.; (uint)opReader.which() = 5"},
+    {"capability in the params of an onlyPromisePipeline call, released "
+     "once capnp-C++ is idle",
+     "return 2 results 42 | release 5 x1 | no end"},
+    {"capability in the params of an onlyPromisePipeline call, released "
+     "by a Finish without the early cancellation workaround",
+     "release 5 x1 | return 2 results 42 | no end"},
     {"three capabilities in the params of a call",
      "return 1 results 42 | release 7 x1 | release 6 x1 | release 5 "
      "x1 | return 2 results 42"},
@@ -2369,6 +2421,14 @@ static const struct {
      "params",
      "return 1 results 0 | release 5 x1 | abort: Tried to release "
      "invalid export ID."},
+    {"Disembargo after a Finish that waits for capnp-C++ to be idle",
+     "abort: expected target->getBrand() == this [address]; "
+     "'Disembargo' of type 'senderLoopback' sent to an object that "
+     "does not point back to the sender."},
+    {"Finishes of two onlyPromisePipeline calls, first then second",
+     "release 6 x1 | release 5 x1 | no end"},
+    {"Finishes of two onlyPromisePipeline calls, second then first",
+     "release 5 x1 | release 6 x1 | no end"},
     {"call with an amplified list of void as its capTable",
      "abort: Exceeded message traversal limit.  See "
      "capnp::ReaderOptions."},
@@ -2426,6 +2486,19 @@ static const struct {
      "packed vs. non-packed), or was not a Cap'n Proto message to "
      "begin with. Note that this error is NOT due to a schema "
      "mismatch; the input is invalid regardless of schema."},
+    {"Disembargo before a call whose Finish waits for capnp-C++ to be "
+     "idle",
+     "release 5 x1 | abort: expected target->getBrand() == this "
+     "[address]; 'Disembargo' of type 'senderLoopback' sent to an "
+     "object that does not point back to the sender."},
+    {"Disembargo between a call and its Finish that waits to be idle",
+     "release 5 x1 | abort: expected target->getBrand() == this "
+     "[address]; 'Disembargo' of type 'senderLoopback' sent to an "
+     "object that does not point back to the sender."},
+    {"two Disembargoes, a call and its Finish that waits to be idle",
+     "abort: expected target->getBrand() == this [address]; "
+     "'Disembargo' of type 'senderLoopback' sent to an object that "
+     "does not point back to the sender."},
 };
 
 static void test_vat_recorded(void) {
@@ -2437,6 +2510,7 @@ static void test_vat_recorded(void) {
         break;
     if (j < N_VAT_DIFFS) {
       vd_local(&vat_diffs[j], ours, sizeof ours);
+      mask_addresses(ours);
       if (vat_diffs[j].opaque)
         opaque_reasons(ours);
     }
