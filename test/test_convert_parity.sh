@@ -215,6 +215,55 @@ for v in '{"vVoid": {}}' '{"vVoid": 0}' '{"vVoid": "x"}' '{"vVoid": [1]}' \
   compare "json-void-$((i++))" "$PARITY" Parity "text binary"
 done
 
+# JsonCodec recovers from a number out of range, a bad numeric string
+# and a non-array list: it writes what kj substitutes, prints the
+# message and fails the run. Enum numbers are cast without a check.
+# Casting a double outside the target type is up to the CPU (x86 wraps,
+# s390x saturates), so these compare against C++ built for the same host.
+full=1
+for v in '{"vU8": 300}' '{"vI8": -129}' '{"vI32": 1.5}' '{"vI32": "x"}' \
+  '{"vI16": "70000"}' '{"vI64": 9223372036854775808}' '{"vI64": -1e19}' \
+  '{"vU64": 18446744073709551616}' '{"vU64": "-1"}' '{"vU32": -0.5}' \
+  '{"vF32": ""}' '{"vF64": " 1"}' '{"vF64": "1 "}' '{"lI32": 5}' \
+  '{"lStruct": null}' '{"lI32": [1.5, 3e10, "x"]}' '{"lF64": ["x", null]}' \
+  '{"vEnum": -1}' '{"vEnum": 70000}' '{"vEnum": 1e10}' '{"vEnum": 1.5}' \
+  '{"vI64": 9223372036854775807}' '{"vU64": 18446744073709551615}' \
+  '{"lI64": [9223372036854775808, -1e19, 7]}' \
+  '{"lU64": [18446744073709551616, 3e19, 7]}' \
+  '{"vEnum": 4294967296}' '{"vEnum": 2147483648}' '{"vEnum": -2147483649}' \
+  '{"lEnum": [-1, 4294967296, 1e10, 1]}' \
+  '{"vU8": 300, "vI8": 3}' '{"vI32": "x"}{"vI32": 7}' '{"lU8": [256]}' \
+  '{"vI32": true}' '{"vText": 5}' '{"vStruct": 5}' '{"lData": [[1.5]]}'; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "json-recover-$((i++))" "$PARITY" Parity "text binary json"
+done
+
+# Integer fields take a JSON number as a double that passed the range
+# check, and C++ casts it. 2^63 and 2^64 pass and cannot be cast, so the
+# result is the CPU's. Infinities, huge values, -0.0 and numeric strings
+# that read as NaN or 0 go through the same path.
+for f in vU64 vI64 vU32 vI32; do
+  for n in 18446744073709551616 3e19 -1 9223372036854775808 1e300 -0.0 \
+    1e999 -1e999 4294967296 2147483648 -2147483649 18446744073709551615 \
+    9223372036854775807 -9223372036854775808 -9223372036854775809 0.5 -0.5 \
+    '"NaN"' '"nan"' '"-nan"' '"inf"' '"1e300"' null; do
+    printf '{"%s": %s}' "$f" "$n" >"$TMP/in.bin"
+    compare "json-int-cast-$((i++))" "$PARITY" Parity "text json"
+  done
+done
+for f in lU64 lI64 lU32 lI32 lEnum; do
+  printf '{"%s": [18446744073709551616, 3e19, -1, 9223372036854775808, 1e300, -0.0, 1e999, -1e999, 4294967296, 2147483648, -2147483649, 18446744073709551615, 9223372036854775807, -9223372036854775808, -9223372036854775809, 0.5, -0.5, 7]}' \
+    "$f" >"$TMP/in.bin"
+  compare "json-int-cast-list-$((i++))" "$PARITY" Parity "text binary json"
+done
+# Enum numbers are cast to uint16 without a range check.
+for n in 0 1 2.5 -1 -1.5 -0.5 65535 65535.5 65536 70000 2147483647.5 \
+  2147483648 -2147483648.5 -2147483649 4294967295.5 4294967296 1e10 -1e10 \
+  1e300 -1e300 1e999 -1e999 -0.0; do
+  printf '{"vEnum": %s}' "$n" >"$TMP/in.bin"
+  compare "json-enum-cast-$((i++))" "$PARITY" Parity "text json"
+done
+
 # Stream input takes at most 511 segments.
 in_fmt=binary
 full=1

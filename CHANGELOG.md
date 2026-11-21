@@ -32,6 +32,12 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp-eval convert` goes on after the JSON errors `JsonCodec`
+  recovers from, as `capnp` does: a number out of range is clamped or
+  wrapped, a bad numeric string reads as 0, and a non-array list is
+  empty. It prints the message and exits 1. JSON enum numbers and
+  values of 2^63 or 2^64 are cast with the host's own conversion, like
+  C++, and a float string may start with spaces, in the library too.
 - A call whose dispatch function fails is answered with
   `Return.exception`, as `rpc.c++` answers a method that throws. No
   Return used to be sent, so the caller waited forever.

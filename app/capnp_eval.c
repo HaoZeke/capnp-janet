@@ -1050,10 +1050,14 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
       uint8_t *msg_bytes = NULL;
       size_t mlen = 0;
       capnp_message_t m = {0};
-      int rc = is_json ? capnp_dyn_decode_json(dyn, type_name, in_buf + cstart,
-                                               clen, &msg_bytes, &mlen)
+      int soft = 0;
+      int rc = is_json ? capnp_dyn_decode_json_recover(
+                             dyn, type_name, in_buf + cstart, clen,
+                             &msg_bytes, &mlen, &soft)
                        : capnp_dyn_decode_text(dyn, type_name, in_buf + cstart,
                                                clen, &msg_bytes, &mlen);
+      if (soft)
+        e.soft = 1;
       if (rc != CAPNP_OK ||
           capnp_message_from_flat(&m, msg_bytes, mlen) != CAPNP_OK) {
         if (rc != CAPNP_OK && capnp_dyn_error(dyn)[0])

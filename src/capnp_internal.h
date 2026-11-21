@@ -59,6 +59,16 @@ CAPNP_JANET_HIDDEN int capnp_dyn_encode_recover(capnp_dyn_t *d,
                                                 char **out, size_t *len,
                                                 int *wire_err);
 
+/* capnp_dyn_decode_json, going on after the errors JsonCodec recovers
+ * from: an integer out of range or a bad numeric string takes the value
+ * kj substitutes, and a list field that is not an array is empty.
+ * *soft is set when one occurred; `capnp convert` then fails the run. */
+CAPNP_JANET_HIDDEN int capnp_dyn_decode_json_recover(capnp_dyn_t *d,
+                                                     const char *type_name,
+                                                     const char *text,
+                                                     size_t len, uint8_t **out,
+                                                     size_t *out_len,
+                                                     int *soft);
 /* Canonical copy of @root, a struct or null, the way C++ `canonicalize`
  * copies: a corrupt pointer is written as null and sets *soft, and a
  * section is truncated by its raw words. The result may not be canonical

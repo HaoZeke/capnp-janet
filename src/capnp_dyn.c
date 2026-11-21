@@ -4459,6 +4459,19 @@ static vnode_t *parse_text_expr(scan_t *sc) {
 }
 /* --- Builder from AST (vnode_t) --- */
 
+/* `capnp convert` goes on after a recoverable kj error in a JSON value,
+ * using the value kj substitutes, and fails the run at the end. With
+ * json_recover unset such an error fails the decode. */
+static _Thread_local int json_recover;
+static _Thread_local int json_soft;
+
+static int soft_error(void) {
+  if (!json_recover)
+    return -1;
+  json_soft = 1;
+  return 0;
+}
+
 static int parse_str_i64(const char *s, size_t n, int64_t min_v, int64_t max_v,
                          int64_t *out) {
   char *endp = NULL;
@@ -4500,7 +4513,7 @@ static int parse_str_u64(const char *s, size_t n, uint64_t max_v,
 static int parse_str_f64(const char *s, size_t n, double *out) {
   char *endp = NULL;
   double v;
-  if (!s || n == 0 || memchr(s, 0, n) != NULL || isspace((unsigned char)s[0]))
+  if (!s || n == 0 || memchr(s, 0, n) != NULL)
     return -1;
   errno = 0;
   v = strtod(s, &endp);
@@ -4508,6 +4521,52 @@ static int parse_str_f64(const char *s, size_t n, double *out) {
     return -1;
   *out = v;
   return 0;
+}
+
+/* JsonCodec reaches an integer field with a double that passed its
+ * range check, then casts it. 2^63 and 2^64 pass that check and are
+ * outside int64 and uint64, so the C++ cast has no defined result and the
+ * output follows the CPU: x86-64 gives INT64_MIN and 0, s390x and other
+ * saturating CPUs give INT64_MAX and UINT64_MAX. These helpers return
+ * the same values without casting a double out of range. */
+#if defined(__x86_64__) || defined(_M_X64)
+#define DYN_F2I_SATURATES 0
+#else
+#define DYN_F2I_SATURATES 1
+#endif
+
+/* d is in [-2^63, 2^63]. */
+static int64_t f2i64_host(double d) {
+  if (d >= 9223372036854775808.0)
+    return DYN_F2I_SATURATES ? INT64_MAX : INT64_MIN;
+  return (int64_t)d;
+}
+
+/* d is in [0, 2^64]. */
+static uint64_t f2u64_host(double d) {
+  if (d >= 18446744073709551616.0)
+    return DYN_F2I_SATURATES ? UINT64_MAX : 0;
+  if (d >= 9223372036854775808.0)
+    return (uint64_t)(d - 9223372036854775808.0) + ((uint64_t)1 << 63);
+  return (uint64_t)d;
+}
+
+/* static_cast<uint16_t>(double), for any double. x86-64 truncates to a
+ * 32-bit integer, which reads as INT32_MIN when out of range. Saturating
+ * CPUs clamp to the unsigned 32-bit range, with NaN as 0. Both keep the
+ * low 16 bits. */
+static uint16_t f2u16_host(double d) {
+#if DYN_F2I_SATURATES
+  if (!(d >= 0.0))
+    return 0;
+  if (d >= 4294967296.0)
+    return UINT16_MAX;
+  return (uint16_t)(uint32_t)d;
+#else
+  if (!(d > -2147483649.0 && d < 2147483648.0))
+    return 0;
+  return (uint16_t)(uint32_t)(int32_t)d;
+#endif
 }
 
 static int vnode_to_int(const vnode_t *v, uint16_t which, int json,
@@ -4572,50 +4631,70 @@ static int vnode_to_int(const vnode_t *v, uint16_t which, int json,
     *out_bits = v->uval;
     return 0;
   }
+  /* JSON numbers are doubles, converted by checkRoundTripFromFloat:
+   * clamped to the range, then truncated, then checked for a round trip. */
   if (json && v->kind == VK_FLOAT) {
     double d = v->fval;
-    if (!isfinite(d))
-      return -1;
     if (is_signed) {
       int64_t iv;
-      if (d < (double)smin || d > (double)smax)
-        return -1;
-      if (which == TY_I64 && d >= 9223372036854775808.0)
-        return -1;
-      iv = (int64_t)d;
-      if ((double)iv != d)
-        return -1;
+      if (!(d >= (double)smin)) {
+        *out_bits = (uint64_t)smin;
+        return soft_error();
+      }
+      if (!(d <= (double)smax)) {
+        *out_bits = (uint64_t)smax;
+        return soft_error();
+      }
+      iv = f2i64_host(d);
       *out_bits = (uint64_t)iv;
-      return 0;
+      return (double)iv == d ? 0 : soft_error();
     } else {
       uint64_t uv;
-      if (d < 0.0 || d > (double)umax)
-        return -1;
-      if (which == TY_U64 && d >= 18446744073709551616.0)
-        return -1;
-      uv = (uint64_t)d;
-      if ((double)uv != d)
-        return -1;
+      if (!(d >= 0.0)) {
+        *out_bits = 0;
+        return soft_error();
+      }
+      if (!(d <= (double)umax)) {
+        *out_bits = umax;
+        return soft_error();
+      }
+      uv = f2u64_host(d);
       *out_bits = uv;
-      return 0;
+      return (double)uv == d ? 0 : soft_error();
     }
   }
+  /* Strings go through kj parseAs<int64_t> or parseAs<uint64_t>, which
+   * read a bad number as 0, and then wrap to the field's width. */
   if (json && v->kind == VK_STR) {
     if (is_signed) {
       int64_t iv = 0;
-      if (parse_str_i64(v->str, v->slen, smin, smax, &iv))
-        return -1;
+      if (parse_str_i64(v->str, v->slen, INT64_MIN, INT64_MAX, &iv)) {
+        *out_bits = 0;
+        return soft_error();
+      }
       *out_bits = (uint64_t)iv;
-      return 0;
+      return iv < smin || iv > smax ? soft_error() : 0;
     } else {
       uint64_t uv = 0;
-      if (parse_str_u64(v->str, v->slen, umax, &uv))
-        return -1;
+      if (parse_str_u64(v->str, v->slen, UINT64_MAX, &uv)) {
+        *out_bits = 0;
+        return soft_error();
+      }
       *out_bits = uv;
-      return 0;
+      return uv > umax ? soft_error() : 0;
     }
   }
   return -1;
+}
+
+/* An element of a JSON byte array, which JsonCodec checks with
+ * KJ_REQUIRE(byte(x) == x) and cannot recover from. */
+static int json_byte(const vnode_t *v, uint64_t *out) {
+  if (v->kind != VK_FLOAT || !(v->fval >= 0.0 && v->fval <= 255.0) ||
+      v->fval != (double)(int)v->fval)
+    return -1;
+  *out = (uint64_t)v->fval;
+  return 0;
 }
 
 static int vnode_to_float(const vnode_t *v, uint16_t which, int json,
@@ -4630,8 +4709,11 @@ static int vnode_to_float(const vnode_t *v, uint16_t which, int json,
   } else if (json && v->kind == VK_NULL) {
     dv = NAN;
   } else if (json && v->kind == VK_STR) {
-    if (parse_str_f64(v->str, v->slen, &dv))
-      return -1;
+    if (parse_str_f64(v->str, v->slen, &dv)) {
+      dv = 0.0;
+      if (soft_error())
+        return -1;
+    }
   } else {
     return -1;
   }
@@ -4654,14 +4736,8 @@ static int vnode_to_enum(capnp_dyn_t *d, uint64_t enum_id,
     return -1;
   if (json) {
     if (v->kind == VK_FLOAT) {
-      double dv = v->fval;
-      uint16_t ord;
-      if (!isfinite(dv) || dv < 0.0 || dv > 65535.0)
-        return -1;
-      ord = (uint16_t)dv;
-      if ((double)ord != dv)
-        return -1;
-      *out_ord = ord;
+      /* static_cast<uint16_t> of the double. */
+      *out_ord = f2u16_host(v->fval);
       return 0;
     }
     if (v->kind == VK_STR) {
@@ -4993,9 +5069,12 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
                                  uint16_t dwords, uint16_t index, int json,
                                  int depth) {
   uint32_t n, i;
-  if (depth > value_depth || !v || v->kind != VK_LIST)
+  if (depth > value_depth || !v)
     return -1;
-  n = v->count;
+  /* JsonCodec reads a non-array as an empty list, recoverably. */
+  if (v->kind != VK_LIST && (!json || soft_error()))
+    return -1;
+  n = v->kind == VK_LIST ? v->count : 0;
   if (elem_rt->list_depth > 0) {
     capnp_bptr_t first;
     rtype_t inner = *elem_rt;
@@ -5174,8 +5253,7 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
           return -1;
         for (j = 0; j < bn; j++) {
           uint64_t bval = 0;
-          if (kv->kids[j]->kind == VK_STR ||
-              vnode_to_int(kv->kids[j], TY_U8, 1, &bval)) {
+          if (json_byte(kv->kids[j], &bval)) {
             dyn_note_bad(d, kv->kids[j]);
             free(bytes);
             return -1;
@@ -5666,8 +5744,7 @@ static int build_field_from_vnode(capnp_dyn_t *d, const dyn_struct_t *st,
       }
       for (i = 0; i < bn && rc == 0; i++) {
         uint64_t bval = 0;
-        if (v->kids[i]->kind == VK_STR ||
-            vnode_to_int(v->kids[i], TY_U8, 1, &bval)) {
+        if (json_byte(v->kids[i], &bval)) {
           dyn_note_bad(d, v->kids[i]);
           rc = -1;
           value_bad = 1;
@@ -6281,6 +6358,19 @@ int capnp_dyn_decode_json(capnp_dyn_t *d, const char *type_name,
                           const char *text, size_t len, uint8_t **out,
                           size_t *out_len) {
   return decode_root_impl(d, type_name, text, len, 1, out, out_len);
+}
+
+int capnp_dyn_decode_json_recover(capnp_dyn_t *d, const char *type_name,
+                                  const char *text, size_t len, uint8_t **out,
+                                  size_t *out_len, int *soft) {
+  int rc;
+  json_recover = 1;
+  json_soft = 0;
+  rc = decode_root_impl(d, type_name, text, len, 1, out, out_len);
+  json_recover = 0;
+  if (soft)
+    *soft = json_soft;
+  return rc;
 }
 /* --- capnp eval implementation --- */
 
