@@ -409,36 +409,58 @@ out:
   "already closed."
 
 /* Why a call pipelined on `promised` cannot be routed, as rpc.c++ words
- * it: a missing answer has no pipeline, and a failed one breaks every
- * call made on it with its own exception. Copies into `buf`. */
+ * it. A missing answer, or results with no capabilities, leave no
+ * pipeline; a failed answer breaks every call made on it with its own
+ * exception; and a bootstrap answer is a single capability that no
+ * transform leads into. Copies into `buf`. */
 static const char *promised_failure(capnp_rpc_conn_t *c,
                                     const capnp_ptr_t *promised, char *buf,
                                     size_t cap)
 {
   capnp_rpc_answer_t *a;
   capnp_message_t stored = {0};
-  capnp_ptr_t root, ret, exc;
+  capnp_ptr_t root, ret, exc, payload, content, table, ops;
   const char *text = NULL;
   size_t n = 0;
   const char *reason = "no such export";
+  uint32_t nops = 0;
 
   if (promised->kind != CAPNP_PK_STRUCT && promised->kind != CAPNP_PK_NULL)
     return reason;
   a = answer_find(c, capnp_get_u32(promised, PA_QUESTIONID_OFF, 0));
   if (a == NULL)
     return NO_PIPELINE_REASON;
+  if (capnp_getp(promised, 0, &ops) == CAPNP_OK)
+    nops = capnp_list_len(&ops);
   if (capnp_message_from_flat(&stored, frame_bytes(a->frame, a->len),
-                              a->len) == CAPNP_OK &&
-      capnp_root(&stored, &root) == CAPNP_OK &&
-      capnp_getp(&root, 0, &ret) == CAPNP_OK &&
-      capnp_get_u16(&ret, RETURN_TAG_OFF, 0) == RETURN_TAG_EXCEPTION &&
-      capnp_getp(&ret, 0, &exc) == CAPNP_OK &&
-      capnp_get_text(&exc, 0, &text, &n) == CAPNP_OK && text != NULL &&
-      n < cap) {
-    memcpy(buf, text, n);
-    buf[n] = '\0';
-    reason = buf;
+                              a->len) != CAPNP_OK ||
+      capnp_root(&stored, &root) != CAPNP_OK ||
+      capnp_getp(&root, 0, &ret) != CAPNP_OK)
+    goto out;
+  switch (capnp_get_u16(&ret, RETURN_TAG_OFF, 0)) {
+  case RETURN_TAG_EXCEPTION:
+    if (capnp_getp(&ret, 0, &exc) == CAPNP_OK &&
+        capnp_get_text(&exc, 0, &text, &n) == CAPNP_OK && text != NULL &&
+        n < cap) {
+      memcpy(buf, text, n);
+      buf[n] = '\0';
+      reason = buf;
+    }
+    break;
+  case RETURN_TAG_RESULTS:
+    if (capnp_getp(&ret, 0, &payload) != CAPNP_OK)
+      break;
+    if (capnp_getp(&payload, 0, &content) == CAPNP_OK &&
+        content.kind == CAPNP_PK_CAP && nops > 0)
+      reason = "Invalid pipeline transform.";
+    else if (capnp_getp(&payload, 1, &table) != CAPNP_OK ||
+             capnp_list_len(&table) == 0)
+      reason = NO_PIPELINE_REASON;
+    break;
+  default:
+    break;
   }
+out:
   capnp_message_free(&stored);
   return reason;
 }

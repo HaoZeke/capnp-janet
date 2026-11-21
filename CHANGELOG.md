@@ -69,6 +69,9 @@ Pre-1.0 minor releases may include breaking API changes.
   `remote exception: ` and the peer's reason, as rpc.c++ sends when it
   disconnects. A reason that already has that prefix is echoed
   unchanged, and a vat that has sent its own Abort does not answer.
+- A call pipelined through a bootstrap answer with any transform is
+  refused with `Invalid pipeline transform.`, and one pipelined on
+  results without capabilities with rpc.c++'s no-pipeline text.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

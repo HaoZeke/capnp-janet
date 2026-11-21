@@ -1097,6 +1097,14 @@ static const vscenario_t vat_diffs[] = {
     {"Unimplemented for a Resolve to an exception",
      {{VF_UNIMPL_RESOLVE, 0, 0, 0, 1, 0, 0},
       {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"call pipelined through the bootstrap capability",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1}}, 1, 1, 0, 0},
+    {"call pipelined through a field with no capability",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 1}}, 2, 2, 0, 0},
+    {"call pipelined on results that are no capability",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0}}, 2, 2, 0, 0},
     {"Abort",
      {{VF_ABORT, 0, 0, 0, 0, 0, 0}}, 1, 99, 0, 0},
     {"Abort carrying a remote exception",
@@ -1508,6 +1516,14 @@ static const struct {
     {"Unimplemented for a Resolve of an unknown export",
      "abort: Tried to release invalid export ID."},
     {"Unimplemented for a Resolve to an exception", "return 1 results 42"},
+    {"call pipelined through the bootstrap capability",
+     "return 1 exception: Invalid pipeline transform."},
+    {"call pipelined through a field with no capability",
+     "return 1 results 42 | return 2 exception: Pipeline call on a request "
+     "that returned no capabilities or was already closed."},
+    {"call pipelined on results that are no capability",
+     "return 1 results 42 | return 2 exception: Pipeline call on a request "
+     "that returned no capabilities or was already closed."},
 };
 
 static void test_vat_recorded(void) {
