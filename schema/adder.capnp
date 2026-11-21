@@ -7,4 +7,6 @@ interface Adder @0xea01e10cbc414411 {
   add @0 (a :Int64, b :Int64) -> (sum :Int64);
   # `n` bytes of 0xab, for a Return longer than any fixed buffer.
   echo @1 (n :UInt32) -> (data :Data);
+  # This same capability, for a call pipelined on the answer.
+  self @2 () -> (adder :Adder);
 }

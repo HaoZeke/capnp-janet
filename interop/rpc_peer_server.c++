@@ -25,6 +25,11 @@ public:
 		memset(data.begin(), 0xab, data.size());
 		return kj::READY_NOW;
 	}
+
+	kj::Promise<void> self(SelfContext ctx) override {
+		ctx.getResults().setAdder(thisCap());
+		return kj::READY_NOW;
+	}
 };
 
 // A bootstrap made when the Bootstrap message arrives. It resolves on the

@@ -250,6 +250,29 @@ CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t im
                              uint16_t params_dwords, uint16_t params_pwords,
                              capnp_rpc_fill_fn fill, void *fill_ctx);
 
+/* A call, addressed to an imported capability or, for promise
+ * pipelining, to the capability that question `target`'s results hold
+ * at the end of `transform`. Each transform entry is a getPointerField
+ * step, the pointer index to follow. The question must still be ours:
+ * asked and not yet finished. */
+typedef struct capnp_rpc_call {
+  int promised;
+  uint32_t target;
+  const uint16_t *transform;
+  uint32_t transform_len;
+  uint64_t interface_id;
+  uint16_t method_id;
+  uint16_t params_dwords;
+  uint16_t params_pwords;
+  capnp_rpc_fill_fn fill;
+  void *fill_ctx;
+} capnp_rpc_call_t;
+
+/* Send `call`. Returns the questionId, or (uint32_t)-1 when the table
+ * is full, the promised question is unknown, or `fill` failed. */
+CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c,
+                                                   const capnp_rpc_call_t *call);
+
 /* Tell the peer we are done with an answer, and drop our copy. After the
  * Return has arrived the result capabilities stay imported
  * (releaseResultCaps = false); before it, the peer releases them. */

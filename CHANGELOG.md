@@ -27,6 +27,9 @@ Pre-1.0 minor releases may include breaking API changes.
 - The builder can lay out segments the way C++ `MallocMessageBuilder`
   does. The entry points are internal to `capnp-eval`, so the shared
   library ABI is unchanged.
+- `capnp_rpc_send_call_ex` takes a `capnp_rpc_call_t`, which can address
+  a promised answer through getPointerField steps. A call pipelined on
+  the capnp-C++ Adder's `self()` answer returns before that answer does.
 - `capnp_read_frame_alloc` reads a frame of any size into a heap buffer,
   refusing more than 8388608 words as C++ RPC does.
 

@@ -138,6 +138,37 @@ int main(void)
     capnp_message_free(&m);
   }
 
+  /* A call pipelined on the bootstrap answer reaches the capability it
+   * returned. A question we never asked cannot be pipelined on. */
+  {
+    capnp_rpc_call_t call;
+    uint32_t qp, boot = q;
+    capnp_message_t m = {0};
+    capnp_ptr_t content;
+    memset(&call, 0, sizeof call);
+    call.promised = 1;
+    call.target = 999;
+    call.interface_id = 0x1234;
+    call.params_dwords = 1;
+    call.fill = fill_u32;
+    call.fill_ctx = &arg;
+    arg = 5;
+    CHECK(capnp_rpc_send_call_ex(&client, &call) == (uint32_t)-1,
+          "unknown question not pipelined");
+    call.target = boot;
+    qp = capnp_rpc_send_call_ex(&client, &call);
+    CHECK(qp != (uint32_t)-1, "pipelined call sent");
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_answer_content(&client, qp, &m, &content) == CAPNP_OK &&
+              capnp_get_u32(&content, 0, 0) == 10,
+          "pipelined call answered");
+    capnp_message_free(&m);
+    capnp_rpc_send_finish(&client, qp);
+    pump(&vat, &g_to_vat);
+    doubler_calls = 0;
+  }
+
   /* A call returns the server's results to the caller. */
   arg = 21;
   q = capnp_rpc_send_call(&client, 0, 0x1234, 1, 1, 1, fill_u32, &arg);

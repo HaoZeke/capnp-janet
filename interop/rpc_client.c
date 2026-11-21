@@ -117,6 +117,65 @@ static int call_add(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap,
 	return 0;
 }
 
+/* self() returns the Adder itself. The add() is addressed to that
+ * result before the self() Return has arrived, so capnp-C++ resolves
+ * the promised answer by walking pointer 0 of the results. */
+static int check_pipeline(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
+{
+	int64_t ab[2] = {30, 12};
+	uint16_t ops[1] = {0};
+	capnp_rpc_call_t call;
+	capnp_message_t m = {0};
+	capnp_ptr_t content;
+	uint32_t qself, qadd;
+	int64_t sum;
+	qself = capnp_rpc_send_call(conn, 0, ADDER_IFACE, 2, 0, 0, NULL, NULL);
+	memset(&call, 0, sizeof call);
+	call.promised = 1;
+	call.target = qself;
+	call.transform = ops;
+	call.transform_len = 1;
+	call.interface_id = ADDER_IFACE;
+	call.method_id = 0;
+	call.params_dwords = 2;
+	call.fill = fill_add;
+	call.fill_ctx = ab;
+	qadd = capnp_rpc_send_call_ex(conn, &call);
+	if (qself == (uint32_t)-1 || qadd == (uint32_t)-1) {
+		fprintf(stderr, "pipelined call not sent\n");
+		return 1;
+	}
+	if (wait_answer(conn, qadd, buf, cap) ||
+	    capnp_rpc_answer_content(conn, qadd, &m, &content) != CAPNP_OK) {
+		fprintf(stderr, "pipelined add() failed\n");
+		return 1;
+	}
+	sum = (int64_t)capnp_get_u64(&content, 0, 0);
+	capnp_message_free(&m);
+	if (sum != 42) {
+		fprintf(stderr, "pipelined add(30, 12) returned %lld\n",
+		        (long long)sum);
+		return 1;
+	}
+	{
+		capnp_ptr_t adder;
+		int got = 0;
+		if (wait_answer(conn, qself, buf, cap) == 0 &&
+		    capnp_rpc_answer_content(conn, qself, &m, &content) == CAPNP_OK) {
+			got = capnp_getp(&content, 0, &adder) == CAPNP_OK &&
+			      adder.kind == CAPNP_PK_CAP;
+			capnp_message_free(&m);
+		}
+		if (!got) {
+			fprintf(stderr, "self() returned no capability\n");
+			return 1;
+		}
+	}
+	capnp_rpc_send_finish(conn, qadd);
+	capnp_rpc_send_finish(conn, qself);
+	return 0;
+}
+
 /* The bootstrap of `rpc_peer_server PORT promise` resolves later, so
  * capnp-C++ describes it as senderPromise. Its export id is still the
  * one to call; the peer queues the call until the promise resolves. */
@@ -304,6 +363,9 @@ int main(int argc, char **argv)
 		capnp_message_free(&m);
 		capnp_rpc_send_finish(&conn, q);
 	}
+
+	if (check_pipeline(&conn, buf, sizeof buf))
+		return 1;
 
 	/* An Unimplemented reply ends the connection for capnp-C++, and
 	 * echoing it back would make the peer abort. */

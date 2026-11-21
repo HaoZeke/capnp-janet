@@ -104,6 +104,10 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define PA_OP_TAG_OFF 0
 #define PA_OP_GETPTRFIELD_OFF 2
 #define PA_OP_TAG_GETPTRFIELD 1
+#define PA_DW 1
+#define PA_PW 1
+#define PA_OP_DW 1
+#define PA_OP_PW 0
 /* Disembargo: target @ptr0; context is a group sharing the data section,
  * union tag @4 (u16), the loopback id @0 (u32). */
 #define DIS_CTX_TAG_OFF 4
@@ -1063,45 +1067,78 @@ uint32_t capnp_rpc_send_bootstrap(capnp_rpc_conn_t *c)
   return qid;
 }
 
-uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
-                             uint64_t interface_id, uint16_t method_id,
-                             uint16_t params_dwords, uint16_t params_pwords,
-                             capnp_rpc_fill_fn fill, void *fill_ctx)
+/* MessageTarget.promisedAnswer: the question and the getPointerField
+ * steps into its results. */
+static int write_promised_target(const capnp_bptr_t *target,
+                                 const capnp_rpc_call_t *call)
+{
+  capnp_bptr_t slot, pa, op;
+  uint32_t i;
+  if (capnp_builder_set_u16(target, TARGET_TAG_OFF, TARGET_TAG_PROMISEDANSWER) ||
+      capnp_builder_slot(target, TARGET_DW, 0, &slot) ||
+      capnp_builder_struct(&slot, PA_DW, PA_PW, &pa) ||
+      capnp_builder_set_u32(&pa, PA_QUESTIONID_OFF, call->target))
+    return CAPNP_ERR_ALLOC;
+  if (call->transform_len == 0)
+    return CAPNP_OK;
+  if (capnp_builder_set_list_struct(&pa, PA_DW, 0, call->transform_len,
+                                    PA_OP_DW, PA_OP_PW, &op))
+    return CAPNP_ERR_ALLOC;
+  for (i = 0; i < call->transform_len; i++) {
+    capnp_bptr_t e = op;
+    e.word += (size_t)i * (PA_OP_DW + PA_OP_PW);
+    if (capnp_builder_set_u16(&e, PA_OP_TAG_OFF, PA_OP_TAG_GETPTRFIELD) ||
+        capnp_builder_set_u16(&e, PA_OP_GETPTRFIELD_OFF, call->transform[i]))
+      return CAPNP_ERR_ALLOC;
+  }
+  return CAPNP_OK;
+}
+
+uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c, const capnp_rpc_call_t *call)
 {
   capnp_builder_t b;
-  capnp_bptr_t call, slot, target, payload, params;
+  capnp_bptr_t msg, slot, target, payload, params;
   capnp_rpc_question_t *q;
   uint32_t qid = 0;
   int rc;
 
+  if (call == NULL || (call->transform_len && call->transform == NULL))
+    return (uint32_t)-1;
+  /* rpc.c++ refuses to pipeline on a request it no longer holds. */
+  if (call->promised && question_find(c, call->target) == NULL)
+    return (uint32_t)-1;
   q = question_claim(c, &qid);
   if (q == NULL)
     return (uint32_t)-1;
   capnp_builder_init(&b);
-  rc = begin_message(&b, CAPNP_RPC_MSG_CALL, CALL_DW, CALL_PW, &call);
+  rc = begin_message(&b, CAPNP_RPC_MSG_CALL, CALL_DW, CALL_PW, &msg);
   if (rc == CAPNP_OK)
-    rc = capnp_builder_set_u32(&call, CALL_QUESTIONID_OFF, qid);
+    rc = capnp_builder_set_u32(&msg, CALL_QUESTIONID_OFF, qid);
   if (rc == CAPNP_OK)
-    rc = capnp_builder_set_u16(&call, CALL_METHODID_OFF, method_id);
+    rc = capnp_builder_set_u16(&msg, CALL_METHODID_OFF, call->method_id);
   if (rc == CAPNP_OK)
-    rc = capnp_builder_set_u64(&call, CALL_INTERFACEID_OFF, interface_id);
+    rc = capnp_builder_set_u64(&msg, CALL_INTERFACEID_OFF, call->interface_id);
   if (rc == CAPNP_OK)
-    rc = capnp_builder_slot(&call, CALL_DW, 0, &slot);
+    rc = capnp_builder_slot(&msg, CALL_DW, 0, &slot);
   if (rc == CAPNP_OK)
     rc = capnp_builder_struct(&slot, TARGET_DW, TARGET_PW, &target);
-  if (rc == CAPNP_OK)
+  if (rc == CAPNP_OK && call->promised) {
+    rc = write_promised_target(&target, call);
+  } else if (rc == CAPNP_OK) {
     rc = capnp_builder_set_u16(&target, TARGET_TAG_OFF, TARGET_TAG_IMPORTEDCAP);
+    if (rc == CAPNP_OK)
+      rc = capnp_builder_set_u32(&target, TARGET_IMPORTEDCAP_OFF, call->target);
+  }
   if (rc == CAPNP_OK)
-    rc = capnp_builder_set_u32(&target, TARGET_IMPORTEDCAP_OFF, imported_cap);
-  if (rc == CAPNP_OK)
-    rc = capnp_builder_slot(&call, CALL_DW, 1, &slot);
+    rc = capnp_builder_slot(&msg, CALL_DW, 1, &slot);
   if (rc == CAPNP_OK)
     rc = capnp_builder_struct(&slot, PAYLOAD_DW, PAYLOAD_PW, &payload);
   if (rc == CAPNP_OK)
     rc = capnp_builder_slot(&payload, PAYLOAD_DW, 0, &slot);
   if (rc == CAPNP_OK)
-    rc = capnp_builder_struct(&slot, params_dwords, params_pwords, &params);
-  if (rc == CAPNP_OK && fill && fill(fill_ctx, &params) != 0)
+    rc = capnp_builder_struct(&slot, call->params_dwords, call->params_pwords,
+                              &params);
+  if (rc == CAPNP_OK && call->fill && call->fill(call->fill_ctx, &params) != 0)
     rc = CAPNP_ERR_KIND;
   if (rc == CAPNP_OK)
     rc = flush(c, &b);
@@ -1111,6 +1148,23 @@ uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
     return (uint32_t)-1;
   }
   return qid;
+}
+
+uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t imported_cap,
+                             uint64_t interface_id, uint16_t method_id,
+                             uint16_t params_dwords, uint16_t params_pwords,
+                             capnp_rpc_fill_fn fill, void *fill_ctx)
+{
+  capnp_rpc_call_t call;
+  memset(&call, 0, sizeof call);
+  call.target = imported_cap;
+  call.interface_id = interface_id;
+  call.method_id = method_id;
+  call.params_dwords = params_dwords;
+  call.params_pwords = params_pwords;
+  call.fill = fill;
+  call.fill_ctx = fill_ctx;
+  return capnp_rpc_send_call_ex(c, &call);
 }
 
 int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id)
