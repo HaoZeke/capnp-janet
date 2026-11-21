@@ -27,6 +27,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp_rpc_send_finish` sets `releaseResultCaps` to false once the Return
+  has arrived, as C++ does. It used to leave the default of true, so a C++
+  server released the capabilities in the answer, the bootstrap included,
+  and the next call on them failed.
 - JSON `$Json.base64` and `$Json.hex` strings decode as `capnp convert`
   does: characters outside the alphabet are skipped, a bad hex digit reads
   as 0, and an odd hex character or partial base64 byte is dropped. These

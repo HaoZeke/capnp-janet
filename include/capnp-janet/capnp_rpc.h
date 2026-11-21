@@ -246,7 +246,9 @@ CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t im
                              uint16_t params_dwords, uint16_t params_pwords,
                              capnp_rpc_fill_fn fill, void *fill_ctx);
 
-/* Tell the peer we are done with an answer, and drop our copy. */
+/* Tell the peer we are done with an answer, and drop our copy. After the
+ * Return has arrived the result capabilities stay imported
+ * (releaseResultCaps = false); before it, the peer releases them. */
 CAPNP_JANET_EXPORT int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id);
 
 /* Drop `count` references to an import. */

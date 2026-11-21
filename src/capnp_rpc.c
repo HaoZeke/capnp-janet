@@ -69,6 +69,8 @@ static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid);
 #define BOOTSTRAP_PW 1
 #define FINISH_DW 1
 #define FINISH_PW 0
+/* Finish.releaseResultCaps, stored XOR its default of true. */
+#define FINISH_RELEASE_CAPS_BIT 32
 #define RELEASE_DW 1
 #define RELEASE_PW 0
 #define TARGET_DW 1
@@ -1023,6 +1025,7 @@ int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id)
   capnp_builder_t b;
   capnp_bptr_t fin;
   capnp_rpc_question_t *q = question_find(c, question_id);
+  int keep_caps = q && q->answered;
   int rc;
   if (q)
     q->used = 0;
@@ -1030,6 +1033,11 @@ int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id)
   rc = begin_message(&b, CAPNP_RPC_MSG_FINISH, FINISH_DW, FINISH_PW, &fin);
   if (rc == CAPNP_OK)
     rc = capnp_builder_set_u32(&fin, QUESTIONID_OFF, question_id);
+  /* As in C++: once the Return is in, its capabilities are our imports,
+   * dropped by Release; only a cancelled question asks the peer to drop
+   * them. */
+  if (rc == CAPNP_OK && keep_caps)
+    rc = capnp_builder_set_bool(&fin, FINISH_RELEASE_CAPS_BIT, 1);
   if (rc == CAPNP_OK)
     rc = flush(c, &b);
   capnp_builder_free(&b);

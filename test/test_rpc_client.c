@@ -62,6 +62,13 @@ static int pump(capnp_rpc_conn_t *c, queue_t *q)
   return n;
 }
 
+static void q_drop(queue_t *q)
+{
+  while (q->head < q->tail)
+    free(q->data[q->head++]);
+  q->head = q->tail = 0;
+}
+
 static int doubler_calls;
 static int doubler_fail_from;
 
@@ -209,6 +216,38 @@ int main(void)
           "failed stream refuses further sends");
   }
 
+  /* Finish asks the peer to release result capabilities only while the
+   * Return is still outstanding; afterwards they are our imports. */
+  {
+    uint32_t done = capnp_rpc_send_bootstrap(&client);
+    uint32_t pending;
+    int k;
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    CHECK(capnp_rpc_is_answered(&client, done), "finish: answered");
+    pending = capnp_rpc_send_bootstrap(&client);
+    q_drop(&g_to_vat);
+    CHECK(capnp_rpc_send_finish(&client, done) == CAPNP_OK, "finish answered");
+    CHECK(capnp_rpc_send_finish(&client, pending) == CAPNP_OK,
+          "finish pending");
+    CHECK(g_to_vat.tail == 2, "two finishes");
+    for (k = 0; k < 2 && k < g_to_vat.tail; k++) {
+      capnp_message_t m = {0};
+      capnp_ptr_t r, fin;
+      CHECK(capnp_message_from_flat(&m, g_to_vat.data[k], g_to_vat.len[k]) ==
+                    CAPNP_OK &&
+                capnp_root(&m, &r) == CAPNP_OK &&
+                capnp_get_u16(&r, 0, 0) == CAPNP_RPC_MSG_FINISH &&
+                capnp_getp(&r, 0, &fin) == CAPNP_OK,
+            "finish frame");
+      /* releaseResultCaps is stored XOR its default of true. */
+      CHECK(capnp_get_bool(&fin, 32, 0) == (k == 0),
+            k == 0 ? "answered finish keeps caps" : "pending finish drops caps");
+      capnp_message_free(&m);
+    }
+    pump(&vat, &g_to_vat);
+  }
+
   /* A peer controls Release.referenceCount. A value that does not fit the
    * local signed counter must release the export rather than overflowing. */
   {
@@ -243,7 +282,7 @@ int main(void)
     size_t len = 0;
     uint32_t pending = capnp_rpc_send_bootstrap(&client);
     CHECK(pending != (uint32_t)-1, "pending bootstrap");
-    g_to_vat.head = g_to_vat.tail = 0;
+    q_drop(&g_to_vat);
     capnp_builder_init(&b);
     CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "abort root");
     CHECK(capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK, "abort msg");

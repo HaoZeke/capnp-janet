@@ -199,6 +199,20 @@ int main(int argc, char **argv)
 		}
 	}
 
+	/* Finishing an answered bootstrap keeps its capability: the import
+	 * is ours now, and only a Release may drop it. */
+	{
+		int64_t sum = 0;
+		if (capnp_rpc_send_finish(&conn, qboot)) {
+			fprintf(stderr, "finish not sent\n");
+			return 1;
+		}
+		if (call_add(&conn, buf, sizeof buf, 5, 6, &sum) || sum != 11) {
+			fprintf(stderr, "bootstrap capability lost after Finish\n");
+			return 1;
+		}
+	}
+
 	/* An Unimplemented reply ends the connection for capnp-C++, and
 	 * echoing it back would make the peer abort. */
 	{
