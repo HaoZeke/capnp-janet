@@ -27,6 +27,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- List readers follow C++ for wider elements: scalars read the low bytes of
+  each element, `List(Bool)` reads bit `index` from the start of any data
+  list, and a `List(Void)` reads as empty structs. They used to return the
+  default or fail.
 - `capnp-eval convert` to binary or packed matches `capnp convert` byte for
   byte across segments. `--segment-size` up to 32 words used to fail, and a
   message over 1024 words came out as one segment.

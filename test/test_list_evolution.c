@@ -67,8 +67,10 @@ static void test_list_void_length(void) {
   CHECK(capnp_getp(&r, 0, &list) == CAPNP_OK, "list");
   CHECK(list.kind == CAPNP_PK_LIST && list.esize == CAPNP_SZ_VOID, "esize void");
   CHECK_EQ_U32(capnp_list_len(&list), 42, "void len");
-  CHECK(capnp_list_get_struct(&list, 0, &el) == CAPNP_ERR_KIND,
-        "void cannot upgrade");
+  CHECK(capnp_list_get_struct(&list, 41, &el) == CAPNP_OK,
+        "void reads as structs");
+  CHECK(el.dwords == 0 && el.pwords == 0, "void element is empty");
+  CHECK_EQ_U32(capnp_get_u32(&el, 0, 7), 7, "void element default");
   CHECK_EQ_U32(capnp_list_get_u32(&list, 0, 99), 99, "void no u32");
   capnp_message_free(&m);
 }
@@ -254,6 +256,34 @@ static void test_list_upgrade_u8(void) {
   capnp_message_free(&m);
 }
 
+static void test_list_wider_elements(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body;
+  uint16_t items[] = {0x0102, 0x0380, 0x0001};
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m = {0};
+  capnp_ptr_t r, list;
+
+  capnp_builder_init(&b);
+  capnp_builder_root(&b, &root);
+  capnp_builder_struct(&root, 0, 1, &body);
+  capnp_builder_set_list_u16(&body, 0, 0, items, 3);
+  capnp_builder_serialize(&b, &flat, &flen);
+  capnp_builder_free(&b);
+  capnp_message_from_flat(&m, flat, flen);
+  free(flat);
+  capnp_root(&m, &r);
+  capnp_getp(&r, 0, &list);
+  CHECK_EQ_U32(capnp_list_get_u8(&list, 1, 0), 0x80, "u8 low byte");
+  CHECK_EQ_U32(capnp_list_get_u32(&list, 0, 99), 99, "u32 too wide");
+  /* Bits come from the start of the content: 0x02 then 0x01. */
+  CHECK(capnp_list_get_bool(&list, 0, 1) == 0, "bool bit 0");
+  CHECK(capnp_list_get_bool(&list, 1, 0) == 1, "bool bit 1");
+  CHECK(capnp_list_get_bool(&list, 2, 1) == 0, "bool bit 2");
+  capnp_message_free(&m);
+}
+
 int main(void) {
   test_list_bool_roundtrip();
   test_list_void_length();
@@ -263,5 +293,6 @@ int main(void) {
   test_list_upgrade_bit_refused();
   test_list_downgrade_composite();
   test_list_upgrade_u8();
+  test_list_wider_elements();
   return harness_finish();
 }

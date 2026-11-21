@@ -771,90 +771,75 @@ static const uint8_t *composite_elem_data(const capnp_ptr_t *list,
          (list->word + (size_t)index * list->step_words) * CAPNP_WORD_BYTES;
 }
 
+/* Element `index` of a data list whose elements are at least `want`
+ * bytes wide, or NULL. A wider element is read from its low bytes, as
+ * C++ `readListPointer` allows. */
+static const uint8_t *data_elem(const capnp_ptr_t *list, uint32_t index,
+                                size_t want) {
+  static const size_t width[] = {0, 0, 1, 2, 4, 8};
+  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
+    return NULL;
+  if (list->esize == CAPNP_SZ_COMPOSITE)
+    return list->dwords >= 1 ? composite_elem_data(list, index) : NULL;
+  if (list->esize < CAPNP_SZ_BYTE || list->esize > CAPNP_SZ_EIGHT ||
+      width[list->esize] < want)
+    return NULL;
+  return list_elem_bytes(list, index, width[list->esize]);
+}
+
 uint8_t capnp_list_get_u8(const capnp_ptr_t *list, uint32_t index,
                           uint8_t dflt) {
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
-    return dflt;
-  if (list->esize == CAPNP_SZ_BYTE)
-    return *list_elem_bytes(list, index, 1);
-  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
-    return *composite_elem_data(list, index);
-  return dflt;
+  const uint8_t *p = data_elem(list, index, 1);
+  return p ? *p : dflt;
 }
 
 uint16_t capnp_list_get_u16(const capnp_ptr_t *list, uint32_t index,
                             uint16_t dflt) {
-  const uint8_t *p;
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
-    return dflt;
-  if (list->esize == CAPNP_SZ_TWO) {
-    p = list_elem_bytes(list, index, 2);
-    return (uint16_t)(p[0] | (p[1] << 8));
-  }
-  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1) {
-    p = composite_elem_data(list, index);
-    return (uint16_t)(p[0] | (p[1] << 8));
-  }
-  return dflt;
+  const uint8_t *p = data_elem(list, index, 2);
+  return p ? (uint16_t)(p[0] | (p[1] << 8)) : dflt;
 }
 
 uint32_t capnp_list_get_u32(const capnp_ptr_t *list, uint32_t index,
                             uint32_t dflt) {
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
-    return dflt;
-  if (list->esize == CAPNP_SZ_FOUR)
-    return capnp_load_le32(list_elem_bytes(list, index, 4));
-  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
-    return capnp_load_le32(composite_elem_data(list, index));
-  return dflt;
+  const uint8_t *p = data_elem(list, index, 4);
+  return p ? capnp_load_le32(p) : dflt;
 }
 
 uint64_t capnp_list_get_u64(const capnp_ptr_t *list, uint32_t index,
                             uint64_t dflt) {
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
-    return dflt;
-  if (list->esize == CAPNP_SZ_EIGHT)
-    return capnp_load_le64(list_elem_bytes(list, index, 8));
-  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
-    return capnp_load_le64(composite_elem_data(list, index));
-  return dflt;
+  const uint8_t *p = data_elem(list, index, 8);
+  return p ? capnp_load_le64(p) : dflt;
 }
 
 float capnp_list_get_f32(const capnp_ptr_t *list, uint32_t index, float dflt) {
+  const uint8_t *p = data_elem(list, index, 4);
   uint32_t bits;
   float value;
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
+  if (!p)
     return dflt;
-  if (list->esize == CAPNP_SZ_FOUR)
-    bits = capnp_load_le32(list_elem_bytes(list, index, 4));
-  else if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
-    bits = capnp_load_le32(composite_elem_data(list, index));
-  else
-    return dflt;
+  bits = capnp_load_le32(p);
   memcpy(&value, &bits, sizeof(value));
   return value;
 }
 
 double capnp_list_get_f64(const capnp_ptr_t *list, uint32_t index, double dflt) {
+  const uint8_t *p = data_elem(list, index, 8);
   uint64_t bits;
   double v;
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
+  if (!p)
     return dflt;
-  if (list->esize == CAPNP_SZ_EIGHT)
-    bits = capnp_load_le64(list_elem_bytes(list, index, 8));
-  else if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
-    bits = capnp_load_le64(composite_elem_data(list, index));
-  else
-    return dflt;
+  bits = capnp_load_le64(p);
   memcpy(&v, &bits, sizeof(v));
   return v;
 }
 
+/* C++ reads bit `index` from the start of any non-pointer data list,
+ * whatever the element width. */
 int capnp_list_get_bool(const capnp_ptr_t *list, uint32_t index, int dflt) {
   const uint8_t *base;
   uint8_t bit;
-  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_BIT ||
-      index >= list->count)
+  if (!list || list->kind != CAPNP_PK_LIST || list->esize < CAPNP_SZ_BIT ||
+      list->esize > CAPNP_SZ_EIGHT || index >= list->count)
     return dflt;
   base = list->msg->segs[list->seg].data + list->word * CAPNP_WORD_BYTES;
   bit = (uint8_t)(1u << (index % 8u));
@@ -908,8 +893,13 @@ int capnp_list_get_struct(const capnp_ptr_t *list, uint32_t index,
     out->pwords = 1;
     return CAPNP_OK;
 
+  case CAPNP_SZ_VOID:
+    fill_obj(out, list->msg, list->seg, list->word, CAPNP_PK_STRUCT,
+             list->depth_left);
+    return CAPNP_OK;
+
   default:
-    /* VOID and BIT cannot upgrade (encoding.html list-upgrade rules). */
+    /* BIT cannot upgrade (encoding.html list-upgrade rules). */
     return CAPNP_ERR_KIND;
   }
 

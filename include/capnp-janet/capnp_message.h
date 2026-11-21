@@ -110,9 +110,9 @@ CAPNP_JANET_EXPORT int capnp_list_get_text(const capnp_ptr_t *list, uint32_t ind
 CAPNP_JANET_EXPORT int capnp_get_data(const capnp_ptr_t *s, uint16_t ptr_index, const uint8_t **out,
                    size_t *len);
 
-/* Primitive list element readers (esize byte/two/four/eight).
- * Also accept composite lists as a schema-evolution *downgrade* to field @0
- * of each element (same rule as Cap'n C++ / capnp-fortran). */
+/* Primitive list element readers. A list of wider elements reads the low
+ * bytes of each one, and a composite list reads field @0 of each element,
+ * as Cap'n C++ does. Narrower elements yield `dflt`. */
 CAPNP_JANET_EXPORT uint8_t capnp_list_get_u8(const capnp_ptr_t *list, uint32_t index, uint8_t dflt);
 CAPNP_JANET_EXPORT uint16_t capnp_list_get_u16(const capnp_ptr_t *list, uint32_t index,
                             uint16_t dflt);
@@ -124,15 +124,16 @@ CAPNP_JANET_EXPORT float capnp_list_get_f32(const capnp_ptr_t *list,
                          uint32_t index, float dflt);
 CAPNP_JANET_EXPORT double capnp_list_get_f64(const capnp_ptr_t *list, uint32_t index, double dflt);
 
-/* List(Bool) bit-list element (esize = CAPNP_SZ_BIT). */
+/* List(Bool) element: bit `index` from the start of a bit list or any
+ * byte-or-wider data list (Cap'n C++ ignores the element width here). */
 CAPNP_JANET_EXPORT int capnp_list_get_bool(const capnp_ptr_t *list, uint32_t index, int dflt);
 
 /*
  * Element i as a struct. Composite lists return the real element. Primitive
  * (byte/two/four/eight) and pointer lists return the schema-evolution
  * *upgrade* view: the element is field @0 of a synthetic struct (data_bits
- * limited so oversize reads yield defaults). Bit and void lists cannot
- * upgrade (CAPNP_ERR_KIND).
+ * limited so oversize reads yield defaults). A void list yields empty
+ * structs. Bit lists cannot upgrade (CAPNP_ERR_KIND).
  */
 CAPNP_JANET_EXPORT int capnp_list_get_struct(const capnp_ptr_t *list, uint32_t index,
                           capnp_ptr_t *out);

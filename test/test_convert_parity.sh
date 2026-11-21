@@ -79,6 +79,29 @@ check ptr-structs-as-int16-list "$PARITY" Parity "text json" -- \
 check struct-as-cap "$HOLDER" Holder "text" -- \
   0001000100000000 0000000000000007 0000000100000000 0
 
+# parity_ptr SLOT PTR CONTENT...: a Parity root with every field zero but
+# pointer SLOT, followed by CONTENT. The root is 1 + 10 + 32 words.
+parity_ptr() {
+  local slot="$1" ptr="$2" i
+  shift 2
+  echo 0020000a00000000
+  for ((i = 0; i < 42; i++)); do
+    if ((i == 10 + slot)); then echo "$ptr"; else echo 0; fi
+  done
+  echo "$@"
+}
+
+# Wider list elements: low bytes per element, bools by bit index from the
+# start, and a void list read as empty structs. Offsets point past the root.
+check u8-from-int16-list "$PARITY" Parity "text json" -- \
+  $(parity_ptr 9 0000001300000059 0000000003040102)
+check bool-from-byte-list "$PARITY" Parity "text json" -- \
+  $(parity_ptr 4 000000120000006d 0000000000000203)
+check bool-from-int64-list "$PARITY" Parity "text json" -- \
+  $(parity_ptr 4 000000150000006d 0000000000000006 0)
+check structs-from-void-list "$PARITY" Parity "text json" -- \
+  $(parity_ptr 18 0000001000000035)
+
 # A null root reads as an empty struct; any other non-struct root fails.
 check null-root "$PARITY" Parity "text json binary packed flat canonical" -- 0
 check list-root "$PARITY" Parity "text json binary packed flat canonical" -- \
