@@ -3,8 +3,8 @@
  * With no arguments, two vats on a Unix socket and two on TCP loopback
  * call an adder and check the sum. `dial <port>` calls the capnp-C++
  * Adder. `serve <port>` listens and answers one C++ client.
- * `bad-return <port>` answers the bootstrap of each of five C++ clients
- * with a Return arm rpc.c++ refuses, and checks that the Abort it sends
+ * `bad-return <port>` answers the bootstrap of each of seven C++ clients
+ * with a Return rpc.c++ refuses, and checks that the Abort it sends
  * back gives the reason this vat gives for the same Return.
  */
 #include <capnp-janet/capnp_builder.h>
@@ -418,17 +418,25 @@ static int serve_peer(uint16_t port) {
   return 0;
 }
 
+/* `skew` moves the answer id off the bootstrap question. `twice` instead
+ * answers the bootstrap and the add call properly, then sends the add
+ * Return again while the client still holds the response. */
 static const struct {
   uint16_t tag;
   uint32_t take_from;
+  uint32_t skew;
+  int twice;
   const char *name;
 } bad_returns[] = {
-    {2, 0, "canceled"},
-    {3, 0, "resultsSentElsewhere"},
-    {4, 99, "takeFromOtherQuestion"},
-    {5, 0, "acceptFromThirdParty"},
-    {9, 0, "unknown arm"},
+    {2, 0, 0, 0, "canceled"},
+    {3, 0, 0, 0, "resultsSentElsewhere"},
+    {4, 99, 0, 0, "takeFromOtherQuestion"},
+    {5, 0, 0, 0, "acceptFromThirdParty"},
+    {9, 0, 0, 0, "unknown arm"},
+    {0, 0, 77, 0, "unknown question"},
+    {0, 0, 0, 1, "duplicate"},
 };
+#define N_BAD_RETURNS (sizeof bad_returns / sizeof bad_returns[0])
 
 static int build_return(uint32_t answer, uint16_t tag, uint32_t take_from,
                         uint8_t **out, size_t *len) {
@@ -480,7 +488,7 @@ static int keep_abort(void *ctx, const uint8_t *data, size_t len) {
 }
 
 /* The Abort this vat sends for the same Return to its own bootstrap. */
-static int local_abort(uint16_t tag, uint32_t take_from) {
+static int local_abort(size_t i) {
   static capnp_rpc_conn_t c;
   uint8_t *out = NULL;
   size_t len = 0;
@@ -489,14 +497,32 @@ static int local_abort(uint16_t tag, uint32_t take_from) {
   capnp_rpc_init(&c, keep_abort, NULL);
   q = capnp_rpc_send_bootstrap(&c);
   g_local_abort[0] = 0;
-  rc = build_return(q, tag, take_from, &out, &len) ||
+  rc = build_return(q + bad_returns[i].skew, bad_returns[i].tag,
+                    bad_returns[i].take_from, &out, &len) ||
+       (bad_returns[i].twice && capnp_rpc_handle(&c, out, len) != CAPNP_OK) ||
        capnp_rpc_handle(&c, out, len) != CAPNP_ERR_KIND;
   free(out);
   capnp_rpc_free(&c);
   return rc;
 }
 
+static int g_dup_fd = -1;
+static uint8_t *g_dup_last;
+static size_t g_dup_len;
+
+static int send_dup(void *ctx, const uint8_t *data, size_t len) {
+  (void)ctx;
+  free(g_dup_last);
+  g_dup_last = (uint8_t *)malloc(len);
+  if (g_dup_last == NULL)
+    return -1;
+  memcpy(g_dup_last, data, len);
+  g_dup_len = len;
+  return capnp_write_all(g_dup_fd, data, len) == CAPNP_OK ? 0 : -1;
+}
+
 static int serve_bad_returns(uint16_t port) {
+  static capnp_rpc_conn_t vat;
   int lfd = -1, failed = 0;
   uint16_t bound = 0;
   size_t i;
@@ -504,11 +530,14 @@ static int serve_bad_returns(uint16_t port) {
     return 1;
   printf("%u\n", bound);
   fflush(stdout);
-  for (i = 0; i < sizeof bad_returns / sizeof bad_returns[0]; i++) {
+  for (i = 0; i < N_BAD_RETURNS; i++) {
     char cpp[256] = "";
     int fd = accept(lfd, NULL, NULL), sent = 0;
     if (fd < 0)
       return 1;
+    g_dup_fd = fd;
+    capnp_rpc_init(&vat, send_dup, NULL);
+    capnp_rpc_set_bootstrap(&vat, &g_server_obj, adder_dispatch);
     for (;;) {
       capnp_message_t m = {0};
       capnp_ptr_t root, body;
@@ -520,12 +549,17 @@ static int serve_bad_returns(uint16_t port) {
       if (capnp_message_from_flat(&m, frame, n) == CAPNP_OK &&
           capnp_root(&m, &root) == CAPNP_OK)
         tag = capnp_get_u16(&root, 0, 0);
-      if (tag == CAPNP_RPC_MSG_BOOTSTRAP && !sent &&
-          capnp_getp(&root, 0, &body) == CAPNP_OK) {
+      if (bad_returns[i].twice && tag != CAPNP_RPC_MSG_ABORT) {
+        (void)capnp_rpc_handle(&vat, frame, n);
+        if (tag == CAPNP_RPC_MSG_CALL && g_dup_last != NULL)
+          (void)capnp_write_all(fd, g_dup_last, g_dup_len);
+      } else if (tag == CAPNP_RPC_MSG_BOOTSTRAP && !sent &&
+                 capnp_getp(&root, 0, &body) == CAPNP_OK) {
         uint8_t *out = NULL;
         size_t len = 0;
-        sent = build_return(capnp_get_u32(&body, 0, 0), bad_returns[i].tag,
-                            bad_returns[i].take_from, &out, &len) == 0 &&
+        sent = build_return(capnp_get_u32(&body, 0, 0) + bad_returns[i].skew,
+                            bad_returns[i].tag, bad_returns[i].take_from, &out,
+                            &len) == 0 &&
                capnp_write_all(fd, out, len) == CAPNP_OK;
         free(out);
       }
@@ -539,7 +573,10 @@ static int serve_bad_returns(uint16_t port) {
         break;
     }
     close(fd);
-    if (local_abort(bad_returns[i].tag, bad_returns[i].take_from) ||
+    capnp_rpc_free(&vat);
+    free(g_dup_last);
+    g_dup_last = NULL;
+    if (local_abort(i) ||
         cpp[0] == 0 || strcmp(cpp, g_local_abort) != 0) {
       fprintf(stderr, "FAIL Return %s: capnp-C++ \"%s\", this vat \"%s\"\n",
               bad_returns[i].name, cpp, g_local_abort);

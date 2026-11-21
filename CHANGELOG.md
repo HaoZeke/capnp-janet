@@ -44,6 +44,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- A question finished before its Return stays in the table until that
+  Return, as in rpc.c++. A Return for a question this vat does not
+  have, or a second Return, now aborts with capnp-C++'s reason; such a
+  Return used to be ignored.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

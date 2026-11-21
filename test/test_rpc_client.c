@@ -308,26 +308,49 @@ int main(void)
             "large answer dropped at finish");
   }
 
-  /* A Return for a question we never asked is ignored. */
+  /* A Return for a question we never asked, or a second Return for one,
+   * aborts as rpc.c++ does. Recording it would let a peer plant answers
+   * that later pipelining would trust. */
   {
-    capnp_builder_t b;
-    capnp_bptr_t root, msg, slot, ret;
-    uint8_t *flat = NULL;
-    size_t len = 0;
-    capnp_builder_init(&b);
-    CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
-    CHECK(capnp_builder_struct(&root, 1, 1, &msg) == CAPNP_OK, "msg");
-    CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RETURN) == CAPNP_OK, "tag");
-    CHECK(capnp_builder_slot(&msg, 1, 0, &slot) == CAPNP_OK, "slot");
-    CHECK(capnp_builder_struct(&slot, 2, 1, &ret) == CAPNP_OK, "ret");
-    CHECK(capnp_builder_set_u32(&ret, 0, 77) == CAPNP_OK, "answerId 77");
-    CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
-    capnp_rpc_handle(&client, flat, len);
-    free(flat);
-    capnp_builder_free(&b);
-    /* Recording it would let a peer plant answers to questions we never
-     * asked, which later pipelining would then trust. */
-    CHECK(!capnp_rpc_is_answered(&client, 77), "stray Return ignored");
+    uint32_t qd;
+    q_drop(&g_to_vat);
+    CHECK(feed_return(&client, 77, 0, 0) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_vat, "Invalid question ID in Return message."),
+          "stray Return aborts");
+    CHECK(!capnp_rpc_is_answered(&client, 77), "stray Return not recorded");
+    qd = capnp_rpc_send_bootstrap(&client);
+    q_drop(&g_to_vat);
+    CHECK(feed_return(&client, qd, 0, 0) == CAPNP_OK &&
+              capnp_rpc_is_answered(&client, qd),
+          "first Return recorded");
+    CHECK(feed_return(&client, qd, 0, 0) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_vat, "expected question->isAwaitingReturn; "
+                                    "Duplicate Return."),
+          "duplicate Return aborts");
+    capnp_rpc_send_finish(&client, qd);
+    q_drop(&g_to_vat);
+  }
+
+  /* A question finished before its Return stays until that Return, which
+   * only closes it. */
+  {
+    uint32_t qf;
+    int i, kept = 0;
+    qf = capnp_rpc_send_bootstrap(&client);
+    CHECK(capnp_rpc_send_finish(&client, qf) == CAPNP_OK, "early finish");
+    q_drop(&g_to_vat);
+    for (i = 0; i < CAPNP_RPC_MAX_QUESTIONS; i++)
+      kept |= client.questions[i].used && client.questions[i].question_id == qf;
+    CHECK(kept && !capnp_rpc_is_answered(&client, qf),
+          "finished question kept for its Return");
+    CHECK(feed_return(&client, qf, 0, 0) == CAPNP_OK && g_to_vat.tail == 0,
+          "late Return closes the question quietly");
+    for (i = 0; i < CAPNP_RPC_MAX_QUESTIONS; i++)
+      CHECK(!(client.questions[i].used && client.questions[i].question_id == qf),
+            "late Return drops the question");
+    CHECK(feed_return(&client, qf, 0, 0) == CAPNP_ERR_KIND &&
+              sent_abort(&g_to_vat, "Invalid question ID in Return message."),
+          "a Return after that one aborts");
   }
 
   /* A senderPromise descriptor names an export as senderHosted does. */
@@ -399,6 +422,38 @@ int main(void)
           "kept results are taken once");
     capnp_rpc_send_finish(&client, qy);
     pump(&vat, &g_to_vat);
+  }
+
+  /* A tail call back to us whose question we already finished frees the
+   * kept results, as rpc.c++ drops the answer's task. */
+  {
+    capnp_rpc_call_t call;
+    uint32_t qy, vq;
+    int i, takeable = 0, kept = 0;
+    memset(&call, 0, sizeof call);
+    call.interface_id = 0x1234;
+    call.params_dwords = 1;
+    call.fill = fill_u32;
+    call.fill_ctx = &arg;
+    call.results_to_yourself = 1;
+    qy = capnp_rpc_send_call_ex(&client, &call);
+    pump(&vat, &g_to_vat);
+    pump(&client, &g_to_client);
+    vq = capnp_rpc_send_bootstrap(&vat);
+    capnp_rpc_send_finish(&vat, vq);
+    q_drop(&g_to_client);
+    CHECK(feed_return(&vat, vq, 4, qy) == CAPNP_OK && g_to_client.tail == 0,
+          "late takeFromOtherQuestion is quiet");
+    for (i = 0; i < CAPNP_RPC_MAX_ANSWERS; i++) {
+      if (vat.answers[i].used && vat.answers[i].question_id == qy) {
+        kept = 1;
+        takeable |= vat.answers[i].used == 2;
+      }
+    }
+    CHECK(kept && !takeable, "late takeFromOtherQuestion frees the results");
+    capnp_rpc_send_finish(&client, qy);
+    pump(&vat, &g_to_vat);
+    q_drop(&g_to_client);
   }
 
   /* The other Return arms abort the connection as rpc.c++ does, and

@@ -26,8 +26,13 @@ static void questions_fail_all(capnp_rpc_conn_t *c);
 #define JOINRESULT_DW 1
 #define JOINRESULT_PW 1
 
-/* `used` value of a question or answer in a tail call; see capnp_rpc.h. */
+/* `used` value of an answer in a tail call; see capnp_rpc.h. */
 #define SLOT_MARKED 2
+/* Bits of a question's `used`: asked, sent with sendResultsTo.yourself,
+ * and finished by us before its Return arrived. */
+#define Q_USED 1
+#define Q_TAIL 2
+#define Q_FINISHED 4
 
 /* Message.union discriminant, byte 0. */
 #define MESSAGE_TAG_OFF 0
@@ -1008,7 +1013,7 @@ static capnp_rpc_question_t *question_claim(capnp_rpc_conn_t *c,
   for (i = 0; i < CAPNP_RPC_MAX_QUESTIONS; i++) {
     if (!c->questions[i].used) {
       memset(&c->questions[i], 0, sizeof c->questions[i]);
-      c->questions[i].used = 1;
+      c->questions[i].used = Q_USED;
       c->questions[i].question_id = c->next_question_id++;
       *qid_out = c->questions[i].question_id;
       return &c->questions[i];
@@ -1024,6 +1029,13 @@ static capnp_rpc_question_t *question_find(capnp_rpc_conn_t *c, uint32_t qid)
     if (c->questions[i].used && c->questions[i].question_id == qid)
       return &c->questions[i];
   return NULL;
+}
+
+/* A question the caller still has: asked and not yet finished. */
+static capnp_rpc_question_t *question_live(capnp_rpc_conn_t *c, uint32_t qid)
+{
+  capnp_rpc_question_t *q = question_find(c, qid);
+  return q && !(q->used & Q_FINISHED) ? q : NULL;
 }
 
 /* Build a Message with one struct in its union slot. */
@@ -1244,7 +1256,7 @@ uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c, const capnp_rpc_call_t *cal
       return (uint32_t)-1;
   }
   /* rpc.c++ refuses to pipeline on a request it no longer holds. */
-  if (call->promised && question_find(c, call->target) == NULL)
+  if (call->promised && question_live(c, call->target) == NULL)
     return (uint32_t)-1;
   q = question_claim(c, &qid);
   if (q == NULL)
@@ -1295,7 +1307,7 @@ uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c, const capnp_rpc_call_t *cal
     if (call->caps[i].kind == CAPNP_RPC_CAP_EXPORT)
       c->exports[call->caps[i].id].refcount++;
   if (call->results_to_yourself)
-    q->used = SLOT_MARKED;
+    q->used |= Q_TAIL;
   return qid;
 }
 
@@ -1320,11 +1332,15 @@ int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id)
 {
   capnp_builder_t b;
   capnp_bptr_t fin;
-  capnp_rpc_question_t *q = question_find(c, question_id);
+  capnp_rpc_question_t *q = question_live(c, question_id);
   int keep_caps = q && q->answered;
   int rc;
-  if (q)
+  /* As in rpc.c++, a question whose Return is still to come stays in the
+   * table until that Return, which then only closes it. */
+  if (q && q->answered)
     question_drop(q);
+  else if (q)
+    q->used |= Q_FINISHED;
   capnp_builder_init(&b);
   rc = begin_message(&b, CAPNP_RPC_MSG_FINISH, FINISH_DW, FINISH_PW, &fin);
   if (rc == CAPNP_OK)
@@ -1360,19 +1376,19 @@ int capnp_rpc_send_release(capnp_rpc_conn_t *c, uint32_t import_id,
 
 int capnp_rpc_is_answered(capnp_rpc_conn_t *c, uint32_t question_id)
 {
-  capnp_rpc_question_t *q = question_find(c, question_id);
+  capnp_rpc_question_t *q = question_live(c, question_id);
   return q && q->answered;
 }
 
 int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t question_id)
 {
-  capnp_rpc_question_t *q = question_find(c, question_id);
+  capnp_rpc_question_t *q = question_live(c, question_id);
   return q && q->answered && q->failed;
 }
 
 int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id)
 {
-  capnp_rpc_question_t *q = question_find(c, question_id);
+  capnp_rpc_question_t *q = question_live(c, question_id);
   capnp_message_t m = {0};
   capnp_ptr_t root, ret, payload, content, table, desc;
   int id = -1;
@@ -1404,7 +1420,7 @@ int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id)
 int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
                              capnp_message_t *msg_out, capnp_ptr_t *out)
 {
-  capnp_rpc_question_t *q = question_find(c, question_id);
+  capnp_rpc_question_t *q = question_live(c, question_id);
   capnp_ptr_t root, ret, payload;
 
   if (q == NULL || !q->answered || q->failed)
@@ -1424,10 +1440,9 @@ int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
   return CAPNP_OK;
 }
 
-/* Record a Return against the question that asked it. A Return naming a
- * question this vat never asked is dropped: recording it would let a peer
- * plant answers that later pipelining would trust. The checks on the
- * other arms are the ones rpc.c++ handleReturn makes. */
+/* Record a Return against the question that asked it. The checks are the
+ * ones rpc.c++ handleReturn makes, and the reasons are the Abort text
+ * capnp-C++ sends, condition included. */
 static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
                          const uint8_t *frame, size_t len)
 {
@@ -1437,14 +1452,28 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
     return CAPNP_OK;
   q = question_find(c, capnp_get_u32(ret, RETURN_ANSWERID_OFF, 0));
   if (q == NULL)
-    return CAPNP_OK;
+    return protocol_abort(c, "Invalid question ID in Return message.");
+  if (q->answered)
+    return protocol_abort(c, "expected question->isAwaitingReturn; "
+                             "Duplicate Return.");
   tag = capnp_get_u16(ret, RETURN_TAG_OFF, 0);
-  /* The reasons are the Abort text capnp-C++ sends, condition included. */
-  if (q->used == SLOT_MARKED && tag == RETURN_TAG_RESULTS)
+  if (q->used & Q_FINISHED) {
+    /* We finished it first, so nobody wants the results. A tail call back
+     * to us still frees the answer it would have taken. */
+    if (tag == RETURN_TAG_TAKE_FROM_OTHER_QUESTION) {
+      capnp_rpc_answer_t *a =
+          answer_find(c, capnp_get_u32(ret, RETURN_TAKEFROM_OFF, 0));
+      if (a != NULL && a->used == SLOT_MARKED)
+        a->used = 1;
+    }
+    question_drop(q);
+    return CAPNP_OK;
+  }
+  if ((q->used & Q_TAIL) && tag == RETURN_TAG_RESULTS)
     return protocol_abort(c, "expected !question->isTailCall; Tail call "
                              "`Return` must set `resultsSentElsewhere`, not "
                              "`results`.");
-  if (q->used == SLOT_MARKED && tag == RETURN_TAG_EXCEPTION)
+  if ((q->used & Q_TAIL) && tag == RETURN_TAG_EXCEPTION)
     return protocol_abort(c, "expected !question->isTailCall; Tail call "
                              "`Return` must set `resultsSentElsewhere`, not "
                              "`exception`.");
@@ -1454,7 +1483,7 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
   if (tag > RETURN_TAG_TAKE_FROM_OTHER_QUESTION)
     return protocol_abort(c, "Unknown 'Return' type.");
   if (tag == RETURN_TAG_RESULTS_SENT_ELSEWHERE) {
-    if (q->used != SLOT_MARKED)
+    if (!(q->used & Q_TAIL))
       return protocol_abort(c, "expected question->isTailCall; `Return` had "
                                "`resultsSentElsewhere` but this was not a "
                                "tail call.");
@@ -1747,7 +1776,9 @@ static void questions_fail_all(capnp_rpc_conn_t *c)
   int i;
   for (i = 0; i < CAPNP_RPC_MAX_QUESTIONS; i++) {
     capnp_rpc_question_t *q = &c->questions[i];
-    if (q->used && !q->answered) {
+    if (q->used & Q_FINISHED) {
+      question_drop(q);
+    } else if (q->used && !q->answered) {
       q->answered = 1;
       q->failed = 1;
       frame_clear(q->reply, &q->reply_len);

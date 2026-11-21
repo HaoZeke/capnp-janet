@@ -239,6 +239,16 @@ static int check_cap_params(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 	return 0;
 }
 
+/* Whether the question table still has `q`. */
+static int question_held(const capnp_rpc_conn_t *conn, uint32_t q)
+{
+	int i;
+	for (i = 0; i < CAPNP_RPC_MAX_QUESTIONS; i++)
+		if (conn->questions[i].used && conn->questions[i].question_id == q)
+			return 1;
+	return 0;
+}
+
 /* Handle one frame, noting the union tag of a Return in `tags`. */
 static int handle_noting(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap,
 			 unsigned *tags)
@@ -288,7 +298,7 @@ static int check_tail(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 	capnp_message_t m = {0};
 	capnp_ptr_t content;
 	unsigned tags = 0;
-	uint32_t q;
+	uint32_t q, tq;
 	int64_t sum;
 	int eid = capnp_rpc_export(conn, &self, local_add);
 
@@ -298,16 +308,18 @@ static int check_tail(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 	call.fill = fill_add;
 	call.fill_ctx = ab;
 	call.results_to_yourself = 1;
-	q = capnp_rpc_send_call_ex(conn, &call);
+	tq = capnp_rpc_send_call_ex(conn, &call);
 	/* capnp-C++ sends resultsSentElsewhere once the caller has sent
-	 * Finish, so a bootstrap call afterwards waits behind it. */
-	if (q == (uint32_t)-1 || capnp_rpc_send_finish(conn, q)) {
+	 * Finish, so a bootstrap call afterwards waits behind it. Until then
+	 * the finished question stays in the table. */
+	if (tq == (uint32_t)-1 || capnp_rpc_send_finish(conn, tq) ||
+	    !question_held(conn, tq)) {
 		fprintf(stderr, "add() to yourself not sent\n");
 		return 1;
 	}
 	q = capnp_rpc_send_call(conn, 0, ADDER_IFACE, 0, 2, 0, fill_add, ab);
 	if (q == (uint32_t)-1 || wait_noting(conn, q, buf, cap, &tags) ||
-	    !(tags & (1u << 3))) {
+	    !(tags & (1u << 3)) || question_held(conn, tq)) {
 		fprintf(stderr, "add() to yourself: tags %#x\n", tags);
 		return 1;
 	}
@@ -353,16 +365,21 @@ static int check_tail(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 }
 
 /* hang() never returns. After Finish capnp-C++ cancels it and answers
- * canceled, which the vat takes quietly for a question it dropped. That
- * Return may come after the answer to a later call. */
+ * canceled. The vat keeps the finished question until that Return, as
+ * rpc.c++ does, and the Return then closes it. That Return may come
+ * after the answer to a later call. */
 static int check_cancel(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 {
 	int64_t ab[2] = {1, 2};
 	unsigned tags = 0;
-	uint32_t q = capnp_rpc_send_call(conn, 0, ADDER_IFACE, 5, 0, 0, NULL,
-	                                 NULL);
-	if (q == (uint32_t)-1 || capnp_rpc_send_finish(conn, q)) {
+	uint32_t hq = capnp_rpc_send_call(conn, 0, ADDER_IFACE, 5, 0, 0, NULL,
+	                                  NULL), q;
+	if (hq == (uint32_t)-1 || capnp_rpc_send_finish(conn, hq)) {
 		fprintf(stderr, "hang() not sent\n");
+		return 1;
+	}
+	if (!question_held(conn, hq)) {
+		fprintf(stderr, "hang() dropped before its Return\n");
 		return 1;
 	}
 	q = capnp_rpc_send_call(conn, 0, ADDER_IFACE, 0, 2, 0, fill_add, ab);
@@ -376,6 +393,10 @@ static int check_cancel(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 			fprintf(stderr, "hang() after Finish: tags %#x\n", tags);
 			return 1;
 		}
+	if (question_held(conn, hq)) {
+		fprintf(stderr, "hang() kept after its Return\n");
+		return 1;
+	}
 	return 0;
 }
 

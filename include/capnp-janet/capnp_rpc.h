@@ -98,10 +98,12 @@ typedef struct capnp_rpc_export {
   capnp_rpc_dispatch_fn dispatch;
 } capnp_rpc_export_t;
 
-/* A question this vat asked, from send until its Return arrives. */
+/* A question this vat asked, from send until both its Return has arrived
+ * and the caller has finished it, as in rpc.c++. */
 typedef struct capnp_rpc_question {
-  /* Nonzero while in use. 2 marks a call sent with
-   * sendResultsTo.yourself, whose Return must be resultsSentElsewhere. */
+  /* Nonzero while in use. Bit 2 marks a call sent with
+   * sendResultsTo.yourself, whose Return must be resultsSentElsewhere;
+   * bit 4 marks one finished before its Return. */
   int used;
   uint32_t question_id;
   int answered;
@@ -232,8 +234,9 @@ CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
  * CAPNP_ERR_IO means the peer sent Abort, and CAPNP_ERR_KIND also covers
  * an Unimplemented reply to anything but Resolve. Either one ends the
  * connection: every unanswered question fails and nothing is sent back.
- * A Return that rpc.c++ refuses also ends it with CAPNP_ERR_KIND, after
- * an Abort carrying the rpc.c++ reason. */
+ * A Return that rpc.c++ refuses, including one naming no question we
+ * hold, also ends it with CAPNP_ERR_KIND, after an Abort carrying the
+ * rpc.c++ reason. */
 CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
 
 /* --- client side -------------------------------------------------- */
@@ -299,7 +302,8 @@ CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c,
 
 /* Tell the peer we are done with an answer, and drop our copy. After the
  * Return has arrived the result capabilities stay imported
- * (releaseResultCaps = false); before it, the peer releases them. */
+ * (releaseResultCaps = false); before it, the peer releases them, and
+ * the question waits in the table for that Return. */
 CAPNP_JANET_EXPORT int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id);
 
 /* Drop `count` references to an import. */

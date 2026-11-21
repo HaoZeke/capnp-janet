@@ -30,7 +30,7 @@ wait $SPID 2>/dev/null || true
 trap - EXIT
 rm -f "$PORTFILE"
 
-# Return arms capnp-C++ refuses: its Abort reason must be the vat's.
+# Returns capnp-C++ refuses: its Abort reason must be the vat's.
 PORTFILE=$(mktemp)
 "$DIAL" bad-return 0 >"$PORTFILE" &
 SPID=$!
@@ -44,9 +44,10 @@ for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
   sleep 0.05
 done
 [[ -n "$PORT" ]]
-for _ in 1 2 3 4 5; do
+for _ in 1 2 3 4 5 6; do
   "$CLIENT" "$PORT" abort
 done
+"$CLIENT" "$PORT" hold
 wait $SPID
 trap - EXIT
 tail -n +2 "$PORTFILE"
