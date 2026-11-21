@@ -106,6 +106,9 @@ Pre-1.0 minor releases may include breaking API changes.
   the peer hosts under the promise's own id. A new capability naming an
   import still on the table is given back with that import's last
   release.
+- A Return naming a question id with the high bit set is ignored, as
+  rpc.c++ keeps those ids for calls that want no Return. It used to
+  abort as naming no question.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

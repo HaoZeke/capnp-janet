@@ -2188,6 +2188,10 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
   uint16_t tag;
   if (ret->kind != CAPNP_PK_STRUCT)
     return CAPNP_OK;
+  /* rpc.c++ keeps ids with the high bit for calls that want no Return,
+   * and ignores a Return naming one. This vat asks no such question. */
+  if (capnp_get_u32(ret, RETURN_ANSWERID_OFF, 0) & 0x80000000u)
+    return CAPNP_OK;
   q = question_find(c, capnp_get_u32(ret, RETURN_ANSWERID_OFF, 0));
   if (q == NULL)
     return protocol_abort(c, "Invalid question ID in Return message.");

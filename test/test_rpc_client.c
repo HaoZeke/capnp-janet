@@ -572,6 +572,9 @@ int main(void)
       kept |= client.questions[i].used && client.questions[i].question_id == qf;
     CHECK(kept && !capnp_rpc_is_answered(&client, qf),
           "finished question kept for its Return");
+    CHECK(feed_return(&client, 0x80000000u | qf, 0, 0) == CAPNP_OK &&
+              g_to_vat.tail == 0 && capnp_rpc_is_answered(&client, qf) == 0,
+          "a Return for a high question id is ignored");
     CHECK(feed_return(&client, qf, 0, 0) == CAPNP_OK && g_to_vat.tail == 0,
           "late Return closes the question quietly");
     for (i = 0; i < CAPNP_RPC_MAX_QUESTIONS; i++)
