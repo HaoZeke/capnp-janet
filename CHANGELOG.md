@@ -76,6 +76,9 @@ Pre-1.0 minor releases may include breaking API changes.
 - A call pipelined through a bootstrap answer with any transform is
   refused with `Invalid pipeline transform.`, and one pipelined on
   results without capabilities with rpc.c++'s no-pipeline text.
+- Results collected with `takeFromOtherQuestion` name their capabilities
+  from the asking side: our exports come back as exports, and the
+  peer's own as imports. They used to read as the peer wrote them.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

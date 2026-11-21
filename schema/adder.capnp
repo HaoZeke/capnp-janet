@@ -10,7 +10,7 @@ interface Adder @0xea01e10cbc414411 {
   # `n` bytes of 0xab, for a Return longer than any fixed buffer.
   echo @1 (n :UInt32) -> (data :Data);
   # This same capability, for a call pipelined on the answer.
-  self @2 () -> (adder :Adder);
+  self @2 () -> AdderBox;
   # The sum `cb.add(20, 22)` returns, for a capability in the params.
   callBack @3 (cb :Adder) -> (sum :Int64);
   # A tail call to `target.relay(a, b)`.
@@ -19,4 +19,11 @@ interface Adder @0xea01e10cbc414411 {
   hang @5 () -> () $Cxx.allowCancellation;
   # The sum `cb.self().add(1, 2)` returns, for a capability in results.
   callSelf @6 (cb :Adder) -> (sum :Int64);
+  # A tail call to `target.self()`.
+  relaySelf @7 (target :Adder) -> AdderBox;
+}
+
+# Results of `self` and `relaySelf`, which a tail call needs to share.
+struct AdderBox {
+  adder @0 :Adder;
 }

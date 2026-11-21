@@ -1775,6 +1775,45 @@ int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
   return CAPNP_OK;
 }
 
+/* Results a takeFromOtherQuestion collected were written for the peer,
+ * so each descriptor names its capability from the far side. Turn them
+ * round, as rpc.c++ hands the question the very capabilities it
+ * returned: our exports become receiverHosted, and the peer's own
+ * become senderHosted imports. */
+static void flip_taken_caps(capnp_rpc_question_t *q)
+{
+  uint8_t *flat = (uint8_t *)frame_bytes(q->reply, q->reply_len);
+  capnp_message_t m = {0};
+  capnp_ptr_t root, ret, payload, table, desc;
+  uint32_t i, n;
+  if (capnp_message_view_flat(&m, flat, q->reply_len) != CAPNP_OK)
+    return;
+  if (capnp_root(&m, &root) == CAPNP_OK &&
+      capnp_getp(&root, 0, &ret) == CAPNP_OK &&
+      capnp_getp(&ret, 0, &payload) == CAPNP_OK &&
+      capnp_getp(&payload, 1, &table) == CAPNP_OK) {
+    n = capnp_list_len(&table);
+    for (i = 0; i < n; i++) {
+      uint8_t *tag;
+      uint16_t was, now;
+      if (capnp_list_get_struct(&table, i, &desc) != CAPNP_OK ||
+          desc.dwords == 0)
+        continue;
+      was = capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0);
+      if (was == CAPDESC_TAG_SENDERHOSTED || was == CAPDESC_TAG_SENDERPROMISE)
+        now = CAPDESC_TAG_RECEIVERHOSTED;
+      else if (was == CAPDESC_TAG_RECEIVERHOSTED)
+        now = CAPDESC_TAG_SENDERHOSTED;
+      else
+        continue;
+      tag = (uint8_t *)m.segs[desc.seg].data + desc.word * 8 + CAPDESC_TAG_OFF;
+      tag[0] = (uint8_t)now;
+      tag[1] = (uint8_t)(now >> 8);
+    }
+  }
+  capnp_message_free(&m);
+}
+
 /* Record a Return against the question that asked it. The checks are the
  * ones rpc.c++ handleReturn makes, and the reasons are the Abort text
  * capnp-C++ sends, condition included. */
@@ -1853,6 +1892,8 @@ static int handle_return(capnp_rpc_conn_t *c, const capnp_ptr_t *ret,
     if (frame_store(q->reply, &q->reply_len, frame_bytes(a->frame, a->len),
                     a->len) != CAPNP_OK)
       q->failed = 1;
+    if (!q->failed)
+      flip_taken_caps(q);
     return CAPNP_OK;
   }
   q->answered = 1;

@@ -580,6 +580,45 @@ int main(void)
           "the returned reference comes back with Release");
   }
 
+  /* Results a takeFromOtherQuestion collects name their capabilities
+   * from the side that asked: the vat's own export comes back as an
+   * export, and one the caller handed back as an import. */
+  {
+    capnp_rpc_call_t call;
+    capnp_rpc_cap_ref_t out;
+    uint32_t qy, vq;
+    int pass;
+    memset(&call, 0, sizeof call);
+    call.interface_id = 0x1234;
+    call.method_id = 9;
+    call.params_dwords = 1;
+    call.fill = fill_u32;
+    call.fill_ctx = &arg;
+    call.results_to_yourself = 1;
+    for (pass = 0; pass < 2; pass++) {
+      arg = pass == 0 ? 0 : 105;
+      qy = capnp_rpc_send_call_ex(&client, &call);
+      pump(&vat, &g_to_vat);
+      pump(&client, &g_to_client);
+      vq = capnp_rpc_send_bootstrap(&vat);
+      q_drop(&g_to_client);
+      CHECK(feed_return(&vat, vq, 4, qy) == CAPNP_OK &&
+                capnp_rpc_answer_cap(&vat, vq, 0, &out) == 0,
+            "taken results carry their capability");
+      if (pass == 0)
+        CHECK(out.kind == CAPNP_RPC_CAP_EXPORT && out.id == 0 &&
+                  capnp_rpc_answer_cap_id(&vat, vq) == -1,
+              "a taken export of ours stays ours");
+      else
+        CHECK(out.kind == CAPNP_RPC_CAP_IMPORT && out.id == 5,
+              "a taken capability of the caller's is an import");
+      capnp_rpc_send_finish(&vat, vq);
+      capnp_rpc_send_finish(&client, qy);
+      pump(&vat, &g_to_vat);
+      q_drop(&g_to_client);
+    }
+  }
+
   /* A tail call back to us whose question we already finished frees the
    * kept results, as rpc.c++ drops the answer's task. */
   {

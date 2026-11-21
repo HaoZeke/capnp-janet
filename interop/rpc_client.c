@@ -369,6 +369,79 @@ static int check_result_caps(capnp_rpc_conn_t *conn, uint8_t *buf,
 	return 0;
 }
 
+/* relaySelf(target) tail-calls target.self() back into this vat, and
+ * capnp-C++ answers with takeFromOtherQuestion. The capability taken
+ * must name the side it lives on: passing it to callBack() reaches our
+ * add() for our export, and the peer's own add() for its bootstrap. */
+static int check_take_caps(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
+{
+	capnp_rpc_cap_ref_t ref, got;
+	capnp_rpc_call_t call;
+	int pass;
+	for (pass = 0; pass < 2; pass++) {
+		int64_t want = pass == 0 ? 1042 : 42, sum;
+		capnp_message_t m = {0};
+		capnp_ptr_t content, adder;
+		int eid = pass == 0 ? g_self_eid
+		                    : capnp_rpc_export(conn, &g_hand_back, local_self);
+		unsigned tags = 0;
+		uint32_t q, cq;
+		if (eid < 0)
+			return 1;
+		ref.kind = CAPNP_RPC_CAP_EXPORT;
+		ref.id = (uint32_t)eid;
+		memset(&call, 0, sizeof call);
+		call.interface_id = ADDER_IFACE;
+		call.method_id = 7;
+		call.params_pwords = 1;
+		call.fill = fill_cb;
+		call.caps = &ref;
+		call.ncaps = 1;
+		q = capnp_rpc_send_call_ex(conn, &call);
+		if (q == (uint32_t)-1 || wait_noting(conn, q, buf, cap, &tags) ||
+		    !(tags & (1u << 4)) ||
+		    capnp_rpc_answer_content(conn, q, &m, &content) != CAPNP_OK ||
+		    capnp_getp(&content, 0, &adder) != CAPNP_OK ||
+		    adder.kind != CAPNP_PK_CAP ||
+		    capnp_rpc_answer_cap(conn, q, adder.count, &got) != 0) {
+			capnp_message_free(&m);
+			fprintf(stderr, "relaySelf() pass %d: tags %#x\n", pass, tags);
+			return 1;
+		}
+		capnp_message_free(&m);
+		if (pass == 0 ? got.kind != CAPNP_RPC_CAP_EXPORT ||
+		                    got.id != (uint32_t)eid
+		              : got.kind != CAPNP_RPC_CAP_IMPORT || got.id != 0) {
+			fprintf(stderr, "relaySelf() pass %d took kind %d id %u\n",
+			        pass, got.kind, got.id);
+			return 1;
+		}
+		memset(&call, 0, sizeof call);
+		call.interface_id = ADDER_IFACE;
+		call.method_id = 3;
+		call.params_pwords = 1;
+		call.fill = fill_cb;
+		call.caps = &got;
+		call.ncaps = 1;
+		cq = capnp_rpc_send_call_ex(conn, &call);
+		if (cq == (uint32_t)-1 || wait_answer(conn, cq, buf, cap) ||
+		    capnp_rpc_answer_content(conn, cq, &m, &content) != CAPNP_OK) {
+			fprintf(stderr, "callBack(taken) pass %d failed\n", pass);
+			return 1;
+		}
+		sum = (int64_t)capnp_get_u64(&content, 0, 0);
+		capnp_message_free(&m);
+		if (sum != want) {
+			fprintf(stderr, "callBack(taken) pass %d returned %lld\n", pass,
+			        (long long)sum);
+			return 1;
+		}
+		capnp_rpc_send_finish(conn, cq);
+		capnp_rpc_send_finish(conn, q);
+	}
+	return 0;
+}
+
 static int check_tail(capnp_rpc_conn_t *conn, uint8_t *buf, size_t cap)
 {
 	static int self;
@@ -823,6 +896,8 @@ int main(int argc, char **argv)
 	if (check_cap_params(&conn, buf, sizeof buf))
 		return 1;
 	if (check_result_caps(&conn, buf, sizeof buf))
+		return 1;
+	if (check_take_caps(&conn, buf, sizeof buf))
 		return 1;
 	if (check_tail(&conn, buf, sizeof buf))
 		return 1;
