@@ -208,6 +208,12 @@ for v in '"0aF"' '"zz41"' '"4g"' '"g1"'; do
   printf '{"hexData": %s}' "$v" >"$TMP/in.bin"
   compare "json-hex-$((i++))" "$PARITY" Parity "text binary"
 done
+# JsonCodec reads any JSON value as Void.
+for v in '{"vVoid": {}}' '{"vVoid": 0}' '{"vVoid": "x"}' '{"vVoid": [1]}' \
+  '{"lVoid": [true, {}, null, "y"]}' '{"uQuiet": 5}' '{"vVoid": false}'; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "json-void-$((i++))" "$PARITY" Parity "text binary"
+done
 
 # Stream input takes at most 511 segments.
 in_fmt=binary

@@ -5013,7 +5013,7 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
   switch (elem_rt->which) {
   case TY_VOID:
     for (i = 0; i < n; i++) {
-      if (json ? (v->kids[i]->kind != VK_NULL) : (v->kids[i]->kind != VK_VOID)) {
+      if (!json && v->kids[i]->kind != VK_VOID) {
         dyn_note_bad(d, v->kids[i]);
         return -1;
       }
@@ -5573,7 +5573,8 @@ static int build_field_from_vnode(capnp_dyn_t *d, const dyn_struct_t *st,
   }
   switch (ft.which) {
   case TY_VOID:
-    if (json ? (v->kind != VK_NULL) : (v->kind != VK_VOID)) {
+    /* JsonCodec reads any JSON value as Void. */
+    if (!json && v->kind != VK_VOID) {
       rc = -1;
       value_bad = 1;
     }
