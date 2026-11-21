@@ -815,41 +815,41 @@ int main(int argc, char **argv) {
     } else if (strncmp(a, "-I", 2) == 0) {
       const char *dir = a[2] ? a + 2 : (i + 1 < argc ? argv[++i] : NULL);
       if (!dir || nimports >= 32)
-        return 2;
+        return 1;
       import_dirs[nimports++] = dir;
     } else if (strncmp(a, "--import-path=", 14) == 0) {
       if (nimports >= 32)
-        return 2;
+        return 1;
       import_dirs[nimports++] = a + 14;
     } else if (strncmp(a, "-o", 2) == 0) {
       const char *f = a[2] ? a + 2 : (i + 1 < argc ? argv[++i] : NULL);
       if (!f || (eval_fmt = parse_fmt(f)) < 0)
-        return 2;
+        return 1;
     } else if (strncmp(a, "--output=", 9) == 0) {
       if ((eval_fmt = parse_fmt(a + 9)) < 0)
-        return 2;
+        return 1;
     } else if (strncmp(a, "--segment-size=", 15) == 0) {
       seg_words = (size_t)strtoul(a + 15, NULL, 0);
     } else if (strcmp(a, "--segment-size") == 0 && i + 1 < argc) {
       seg_words = (size_t)strtoul(argv[++i], NULL, 0);
     } else if (a[0] == '-') {
       fprintf(stderr, "capnp-eval: unknown option %s\n", a);
-      return 2;
+      return 1;
     } else {
       if (npos >= 8)
-        return 2;
+        return 1;
       pos_args[npos++] = a;
     }
   }
 
   if (npos < 1) {
     fprintf(stderr, "usage: capnp-eval [eval|convert|decode|encode] ...\n");
-    return 2;
+    return 1;
   }
   if (flag_quiet && strcmp(pos_args[0], "convert") != 0 &&
       strcmp(pos_args[0], "decode") != 0) {
     fprintf(stderr, "capnp-eval: unknown option --quiet\n");
-    return 2;
+    return 1;
   }
 
   /* Subcommand `convert <from>:<to> [<schema> <type>]` */
@@ -861,21 +861,21 @@ int main(int argc, char **argv) {
     const char *type_name = NULL;
     int rc;
     if (npos != 2 && npos != 4)
-      return 2;
+      return 1;
     spec = pos_args[1];
     colon = strchr(spec, ':');
     if (!colon || (size_t)(colon - spec) >= sizeof(from_s))
-      return 2;
+      return 1;
     memcpy(from_s, spec, (size_t)(colon - spec));
     from_s[colon - spec] = 0;
     from_fmt = parse_fmt(from_s);
     to_fmt = parse_fmt(colon + 1);
     if (from_fmt < 0 || to_fmt < 0)
-      return 2;
+      return 1;
     if ((from_fmt == FMT_TEXT || from_fmt == FMT_JSON || to_fmt == FMT_TEXT ||
          to_fmt == FMT_JSON) &&
         npos < 4)
-      return 2;
+      return 1;
     if (npos == 4) {
       if (compile_schema(pos_args[2], import_dirs, nimports, &dyn))
         return 1;
@@ -893,7 +893,7 @@ int main(int argc, char **argv) {
                              : (flag_packed ? FMT_PACKED : FMT_BINARY);
     int rc;
     if (npos != 3)
-      return 2;
+      return 1;
     if (compile_schema(pos_args[1], import_dirs, nimports, &dyn))
       return 1;
     rc = run_convert(dyn, pos_args[2], from_fmt, FMT_TEXT, pretty, seg_words);
@@ -908,7 +908,7 @@ int main(int argc, char **argv) {
                            : (flag_packed ? FMT_PACKED : FMT_BINARY);
     int rc;
     if (npos != 3)
-      return 2;
+      return 1;
     if (compile_schema(pos_args[1], import_dirs, nimports, &dyn))
       return 1;
     rc = run_convert(dyn, pos_args[2], FMT_TEXT, to_fmt, pretty, seg_words);
@@ -923,12 +923,12 @@ int main(int argc, char **argv) {
     capnp_dyn_t *dyn = NULL;
     if (strcmp(pos_args[0], "eval") == 0) {
       if (npos != 3)
-        return 2;
+        return 1;
       schema_path = pos_args[1];
       expr = pos_args[2];
     } else {
       if (npos != 2)
-        return 2;
+        return 1;
       schema_path = pos_args[0];
       expr = pos_args[1];
     }

@@ -90,4 +90,18 @@ for args in "eval -q" "eval --quiet" "encode --quiet" "decode -q" \
     exit 1
   fi
 done
+# Usage errors exit with status 1, as kj's MainBuilder does.
+for args in "--bogus" "convert $NODE" "convert bogus:text $NODE Node" "frob" \
+  "decode $NODE" "encode $NODE Node extra"; do
+  # shellcheck disable=SC2086
+  set -- $args
+  ref=0
+  ours=0
+  capnp "$@" </dev/null >/dev/null 2>&1 || ref=$?
+  "$BIN" "$@" </dev/null >/dev/null 2>&1 || ours=$?
+  if [[ $ref -ne $ours ]]; then
+    echo "capnp $args: status $ref, capnp-eval $ours" >&2
+    exit 1
+  fi
+done
 echo "ok eval"
