@@ -77,14 +77,17 @@ check_text() {
   compare "$1" "$2" "$3" "$4"
 }
 
-# Corrupt pointers read as defaults in C++ and then fail the conversion.
-check text-oob "$PARITY" Parity "text json" -- \
+# Corrupt pointers read as defaults in C++, which prints the result and
+# then fails the conversion. Reading any capability fails at once there.
+full=1
+ALL="text json binary packed flat flat-packed canonical"
+check text-oob "$PARITY" Parity "$ALL" -- \
   0001000000000000 0000001a00000029
-check struct-as-text "$PARITY" Parity "text json" -- \
+check struct-as-text "$PARITY" Parity "$ALL" -- \
   0001000000000000 0000000100000000 0
-check text-no-nul "$PARITY" Parity "text json" -- \
+check text-no-nul "$PARITY" Parity "$ALL" -- \
   0001000000000000 0000001200000001 0000000000006261
-check list-as-struct "$PARITY" Parity "text json" -- \
+check list-as-struct "$PARITY" Parity "$ALL" -- \
   0003000000000000 0 0 0000000a00000001 0000000000000007
 check bytes-as-int32-list "$PARITY" Parity "text json" -- \
   0008000000000000 0 0 0 0 0 0 0 0000000a00000001 0000000000000007
@@ -92,8 +95,11 @@ check bits-as-uint8-list "$PARITY" Parity "text json" -- \
   000a000000000000 0 0 0 0 0 0 0 0 0 0000000900000001 0000000000000001
 check ptr-structs-as-int16-list "$PARITY" Parity "text json" -- \
   0007000000000000 0 0 0 0 0 0 0000000f00000001 0001000000000004 0
-check struct-as-cap "$HOLDER" Holder "text" -- \
+check struct-as-cap "$HOLDER" Holder "$ALL" -- \
   0001000100000000 0000000000000007 0000000100000000 0
+check cap "$HOLDER" Holder "$ALL" -- \
+  0001000100000000 0000000000000007 0000000000000003
+check oob-list-root "$PARITY" Parity "$ALL" -- 0000000a00000005
 
 # parity_ptr SLOT PTR CONTENT...: a Parity root with every field zero but
 # pointer SLOT, followed by CONTENT. The root is 1 + 10 + 32 words.
@@ -117,6 +123,17 @@ check bool-from-int64-list "$PARITY" Parity "text json" -- \
   $(parity_ptr 4 000000150000006d 0000000000000006 0)
 check structs-from-void-list "$PARITY" Parity "text json" -- \
   $(parity_ptr 18 0000001000000035)
+# canonicalize copies a corrupt last pointer as null, which leaves the
+# copy untruncated and fails its isCanonical check.
+full=1
+check oob-last-pointer "$PARITY" Parity "$ALL" -- \
+  $(parity_ptr 31 000000017ffffff0)
+check oob-middle-pointer "$PARITY" Parity "$ALL" -- \
+  $(parity_ptr 3 000000017ffffff0)
+check oob-then-text "$PARITY" Parity "$ALL" -- \
+  0020000a00000000 $(printf '0 %.0s' {1..13}) 000000017ffffff0 \
+  0000001a0000006d $(printf '0 %.0s' {1..27}) 0000000000006261
+full=0
 
 # A double-far landing pad only has to be a far pointer.
 check_framed pad-with-double-bit "$PARITY" Parity "text json binary" -- \
@@ -130,10 +147,27 @@ check_framed pad-not-far "$PARITY" Parity "text json binary" -- \
 check composite-tag-bit31 "$PARITY" Parity "text json binary canonical" -- \
   $(parity_ptr 18 0000000f00000035 0000000180000004 0)
 
-# A null root reads as an empty struct; any other non-struct root fails.
-check null-root "$PARITY" Parity "text json binary packed flat canonical" -- 0
-check list-root "$PARITY" Parity "text json binary packed flat canonical" -- \
+# A null root reads as an empty struct, and so does any other non-struct
+# root after a recoverable error.
+check null-root "$PARITY" Parity "$ALL" -- 0
+# isCanonical accepts a lone null root word, ignores bytes past the last
+# whole word, and rejects an empty segment or a null root with more after.
+in_fmt=canonical
+full=1
+for spec in 0000000000000000 000000000000000000 00000000000000000000000000000000 \
+  0000000000000000fcffffff00000000 ""; do
+  python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.argv[1]))' \
+    "$spec" >"$TMP/in.bin"
+  compare "canonical-null-root-${#spec}" "$PARITY" Parity "text flat canonical"
+  extra=(--quiet)
+  compare "canonical-null-root-quiet-${#spec}" "$PARITY" Parity "text flat"
+  extra=()
+done
+in_fmt=binary
+full=0
+check list-root "$PARITY" Parity "$ALL" -- \
   0000000100000001 0000000000000005
+full=0
 
 # Binary output is a copy into C++'s MallocMessageBuilder: fixed-size
 # segments under --segment-size, growing ones from 1024 words otherwise.

@@ -174,13 +174,48 @@ fail:
   return -1;
 }
 
+/* Reader errors met converting one message. `capnp convert` recovers
+ * from a soft one: it writes defaults, reports the error and goes on to
+ * the next message. A fatal one ends the run. */
+typedef struct {
+  int soft;
+  int fatal;
+} conv_err_t;
+
+/* Records a reader error; nonzero when the conversion cannot go on. */
+static int conv_failed(conv_err_t *e, int rc) {
+  if (rc == CAPNP_ERR_IO) {
+    e->fatal = 1;
+    return -1;
+  }
+  e->soft = 1;
+  return 0;
+}
+
+static void store_null(capnp_builder_t *b, uint32_t seg, size_t word) {
+  capnp_store_le64(b->segs[seg].data + word * CAPNP_WORD_BYTES, 0);
+}
+
 static int copy_ptr_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
                               size_t slot_word, const capnp_ptr_t *src,
-                              int depth);
+                              conv_err_t *e);
+
+/* Copies child @k of struct @s to a slot. C++ copyPointer writes null
+ * for a pointer it cannot follow. */
+static int copy_child(capnp_builder_t *b, uint32_t seg, size_t word,
+                      const capnp_ptr_t *s, int k, conv_err_t *e) {
+  capnp_ptr_t child;
+  int rc = capnp_getp(s, (uint16_t)k, &child);
+  if (rc != CAPNP_OK) {
+    store_null(b, seg, word);
+    return conv_failed(e, rc);
+  }
+  return copy_ptr_untrimmed(b, seg, word, &child, e);
+}
 
 static int copy_list_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
                                size_t slot_word, const capnp_ptr_t *list,
-                               int depth) {
+                               conv_err_t *e) {
   uint32_t n = list->count;
   int esize = list->esize;
 
@@ -210,15 +245,10 @@ static int copy_list_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
         capnp_store_le64(
             b->segs[tag_seg].data + (first + i * step + (size_t)k) * 8u, w);
       }
-      for (k = 0; k < np; k++) {
-        size_t cslot = first + i * step + (size_t)nd + (size_t)k;
-        capnp_ptr_t child;
-        if (k < el.pwords) {
-          if (capnp_getp(&el, (uint16_t)k, &child) != CAPNP_OK)
-            return -1;
-          if (copy_ptr_untrimmed(b, tag_seg, cslot, &child, depth + 1))
-            return -1;
-        }
+      for (k = 0; k < np && k < el.pwords; k++) {
+        if (copy_child(b, tag_seg, first + i * step + (size_t)nd + (size_t)k,
+                       &el, k, e))
+          return -1;
       }
     }
     return 0;
@@ -234,10 +264,14 @@ static int copy_list_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
       return -1;
     for (i = 0; i < n; i++) {
       capnp_ptr_t el;
-      if (capnp_list_getp(list, i, &el) != CAPNP_OK)
-        return -1;
-      if (copy_ptr_untrimmed(b, first_bptr.seg, first_bptr.word + i, &el,
-                             depth + 1))
+      int rc = capnp_list_getp(list, i, &el);
+      if (rc != CAPNP_OK) {
+        store_null(b, first_bptr.seg, first_bptr.word + i);
+        if (conv_failed(e, rc))
+          return -1;
+        continue;
+      }
+      if (copy_ptr_untrimmed(b, first_bptr.seg, first_bptr.word + i, &el, e))
         return -1;
     }
     return 0;
@@ -252,7 +286,7 @@ static int copy_list_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
     body_bptr.word = slot_word;
     switch (esize) {
     case CAPNP_SZ_VOID:
-      return capnp_builder_set_list_void(&body_bptr, 0, 0, n);
+      return capnp_builder_set_list_void(&body_bptr, 0, 0, n) ? -1 : 0;
     case CAPNP_SZ_BIT: {
       size_t nbytes = ((size_t)n + 7u) / 8u;
       capnp_bptr_t start;
@@ -289,13 +323,13 @@ static int copy_list_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
 
 static int copy_ptr_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
                               size_t slot_word, const capnp_ptr_t *src,
-                              int depth) {
+                              conv_err_t *e) {
   if (!src || src->kind == CAPNP_PK_NULL) {
-    capnp_store_le64(b->segs[slot_seg].data + slot_word * 8u, 0);
+    store_null(b, slot_seg, slot_word);
     return 0;
   }
   if (src->kind == CAPNP_PK_LIST)
-    return copy_list_untrimmed(b, slot_seg, slot_word, src, depth);
+    return copy_list_untrimmed(b, slot_seg, slot_word, src, e);
   if (src->kind == CAPNP_PK_STRUCT) {
     int nd = src->dwords;
     int np = src->pwords;
@@ -313,37 +347,27 @@ static int copy_ptr_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
           b->segs[body_bptr.seg].data + (body_bptr.word + (size_t)k) * 8u, w);
     }
     for (k = 0; k < np; k++) {
-      capnp_ptr_t child;
-      if (capnp_getp(src, (uint16_t)k, &child) != CAPNP_OK)
-        return -1;
-      if (copy_ptr_untrimmed(b, body_bptr.seg,
-                             body_bptr.word + (size_t)nd + (size_t)k, &child,
-                             depth + 1))
+      if (copy_child(b, body_bptr.seg, body_bptr.word + (size_t)nd + (size_t)k,
+                     src, k, e))
         return -1;
     }
     return 0;
   }
-  return -1;
+  /* A message read without a capability table has no capabilities. */
+  store_null(b, slot_seg, slot_word);
+  return conv_failed(e, CAPNP_ERR_KIND);
 }
 
 /* Rebuild a message into a single-segment (or segment_size-bounded) builder
  * using copy_ptr_untrimmed, matching MallocMessageBuilder + setRoot(reader)
- * in C++ writeConversion. */
-static int rebuild_message(const capnp_message_t *src, size_t seg_words,
+ * in C++ writeConversion. @root is a struct or null. */
+static int rebuild_message(const capnp_ptr_t *root, size_t seg_words,
                            int single_flat, uint8_t **out_bytes,
-                           size_t *out_len) {
-  capnp_message_t mut = *src;
-  capnp_ptr_t root;
+                           size_t *out_len, conv_err_t *e) {
   capnp_builder_t b;
   capnp_bptr_t broot;
   int rc;
 
-  mut.owned = NULL;
-  mut.ready = 0;
-  if (capnp_root(&mut, &root) != CAPNP_OK)
-    return -1;
-  if (root.kind != CAPNP_PK_STRUCT && root.kind != CAPNP_PK_NULL)
-    return -1;
   if (single_flat) {
     capnp_builder_init_sized(&b, CAPNP_BUILDER_DEFAULT_FIRST_WORDS);
     b.force_single = 1;
@@ -358,13 +382,13 @@ static int rebuild_message(const capnp_message_t *src, size_t seg_words,
     return -1;
   }
   /* setRoot(getRoot<AnyStruct>()) writes a null root as an empty struct. */
-  if (root.kind == CAPNP_PK_NULL) {
+  if (root->kind == CAPNP_PK_NULL) {
     capnp_bptr_t body;
     if (capnp_builder_struct(&broot, 0, 0, &body)) {
       capnp_builder_free(&b);
       return -1;
     }
-  } else if (copy_ptr_untrimmed(&b, broot.seg, broot.word, &root, 0)) {
+  } else if (copy_ptr_untrimmed(&b, broot.seg, broot.word, root, e)) {
     capnp_builder_free(&b);
     return -1;
   }
@@ -387,131 +411,146 @@ static int rebuild_message(const capnp_message_t *src, size_t seg_words,
   return rc == CAPNP_OK ? 0 : -1;
 }
 
-static int write_converted_message(capnp_dyn_t *dyn,
-                                   const char *type_name,
-                                   const capnp_message_t *m, int to_fmt,
-                                   int pretty, size_t seg_words) {
+/* C++ canonicalize ends with KJ_ASSERT(isCanonical()), which a copy that
+ * wrote null for a corrupt pointer can fail. */
+static int is_canonical(const uint8_t *can, size_t clen) {
+  capnp_segment_t seg;
+  capnp_message_t m = {0};
+  uint8_t *again = NULL;
+  size_t alen = 0;
+  int ok;
+  seg.data = can;
+  seg.words = clen / CAPNP_WORD_BYTES;
+  if (capnp_message_from_segments(&m, &seg, 1) != CAPNP_OK)
+    return 0;
+  m.traversal_left = UINT64_MAX;
+  m.depth_limit = INT_MAX;
+  ok = capnp_canonicalize(&m, &again, &alen) == CAPNP_OK && alen == clen &&
+       memcmp(again, can, clen) == 0;
+  free(again);
+  capnp_message_free(&m);
+  return ok;
+}
+
+static int write_bytes(const uint8_t *p, size_t n) {
+  return fwrite(p, 1, n, stdout) == n ? 0 : -1;
+}
+
+static int write_packed(const uint8_t *p, size_t n) {
+  uint8_t *packed = NULL;
+  size_t plen = 0;
+  int rc;
+  if (capnp_pack(p, n, &packed, &plen) != CAPNP_OK)
+    return -1;
+  rc = write_bytes(packed, plen);
+  free(packed);
+  return rc;
+}
+
+/* writeConversion in capnp.c++ for a struct or null @root. Nonzero when
+ * nothing could be written. */
+static int convert_root(capnp_dyn_t *dyn, const char *type_name,
+                        const capnp_ptr_t *root, int to_fmt, int pretty,
+                        size_t seg_words, conv_err_t *e) {
+  uint8_t *bytes = NULL;
+  size_t len = 0;
+  int rc = -1;
   switch (to_fmt) {
-  case FMT_BINARY: {
-    uint8_t *framed = NULL;
-    size_t flen = 0;
-    if (rebuild_message(m, seg_words, 0, &framed, &flen))
-      return -1;
-    if (fwrite(framed, 1, flen, stdout) != flen) {
-      free(framed);
-      return -1;
-    }
-    free(framed);
-    return 0;
-  }
-  case FMT_PACKED: {
-    uint8_t *framed = NULL, *packed = NULL;
-    size_t flen = 0, plen = 0;
-    if (rebuild_message(m, seg_words, 0, &framed, &flen))
-      return -1;
-    if (capnp_pack(framed, flen, &packed, &plen) != CAPNP_OK) {
-      free(framed);
-      return -1;
-    }
-    free(framed);
-    if (fwrite(packed, 1, plen, stdout) != plen) {
-      free(packed);
-      return -1;
-    }
-    free(packed);
-    return 0;
-  }
-  case FMT_FLAT: {
-    uint8_t *flat = NULL;
-    size_t flen = 0;
-    if (rebuild_message(m, 0, 1, &flat, &flen))
-      return -1;
-    if (fwrite(flat, 1, flen, stdout) != flen) {
-      free(flat);
-      return -1;
-    }
-    free(flat);
-    return 0;
-  }
+  case FMT_BINARY:
+  case FMT_PACKED:
+  case FMT_FLAT:
   case FMT_FLAT_PACKED: {
-    uint8_t *flat = NULL, *packed = NULL;
-    size_t flen = 0, plen = 0;
-    if (rebuild_message(m, 0, 1, &flat, &flen))
-      return -1;
-    if (capnp_pack(flat, flen, &packed, &plen) != CAPNP_OK) {
-      free(flat);
-      return -1;
-    }
-    free(flat);
-    if (fwrite(packed, 1, plen, stdout) != plen) {
-      free(packed);
-      return -1;
-    }
-    free(packed);
-    return 0;
+    int flat = to_fmt == FMT_FLAT || to_fmt == FMT_FLAT_PACKED;
+    if (rebuild_message(root, seg_words, flat, &bytes, &len, e))
+      break;
+    rc = (to_fmt == FMT_PACKED || to_fmt == FMT_FLAT_PACKED)
+             ? write_packed(bytes, len)
+             : write_bytes(bytes, len);
+    break;
   }
   case FMT_CANONICAL: {
-    capnp_message_t mut = *m;
-    capnp_ptr_t root;
-    uint8_t *can = NULL;
-    size_t clen = 0;
-    mut.owned = NULL;
-    mut.ready = 0;
-    if (capnp_root(&mut, &root) != CAPNP_OK ||
-        (root.kind != CAPNP_PK_STRUCT && root.kind != CAPNP_PK_NULL))
-      return -1;
-    if (capnp_canonicalize(m, &can, &clen) != CAPNP_OK)
-      return -1;
-    if (fwrite(can, 1, clen, stdout) != clen) {
-      free(can);
-      return -1;
+    int soft = 0;
+    int crc = capnp_canonicalize_recover(root, &bytes, &len, &soft);
+    if (crc != CAPNP_OK) {
+      conv_failed(e, crc);
+      break;
     }
-    free(can);
-    return 0;
+    if (soft) {
+      e->soft = 1;
+      if (!is_canonical(bytes, len))
+        break;
+    }
+    rc = write_bytes(bytes, len);
+    break;
   }
-  case FMT_TEXT: {
-    capnp_message_t mut = *m;
-    capnp_ptr_t root;
-    char *text = NULL;
-    size_t tlen = 0;
-    int rc;
-    mut.owned = NULL;
-    mut.ready = 0;
-    if (!dyn || !type_name || capnp_root(&mut, &root) != CAPNP_OK)
-      return -1;
-    rc = pretty ? capnp_dyn_encode_text(dyn, type_name, &root, &text, &tlen)
-                : capnp_dyn_encode_text_short(dyn, type_name, &root, &text,
-                                              &tlen);
-    if (rc != CAPNP_OK)
-      return -1;
-    fwrite(text, 1, tlen, stdout);
-    fputc('\n', stdout);
-    free(text);
-    return 0;
-  }
+  case FMT_TEXT:
   case FMT_JSON: {
-    capnp_message_t mut = *m;
-    capnp_ptr_t root;
     char *text = NULL;
-    size_t tlen = 0;
-    int rc;
-    mut.owned = NULL;
-    mut.ready = 0;
-    if (!dyn || !type_name || capnp_root(&mut, &root) != CAPNP_OK)
-      return -1;
-    rc = pretty ? capnp_dyn_encode_json(dyn, type_name, &root, &text, &tlen)
-                : capnp_dyn_encode_json_short(dyn, type_name, &root, &text,
-                                              &tlen);
-    if (rc != CAPNP_OK)
-      return -1;
-    fwrite(text, 1, tlen, stdout);
-    fputc('\n', stdout);
+    int werr = CAPNP_OK, erc;
+    if (!dyn || !type_name)
+      break;
+    erc = capnp_dyn_encode_recover(dyn, type_name, root, to_fmt == FMT_JSON,
+                                   pretty, &text, &len, &werr);
+    if (erc != CAPNP_OK) {
+      conv_failed(e, erc);
+      break;
+    }
+    if (werr != CAPNP_OK)
+      conv_failed(e, werr);
+    rc = write_bytes((const uint8_t *)text, len);
+    if (rc == 0)
+      rc = fputc('\n', stdout) == EOF ? -1 : 0;
     free(text);
-    return 0;
+    break;
   }
   default:
-    return -1;
+    break;
   }
+  free(bytes);
+  if (rc)
+    e->fatal = 1;
+  return rc;
+}
+
+/* getRoot<AnyStruct>(): a root that cannot be read as a struct reads as
+ * an empty one after a recoverable error. */
+static int message_root(capnp_message_t *view, const capnp_message_t *m,
+                        capnp_ptr_t *root, conv_err_t *e) {
+  int rc;
+  *view = *m;
+  view->owned = NULL;
+  view->ready = 0;
+  rc = capnp_root(view, root);
+  if (rc == CAPNP_OK &&
+      (root->kind == CAPNP_PK_STRUCT || root->kind == CAPNP_PK_NULL))
+    return 0;
+  if (rc == CAPNP_OK)
+    rc = CAPNP_ERR_KIND;
+  if (conv_failed(e, rc))
+    return -1;
+  memset(root, 0, sizeof(*root));
+  root->kind = CAPNP_PK_NULL;
+  root->msg = view;
+  return 0;
+}
+
+static int convert_message(capnp_dyn_t *dyn, const char *type_name,
+                           const capnp_message_t *m, int to_fmt, int pretty,
+                           size_t seg_words, conv_err_t *e) {
+  capnp_message_t view;
+  capnp_ptr_t root;
+  if (message_root(&view, m, &root, e))
+    return -1;
+  return convert_root(dyn, type_name, &root, to_fmt, pretty, seg_words, e);
+}
+
+static int write_converted_message(capnp_dyn_t *dyn, const char *type_name,
+                                   const capnp_message_t *m, int to_fmt,
+                                   int pretty, size_t seg_words) {
+  conv_err_t e = {0, 0};
+  if (convert_message(dyn, type_name, m, to_fmt, pretty, seg_words, &e))
+    return -1;
+  return e.soft ? -1 : 0;
 }
 
 /* Compute exact byte size of one stream-framed message at `data` */
@@ -760,6 +799,7 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
                        int quiet) {
   size_t in_len = 0;
   char *in_buf;
+  conv_err_t e = {0, 0};
   capnp_dyn_set_max_depth(INT_MAX);
   in_buf = read_all(stdin, &in_len);
   if (!in_buf)
@@ -794,8 +834,8 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
         return 1;
       }
       lift_limits(&m);
-      if (write_converted_message(dyn, type_name, &m, to_fmt, pretty,
-                                  seg_words)) {
+      if (convert_message(dyn, type_name, &m, to_fmt, pretty, seg_words,
+                          &e)) {
         capnp_message_free(&m);
         free(in_buf);
         return 1;
@@ -804,7 +844,7 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
       off += fsz;
     }
     free(in_buf);
-    return 0;
+    return e.soft ? 1 : 0;
   }
 
   if (from_fmt == FMT_PACKED) {
@@ -825,8 +865,8 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
         return 1;
       }
       lift_limits(&m);
-      if (write_converted_message(dyn, type_name, &m, to_fmt, pretty,
-                                  seg_words)) {
+      if (convert_message(dyn, type_name, &m, to_fmt, pretty, seg_words,
+                          &e)) {
         capnp_message_free(&m);
         free(unpacked);
         return 1;
@@ -835,7 +875,7 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
       off += fsz;
     }
     free(unpacked);
-    return 0;
+    return e.soft ? 1 : 0;
   }
 
   if (from_fmt == FMT_FLAT || from_fmt == FMT_CANONICAL ||
@@ -858,6 +898,15 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
     }
     seg.data = raw;
     seg.words = rlen / CAPNP_WORD_BYTES;
+    /* An empty segment holds no root pointer, which getRoot recovers
+     * from as an empty struct. A canonical check fails on it, but passes
+     * a lone null root word, and ignores bytes past the last whole word. */
+    if (seg.words == 0 && from_fmt != FMT_CANONICAL) {
+      static const uint8_t null_root[CAPNP_WORD_BYTES];
+      seg.data = null_root;
+      seg.words = 1;
+      e.soft = 1;
+    }
     if (capnp_message_from_segments(&m, &seg, 1) != CAPNP_OK) {
       free(raw);
       return 1;
@@ -878,15 +927,14 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
         return 1;
       }
     }
-    if (write_converted_message(dyn, type_name, &m, to_fmt, pretty,
-                                seg_words)) {
+    if (convert_message(dyn, type_name, &m, to_fmt, pretty, seg_words, &e)) {
       capnp_message_free(&m);
       free(raw);
       return 1;
     }
     capnp_message_free(&m);
     free(raw);
-    return 0;
+    return e.soft ? 1 : 0;
   }
 
   if (from_fmt == FMT_TEXT || from_fmt == FMT_JSON) {
@@ -915,8 +963,8 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
       }
       free(msg_bytes);
       lift_limits(&m);
-      if (write_converted_message(dyn, type_name, &m, to_fmt, pretty,
-                                  seg_words)) {
+      if (convert_message(dyn, type_name, &m, to_fmt, pretty, seg_words,
+                          &e)) {
         capnp_message_free(&m);
         free(in_buf);
         return 1;
@@ -924,7 +972,7 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
       capnp_message_free(&m);
     }
     free(in_buf);
-    return 0;
+    return e.soft ? 1 : 0;
   }
 
   free(in_buf);

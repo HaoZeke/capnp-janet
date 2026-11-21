@@ -30,6 +30,13 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp-eval convert` prints what `capnp` recovers from a corrupt
+  message. A pointer it cannot follow reads as its default or copies as
+  null, later messages are still converted, and the exit status is 1.
+  It used to print nothing. Text output of a capability ends the run, as
+  `capnp` has no capability context.
+- `capnp_canonicalize` returns the reader error of a corrupt nested
+  pointer. It used to return `CAPNP_ERR_ALLOC`.
 - `capnp-eval` refuses empty input, and input whose first bytes cannot be
   in the source format, unless `--quiet` is given, as `capnp` does. Empty
   input used to succeed with no output.

@@ -8,6 +8,8 @@
  */
 
 #include <capnp-janet/capnp_builder.h>
+#include <capnp-janet/capnp_dyn.h>
+#include <capnp-janet/capnp_message.h>
 
 #include <stddef.h>
 #include <stdint.h>
@@ -45,5 +47,24 @@ CAPNP_JANET_HIDDEN int capnp_builder_init_list(const capnp_bptr_t *body,
  * CAPNP_DEFAULT_DEPTH_LIMIT. JSON parsing keeps the limit of 64 that C++
  * JsonCodec has. */
 CAPNP_JANET_HIDDEN void capnp_dyn_set_max_depth(int depth);
+
+/* Text (@json 0) or JSON encoding that reads a corrupt pointer as its
+ * default and goes on, as `capnp convert` does. *wire_err receives the
+ * first reader error, or CAPNP_OK. Fails with CAPNP_ERR_IO when the walk
+ * enters a segment whose data is NULL. */
+CAPNP_JANET_HIDDEN int capnp_dyn_encode_recover(capnp_dyn_t *d,
+                                                const char *type_name,
+                                                const capnp_ptr_t *s,
+                                                int json, int pretty,
+                                                char **out, size_t *len,
+                                                int *wire_err);
+
+/* Canonical copy of @root, a struct or null, the way C++ `canonicalize`
+ * copies: a corrupt pointer is written as null and sets *soft, and a
+ * section is truncated by its raw words. The result may not be canonical
+ * then; callers check. Fails with CAPNP_ERR_IO as above. */
+CAPNP_JANET_HIDDEN int capnp_canonicalize_recover(const capnp_ptr_t *root,
+                                                  uint8_t **out,
+                                                  size_t *out_len, int *soft);
 
 #endif

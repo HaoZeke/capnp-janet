@@ -7,6 +7,8 @@
 #include <capnp-janet/capnp_copy.h>
 #include <capnp-janet/capnp_pointer.h>
 
+#include "capnp_internal.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -58,6 +60,25 @@ static int alloc_local(capnp_builder_t *b, size_t n, uint32_t *out_seg,
   return CAPNP_OK;
 }
 
+/* Set by capnp_canonicalize_recover: corrupt pointers copy as null and
+ * set *canon_soft, and pointer sections truncate by raw word. */
+static _Thread_local int *canon_soft;
+
+/* A reader error met while copying. Under recovery the slot is left null
+ * and the copy goes on, except for a segment that is not there. */
+static int copy_failed(int rc) {
+  if (!canon_soft || rc == CAPNP_ERR_IO)
+    return rc ? rc : CAPNP_ERR_KIND;
+  *canon_soft = 1;
+  return CAPNP_OK;
+}
+
+static uint64_t raw_ptr_word(const capnp_ptr_t *p, int k) {
+  return capnp_load_le64(p->msg->segs[p->seg].data +
+                         (p->word + (size_t)p->dwords + (size_t)k) *
+                             CAPNP_WORD_BYTES);
+}
+
 static int trimmed_dwords(const capnp_ptr_t *p) {
   int nd = p->dwords;
   while (nd > 0) {
@@ -70,6 +91,11 @@ static int trimmed_dwords(const capnp_ptr_t *p) {
 
 static int trimmed_pwords(const capnp_ptr_t *p) {
   int np = p->pwords;
+  if (canon_soft) {
+    while (np > 0 && raw_ptr_word(p, np - 1) == 0)
+      np--;
+    return np;
+  }
   while (np > 0) {
     capnp_ptr_t q;
     if (capnp_getp(p, (uint16_t)(np - 1), &q) != CAPNP_OK)
@@ -161,10 +187,16 @@ static int write_list_to_slot(capnp_builder_t *b, uint32_t slot_seg,
         size_t cslot = first + i * step + (size_t)nd + (size_t)k;
         capnp_ptr_t child;
         if (k < el.pwords) {
-          if (capnp_getp(&el, (uint16_t)k, &child) != CAPNP_OK)
-            return CAPNP_ERR_KIND;
-          if (capnp_copy_ptr_to_word(b, tag_seg, cslot, &child, depth + 1))
-            return CAPNP_ERR_ALLOC;
+          int rc = capnp_getp(&el, (uint16_t)k, &child);
+          if (rc != CAPNP_OK) {
+            capnp_store_le64(wptr(b, tag_seg, cslot), 0);
+            if ((rc = copy_failed(rc)) != CAPNP_OK)
+              return rc;
+            continue;
+          }
+          if ((rc = capnp_copy_ptr_to_word(b, tag_seg, cslot, &child,
+                                           depth + 1)) != CAPNP_OK)
+            return rc;
         } else {
           capnp_store_le64(wptr(b, tag_seg, cslot), 0);
         }
@@ -198,10 +230,17 @@ static int write_list_to_slot(capnp_builder_t *b, uint32_t slot_seg,
     }
     for (i = 0; i < n; i++) {
       capnp_ptr_t el;
-      if (capnp_list_getp(list, i, &el) != CAPNP_OK)
-        return CAPNP_ERR_KIND;
-      if (capnp_copy_ptr_to_word(b, list_seg, list_start + i, &el, depth + 1))
-        return CAPNP_ERR_ALLOC;
+      int rc = capnp_list_getp(list, i, &el);
+      if (rc != CAPNP_OK) {
+        capnp_store_le64(wptr(b, list_seg, list_start + i), 0);
+        if ((rc = copy_failed(rc)) != CAPNP_OK)
+          return rc;
+        continue;
+      }
+      rc = capnp_copy_ptr_to_word(b, list_seg, list_start + i, &el,
+                                      depth + 1);
+      if (rc != CAPNP_OK)
+        return rc;
     }
     return CAPNP_OK;
   }
@@ -262,8 +301,10 @@ int capnp_copy_ptr_to_word(capnp_builder_t *b, uint32_t slot_seg,
     capnp_store_le64(wptr(b, slot_seg, slot_word), 0);
     return CAPNP_OK;
   }
-  if (src->kind == CAPNP_PK_CAP)
-    return CAPNP_ERR_KIND;
+  if (src->kind == CAPNP_PK_CAP) {
+    capnp_store_le64(wptr(b, slot_seg, slot_word), 0);
+    return copy_failed(CAPNP_ERR_KIND);
+  }
   if (src->kind == CAPNP_PK_LIST)
     return write_list_to_slot(b, slot_seg, slot_word, src, depth);
   if (src->kind == CAPNP_PK_STRUCT) {
@@ -302,10 +343,16 @@ int capnp_copy_ptr_to_word(capnp_builder_t *b, uint32_t slot_seg,
       capnp_ptr_t child;
       size_t cslot = body + (size_t)nd + (size_t)k;
       if (k < src->pwords) {
-        if (capnp_getp(src, (uint16_t)k, &child) != CAPNP_OK)
-          return CAPNP_ERR_KIND;
-        if (capnp_copy_ptr_to_word(b, body_seg, cslot, &child, depth + 1))
-          return CAPNP_ERR_ALLOC;
+        int rc = capnp_getp(src, (uint16_t)k, &child);
+        if (rc != CAPNP_OK) {
+          capnp_store_le64(wptr(b, body_seg, cslot), 0);
+          if ((rc = copy_failed(rc)) != CAPNP_OK)
+            return rc;
+          continue;
+        }
+        if ((rc = capnp_copy_ptr_to_word(b, body_seg, cslot, &child,
+                                         depth + 1)) != CAPNP_OK)
+          return rc;
       } else {
         capnp_store_le64(wptr(b, body_seg, cslot), 0);
       }
@@ -315,30 +362,12 @@ int capnp_copy_ptr_to_word(capnp_builder_t *b, uint32_t slot_seg,
   return CAPNP_ERR_KIND;
 }
 
-int capnp_canonicalize(const capnp_message_t *m, uint8_t **out,
-                       size_t *out_len) {
+static int canonicalize_root(const capnp_ptr_t *root, uint8_t **out,
+                             size_t *out_len) {
   capnp_builder_t b;
-  capnp_ptr_t root;
-  capnp_message_t mut = {0};
   size_t root_word, nbytes;
   uint32_t root_seg;
   uint8_t *buf;
-
-  if (!m || !out || !out_len)
-    return CAPNP_ERR_ARG;
-  *out = NULL;
-  *out_len = 0;
-
-  mut = *m;
-  mut.owned = NULL;
-  /* A copy is a view. Leaving the magic set would make a later free
-   * of this stack slot release the source message. */
-  mut.ready = 0;
-  {
-    int rc = capnp_root(&mut, &root);
-    if (rc)
-      return rc;
-  }
 
   capnp_builder_init_sized(&b, CAPNP_BUILDER_DEFAULT_FIRST_WORDS);
   b.force_single = 1;
@@ -346,11 +375,11 @@ int capnp_canonicalize(const capnp_message_t *m, uint8_t **out,
     capnp_builder_free(&b);
     return CAPNP_ERR_ALLOC;
   }
-  if (root.kind == CAPNP_PK_NULL) {
+  if (root->kind == CAPNP_PK_NULL) {
     capnp_store_le64(wptr(&b, root_seg, root_word),
                      capnp_wp_make_struct(-1, 0, 0));
   } else {
-    int rc = capnp_copy_ptr_to_word(&b, root_seg, root_word, &root, 0);
+    int rc = capnp_copy_ptr_to_word(&b, root_seg, root_word, root, 0);
     if (rc) {
       capnp_builder_free(&b);
       return rc;
@@ -368,6 +397,43 @@ int capnp_canonicalize(const capnp_message_t *m, uint8_t **out,
   *out = buf;
   *out_len = nbytes;
   return CAPNP_OK;
+}
+
+int capnp_canonicalize(const capnp_message_t *m, uint8_t **out,
+                       size_t *out_len) {
+  capnp_ptr_t root;
+  capnp_message_t mut = {0};
+
+  if (!m || !out || !out_len)
+    return CAPNP_ERR_ARG;
+  *out = NULL;
+  *out_len = 0;
+
+  mut = *m;
+  mut.owned = NULL;
+  /* A copy is a view. Leaving the magic set would make a later free
+   * of this stack slot release the source message. */
+  mut.ready = 0;
+  {
+    int rc = capnp_root(&mut, &root);
+    if (rc)
+      return rc;
+  }
+  return canonicalize_root(&root, out, out_len);
+}
+
+int capnp_canonicalize_recover(const capnp_ptr_t *root, uint8_t **out,
+                               size_t *out_len, int *soft) {
+  int rc;
+  if (!root || !out || !out_len || !soft ||
+      (root->kind != CAPNP_PK_NULL && root->kind != CAPNP_PK_STRUCT))
+    return CAPNP_ERR_ARG;
+  *out = NULL;
+  *out_len = 0;
+  canon_soft = soft;
+  rc = canonicalize_root(root, out, out_len);
+  canon_soft = NULL;
+  return rc;
 }
 
 int capnp_canonicalize_framed(const capnp_message_t *m, uint8_t **out,

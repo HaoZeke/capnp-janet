@@ -1789,8 +1789,17 @@ static int delimit_text(buf_t *b, const piece_list_t *pl, int indent, int mode,
  * null so the walk can go on, and the public encoder then fails with
  * this code, as `capnp convert` fails after printing defaults. */
 static _Thread_local int encode_wire_err;
+/* Set when the walk met a segment that is not there to read, which
+ * `capnp convert` cannot recover from. */
+static _Thread_local int encode_io_err;
+/* Set by capnp_dyn_encode_recover. `capnp` has no capability context, so
+ * reading any capability fails there and ends the conversion. */
+static _Thread_local int encode_no_caps;
+static _Thread_local int encode_cap_err;
 
 static void note_wire(int rc) {
+  if (rc == CAPNP_ERR_IO)
+    encode_io_err = 1;
   if (rc != CAPNP_OK && encode_wire_err == CAPNP_OK)
     encode_wire_err = rc;
 }
@@ -1876,6 +1885,8 @@ static int list_fits(const capnp_ptr_t *l, int want) {
 }
 
 static void enc_expect_cap(capnp_ptr_t *p) {
+  if (encode_no_caps)
+    encode_cap_err = 1;
   if (p->kind != CAPNP_PK_NULL && p->kind != CAPNP_PK_CAP) {
     note_wire(CAPNP_ERR_KIND);
     null_ptr(p);
@@ -1912,21 +1923,6 @@ static void enc_get_text(const capnp_ptr_t *s, uint16_t idx, const char **t,
     note_wire(rc);
     *t = "";
     *tn = 0;
-  }
-}
-
-static void enc_get_data(const capnp_ptr_t *s, uint16_t idx,
-                         const uint8_t **p, size_t *pn) {
-  int rc;
-  *p = NULL;
-  *pn = 0;
-  if (!s || s->kind != CAPNP_PK_STRUCT)
-    return;
-  rc = capnp_get_data(s, idx, p, pn);
-  if (rc != CAPNP_OK) {
-    note_wire(rc);
-    *p = NULL;
-    *pn = 0;
   }
 }
 
@@ -1983,6 +1979,31 @@ static void enc_list_data(const capnp_ptr_t *list, uint32_t i,
   }
 }
 
+/* A Text or Data field. readTextPointer and readDataPointer fall back
+ * to the default for a null pointer and for one they cannot read. */
+static void enc_field_blob(const capnp_ptr_t *s, const dyn_field_t *f,
+                           uint16_t which, const void **p, size_t *n) {
+  capnp_ptr_t q;
+  enc_getp(s, (uint16_t)f->offset, &q);
+  if (q.kind != CAPNP_PK_NULL) {
+    int rc = which == TY_TEXT
+                 ? capnp_get_text(s, (uint16_t)f->offset, (const char **)p, n)
+                 : capnp_get_data(s, (uint16_t)f->offset,
+                                  (const uint8_t **)p, n);
+    if (rc == CAPNP_OK)
+      return;
+    note_wire(rc);
+  }
+  *p = which == TY_TEXT ? (const void *)"" : NULL;
+  *n = 0;
+  if (f->has_def_val && capnp_get_u16(&f->def_val, 0, 0xffff) == which) {
+    if (which == TY_TEXT)
+      capnp_get_text(&f->def_val, 0, (const char **)p, n);
+    else
+      capnp_get_data(&f->def_val, 0, (const uint8_t **)p, n);
+  }
+}
+
 static int field_has_wire(capnp_dyn_t *d, const capnp_ptr_t *s,
                           const dyn_field_t *f, const brand_env_t *env,
                           int non_null) {
@@ -1993,11 +2014,15 @@ static int field_has_wire(capnp_dyn_t *d, const capnp_ptr_t *s,
     return 0;
   if (resolve_field_type(d, f, env, &ft))
     return 0;
+  /* DynamicStruct::Reader::has looks at the raw pointer word, so a
+   * corrupt pointer is present and then reads as its default. */
   if (ft.list_depth > 0 || is_ptr_type(ft.which)) {
-    capnp_ptr_t p;
     free_rtype(&ft);
-    enc_getp(s, (uint16_t)f->offset, &p);
-    return p.kind != CAPNP_PK_NULL;
+    if (f->offset >= s->pwords)
+      return 0;
+    return capnp_load_le64(s->msg->segs[s->seg].data +
+                           (s->word + (size_t)s->dwords + f->offset) *
+                               CAPNP_WORD_BYTES) != 0;
   }
   if (non_null) {
     free_rtype(&ft);
@@ -2347,26 +2372,14 @@ static int encode_text_field_value(buf_t *b, capnp_dyn_t *d,
   case TY_TEXT: {
     const char *t = "";
     size_t tn = 0;
-    capnp_ptr_t p;
-    enc_getp(s, (uint16_t)f->offset, &p);
-    if (p.kind != CAPNP_PK_NULL)
-      enc_get_text(s, (uint16_t)f->offset, &t, &tn);
-    else if (f->has_def_val &&
-             capnp_get_u16(&f->def_val, 0, 0xffff) == TY_TEXT)
-      capnp_get_text(&f->def_val, 0, &t, &tn);
+    enc_field_blob(s, f, TY_TEXT, (const void **)&t, &tn);
     rc = quote_text_capnp(b, (const uint8_t *)t, tn, 0);
     break;
   }
   case TY_DATA: {
     const uint8_t *p = NULL;
     size_t pn = 0;
-    capnp_ptr_t q;
-    enc_getp(s, (uint16_t)f->offset, &q);
-    if (q.kind != CAPNP_PK_NULL)
-      enc_get_data(s, (uint16_t)f->offset, &p, &pn);
-    else if (f->has_def_val &&
-             capnp_get_u16(&f->def_val, 0, 0xffff) == TY_DATA)
-      capnp_get_data(&f->def_val, 0, &p, &pn);
+    enc_field_blob(s, f, TY_DATA, (const void **)&p, &pn);
     rc = quote_text_capnp(b, p, pn, 1);
     break;
   }
@@ -3203,26 +3216,14 @@ static int encode_json_field_item(buf_t *b, capnp_dyn_t *d,
   case TY_TEXT: {
     const char *t = "";
     size_t tn = 0;
-    capnp_ptr_t p;
-    enc_getp(s, (uint16_t)f->offset, &p);
-    if (p.kind != CAPNP_PK_NULL)
-      enc_get_text(s, (uint16_t)f->offset, &t, &tn);
-    else if (f->has_def_val &&
-             capnp_get_u16(&f->def_val, 0, 0xffff) == TY_TEXT)
-      capnp_get_text(&f->def_val, 0, &t, &tn);
+    enc_field_blob(s, f, TY_TEXT, (const void **)&t, &tn);
     rc = quote_json_string(b, t, tn);
     break;
   }
   case TY_DATA: {
     const uint8_t *p = NULL;
     size_t pn = 0;
-    capnp_ptr_t q;
-    enc_getp(s, (uint16_t)f->offset, &q);
-    if (q.kind != CAPNP_PK_NULL)
-      enc_get_data(s, (uint16_t)f->offset, &p, &pn);
-    else if (f->has_def_val &&
-             capnp_get_u16(&f->def_val, 0, 0xffff) == TY_DATA)
-      capnp_get_data(&f->def_val, 0, &p, &pn);
+    enc_field_blob(s, f, TY_DATA, (const void **)&p, &pn);
     rc = encode_json_data_bytes(b, p, pn, f->json_data_mode, indent, multiline,
                                 1, pretty);
     break;
@@ -3307,9 +3308,11 @@ static int encode_json_struct(buf_t *b, capnp_dyn_t *d,
   free_json_list(&jl);
   return buf_ch(b, '}');
 }
+/* With @wire_err set, a walk that met reader errors keeps its output and
+ * reports the first error there. */
 static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
                             const capnp_ptr_t *s, int json, int pretty,
-                            char **out, size_t *len) {
+                            char **out, size_t *len, int *wire_err) {
   rtype_t rt;
   dyn_struct_t *st = NULL;
   capnp_ptr_t empty;
@@ -3330,6 +3333,11 @@ static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
   *len = 0;
   encode_oom = 0;
   encode_wire_err = CAPNP_OK;
+  encode_io_err = 0;
+  encode_cap_err = 0;
+  encode_no_caps = wire_err != NULL;
+  if (wire_err)
+    *wire_err = CAPNP_OK;
   value_depth = dyn_max_depth;
   if (s->kind != CAPNP_PK_STRUCT && s->kind != CAPNP_PK_NULL)
     return CAPNP_ERR_KIND;
@@ -3345,7 +3353,12 @@ static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
                             0);
   }
   free_rtype(&rt);
-  if (rc || !b.data || encode_wire_err) {
+  encode_no_caps = 0;
+  if (encode_io_err || encode_cap_err) {
+    free(b.data);
+    return encode_io_err ? CAPNP_ERR_IO : CAPNP_ERR_KIND;
+  }
+  if (rc || !b.data || (encode_wire_err && !wire_err)) {
     free(b.data);
     if (encode_oom)
       return CAPNP_ERR_ALLOC;
@@ -3353,6 +3366,8 @@ static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
       return encode_wire_err;
     return CAPNP_ERR_KIND;
   }
+  if (wire_err)
+    *wire_err = encode_wire_err;
   *out = b.data;
   *len = b.n;
   return CAPNP_OK;
@@ -3360,22 +3375,30 @@ static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
 
 int capnp_dyn_encode_text(capnp_dyn_t *d, const char *type_name,
                           const capnp_ptr_t *s, char **out, size_t *len) {
-  return encode_root_impl(d, type_name, s, 0, 1, out, len);
+  return encode_root_impl(d, type_name, s, 0, 1, out, len, NULL);
 }
 
 int capnp_dyn_encode_text_short(capnp_dyn_t *d, const char *type_name,
                                 const capnp_ptr_t *s, char **out, size_t *len) {
-  return encode_root_impl(d, type_name, s, 0, 0, out, len);
+  return encode_root_impl(d, type_name, s, 0, 0, out, len, NULL);
 }
 
 int capnp_dyn_encode_json(capnp_dyn_t *d, const char *type_name,
                           const capnp_ptr_t *s, char **out, size_t *len) {
-  return encode_root_impl(d, type_name, s, 1, 1, out, len);
+  return encode_root_impl(d, type_name, s, 1, 1, out, len, NULL);
 }
 
 int capnp_dyn_encode_json_short(capnp_dyn_t *d, const char *type_name,
                                 const capnp_ptr_t *s, char **out, size_t *len) {
-  return encode_root_impl(d, type_name, s, 1, 0, out, len);
+  return encode_root_impl(d, type_name, s, 1, 0, out, len, NULL);
+}
+
+int capnp_dyn_encode_recover(capnp_dyn_t *d, const char *type_name,
+                             const capnp_ptr_t *s, int json, int pretty,
+                             char **out, size_t *len, int *wire_err) {
+  int ignored;
+  return encode_root_impl(d, type_name, s, json, pretty, out, len,
+                          wire_err ? wire_err : &ignored);
 }
 /* --- JSON and Text AST parser & builder --- */
 
