@@ -127,4 +127,18 @@
                        (codegen-features/CodegenFeatures-Child-get-name $))
                     decoded-children)))
 
+# A null Text, Data or struct field reads as its schema default; an empty
+# one does not.
+(assert (= "inner" (string (codegen-features/CodegenFeatures-get-motto decoded)))
+        "generated text default")
+(assert (= "\x01\x02" (string (codegen-features/CodegenFeatures-get-blob decoded)))
+        "generated data default")
+(def favourite (codegen-features/CodegenFeatures-get-favourite decoded))
+(assert (= 9 (codegen-features/CodegenFeatures-Child-get-code favourite))
+        "generated struct default")
+(codegen-features/CodegenFeatures-set-motto root "")
+(def emptied (:root (capnp/message-from-buffer (capnp/finish-builder builder))))
+(assert (= "" (string (codegen-features/CodegenFeatures-get-motto emptied)))
+        "generated empty text")
+
 (print "ok generated-builder")

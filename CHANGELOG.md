@@ -27,6 +27,9 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- Generated getters return the schema default for a null Text, Data, struct
+  or list field. Text and Data defaults were not emitted, and the struct and
+  list default check never matched because it took `(v :kind)` for a call.
 - A double-far landing pad only has to be a far pointer, as in C++. Pads
   with their own double-far bit set, and tags with a non-zero offset, used
   to be rejected.

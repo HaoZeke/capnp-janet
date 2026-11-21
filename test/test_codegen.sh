@@ -154,7 +154,7 @@ grep -q '(def Wrap-origin-default "' defaults.janet
 grep -q '(def Wrap-labels-default "' defaults.janet
 grep -q '(defn Wrap-get-origin \[ptr\]' defaults.janet
 grep -q '(defn Wrap-get-labels \[ptr\]' defaults.janet
-grep -q '(v :kind) :null' defaults.janet
+grep -q '(capnp/kind v) :null' defaults.janet
 python3 - "$TMP/defaults.janet" "$TMP/origin.bin" "$TMP/labels.bin" <<'PY'
 import re, pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text()

@@ -930,11 +930,41 @@ static int emit_pointer_default(FILE *out, const char *sname, const char *fname,
   fprintf(out,
           "(defn %s-get-%s [ptr]\n"
           "  (def v (capnp/getp ptr %u))\n"
-          "  (if (= (v :kind) :null)\n"
-          "    (:root (capnp/message-from-buffer %s-%s-default))\n"
+          "  (if (= (capnp/kind v) :null)\n"
+          "    (:root (capnp/message-from-buffer (buffer %s-%s-default)))\n"
           "    v))\n",
           sname, fname, (unsigned)offset, sname, fname);
   free(canon);
+  return 1;
+}
+
+/* A Text or Data getter that returns the schema default for a null
+ * pointer, as C++ getters do. 0 when the field has no default. */
+static int emit_blob_default(FILE *out, const char *sname, const char *fname,
+                             uint32_t offset, const capnp_ptr_t *field,
+                             uint16_t tw) {
+  capnp_ptr_t value, child;
+  const char *text = NULL;
+  const uint8_t *data = NULL;
+  size_t n = 0;
+  if (capnp_getp(field, 3, &value) != CAPNP_OK || value.kind != CAPNP_PK_STRUCT ||
+      capnp_get_u16(&value, 0, 0xffff) != tw)
+    return 0;
+  if (capnp_getp(&value, 0, &child) != CAPNP_OK || child.kind == CAPNP_PK_NULL)
+    return 0;
+  if (tw == TYPE_TEXT ? capnp_get_text(&value, 0, &text, &n) != CAPNP_OK
+                      : capnp_get_data(&value, 0, &data, &n) != CAPNP_OK)
+    return 0;
+  fprintf(out,
+          "(defn %s-get-%s [ptr]\n"
+          "  (if (= (capnp/kind (capnp/getp ptr %u)) :null)\n    ",
+          sname, fname, (unsigned)offset);
+  if (tw == TYPE_TEXT)
+    janet_quote(out, text, n);
+  else
+    emit_hex_string(out, data, n);
+  fprintf(out, "\n    (capnp/get-%s ptr %u)))\n",
+          tw == TYPE_TEXT ? "text" : "data", (unsigned)offset);
   return 1;
 }
 
@@ -1307,14 +1337,16 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
               sname, fname, (unsigned)(offset * 8), dflt);
       break;
     case TYPE_TEXT:
-      fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/get-text ptr %u))\n", sname,
-              fname, (unsigned)offset);
+      if (!emit_blob_default(out, sname, fname, offset, &f, tw))
+        fprintf(out,
+                "(defn %s-get-%s [ptr]\n  (capnp/get-text ptr %u))\n", sname,
+                fname, (unsigned)offset);
       break;
     case TYPE_DATA:
-      fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/get-data ptr %u))\n", sname,
-              fname, (unsigned)offset);
+      if (!emit_blob_default(out, sname, fname, offset, &f, tw))
+        fprintf(out,
+                "(defn %s-get-%s [ptr]\n  (capnp/get-data ptr %u))\n", sname,
+                fname, (unsigned)offset);
       break;
     case TYPE_LIST: {
       capnp_ptr_t element_type;
