@@ -590,6 +590,29 @@ int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
   return -1;
 }
 
+/* Read a pointer cx_ops already charged to the traversal limit: rpc.c++
+ * reads a transform once, so a second look here costs nothing. */
+static int getp_again(const capnp_ptr_t *s, uint16_t index, capnp_ptr_t *out)
+{
+  capnp_message_t *m = s->msg;
+  uint64_t left = m != NULL ? m->traversal_left : 0;
+  int rc;
+  if (m != NULL)
+    m->traversal_left = UINT64_MAX / 2;
+  rc = capnp_getp(s, index, out);
+  if (m != NULL)
+    m->traversal_left = left;
+  return rc;
+}
+
+/* Whether the payload's content pointer is a capability, as in a
+ * bootstrap answer. */
+static int content_is_cap(const capnp_ptr_t *payload)
+{
+  capnp_ptr_t p;
+  return getp_again(payload, 0, &p) == CAPNP_OK && p.kind == CAPNP_PK_CAP;
+}
+
 /* Resolve a MessageTarget to a local export index, or -1 when it names
  * nothing this vat hosts. Shared by Call and Join, which address
  * capabilities the same way. */
@@ -652,8 +675,12 @@ static int resolve_promised_answer(capnp_rpc_conn_t *c,
   if (capnp_getp(&payload, 0, &cursor) != CAPNP_OK)
     goto out;
 
-  if (capnp_getp(promised, 0, &ops) == CAPNP_OK) {
+  if (getp_again(promised, 0, &ops) == CAPNP_OK) {
     n = (int)capnp_list_len(&ops);
+    /* A bootstrap answer is one capability: rpc.c++ takes any op into
+     * it, a noop included, for a broken transform. */
+    if (n > 0 && content_is_cap(&payload))
+      goto out;
     for (i = 0; i < n; i++) {
       capnp_ptr_t op, next;
       if (capnp_list_get_struct(&ops, (uint32_t)i, &op) != CAPNP_OK)
@@ -722,7 +749,7 @@ static const char *promised_failure(capnp_rpc_conn_t *c,
   a = answer_find(c, capnp_get_u32(promised, PA_QUESTIONID_OFF, 0));
   if (a == NULL)
     return NO_PIPELINE_REASON;
-  if (capnp_getp(promised, 0, &ops) == CAPNP_OK)
+  if (getp_again(promised, 0, &ops) == CAPNP_OK)
     nops = capnp_list_len(&ops);
   if (capnp_message_from_flat(&stored, frame_bytes(a->frame, a->len),
                               a->len) != CAPNP_OK ||

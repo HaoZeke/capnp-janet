@@ -1610,10 +1610,14 @@ static const vscenario_t vat_diffs[] = {
      {{VF_TAG, 0, 0, 0, 0, 20, 0, 8u << 28}}, 1, 99, 0, 0, 0},
     {"message type 20 carrying a list one word past that",
      {{VF_TAG, 0, 0, 0, 0, 20, 0, 9u << 28}}, 1, 99, 0, 0, 0},
+    {"call pipelined with a legal list of void as its transform",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1, 10u << 28}}, 1, 99, 0, 0, 0},
     {"capability descriptor of an unknown arm in the params of a call",
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | 0x200}}, 1, 99, 0, 0, 0},
     {"capability then a descriptor of an unknown arm in the params",
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 2u | 0x200}}, 1, 99, 0, 0, 0},
+    {"call pipelined on the bootstrap answer through a noop",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 0x201, 0}}, 1, 1, 0, 0, 0},
     {"Disembargo of an unknown context with a corrupt target",
      {{VF_DISEMBARGO, 0, VT_IMPORT, 0, 9, 0, 0, 5u << 28}}, 1, 99, 0, 0, 0},
     {"Disembargo of an unknown context with a corrupt promisedAnswer",
@@ -1702,7 +1706,7 @@ static int build_target(const capnp_bptr_t *call, const vframe_t *f) {
         capnp_builder_set_u32(&pa, 0, f->tval))
       return -1;
     /* `count` low byte ops of getPointerField; 0x100 makes the last
-     * one an unknown arm. */
+     * one an unknown arm, and 0x200 makes the first a noop. */
     if ((f->count & 0xff) == 0)
       return 0;
     if (capnp_builder_set_list_struct(&pa, 1, 0, f->count & 0xff, 1, 0, &ops))
@@ -1713,7 +1717,8 @@ static int build_target(const capnp_bptr_t *call, const vframe_t *f) {
       if (capnp_builder_set_u16(&e, 0,
                                 (f->count & 0x100) && i + 1 == (f->count & 0xff)
                                     ? 5
-                                    : 1))
+                                : (f->count & 0x200) && i == 0 ? 0
+                                                               : 1))
         return -1;
     }
     return 0;
@@ -1933,6 +1938,7 @@ static int build_vframe_raw(const vframe_t *f, uint8_t **out, size_t *len) {
 }
 
 #define VF_AMPLIFIED 20000000u
+#define VF_BIG_LEGAL 8388000u
 #define VF_BODY_FITS 8388602u
 
 static uint64_t vf_word(const uint8_t *frame, size_t w) {
@@ -1959,6 +1965,11 @@ static uint64_t vf_list_word(unsigned esize, uint32_t count) {
 static int vf_corrupt(uint32_t bad, uint8_t **frame, size_t *len) {
   size_t words = (*len - 8) / 8, w;
   uint8_t *f = *frame;
+  uint32_t amp = VF_AMPLIFIED;
+  if (bad == 10) {
+    bad = 2;
+    amp = VF_BIG_LEGAL;
+  }
   switch (bad) {
   case 8:
   case 9:
@@ -1971,7 +1982,7 @@ static int vf_corrupt(uint32_t bad, uint8_t **frame, size_t *len) {
       uint64_t v = vf_word(f, w);
       if (w > 0 && (v & 3) == 1 && (v >> 32) != 0 && ((v >> 32) & 7) == 7) {
         if (bad == 2) {
-          vf_set_word(f, w, vf_list_word(0, VF_AMPLIFIED));
+          vf_set_word(f, w, vf_list_word(0, amp));
         } else {
           uint8_t *grown = (uint8_t *)realloc(f, *len + 8);
           if (grown == NULL)
@@ -2458,10 +2469,14 @@ static const struct {
     {"message type 20 carrying a list one word past that",
      "abort: Exceeded message traversal limit.  See "
      "capnp::ReaderOptions."},
+    {"call pipelined with a legal list of void as its transform",
+     "return 1 exception: Invalid pipeline transform. | no end"},
     {"capability descriptor of an unknown arm in the params of a call",
      "abort: unknown CapDescriptor type"},
     {"capability then a descriptor of an unknown arm in the params",
      "release 5 x1 | abort: unknown CapDescriptor type"},
+    {"call pipelined on the bootstrap answer through a noop",
+     "return 1 exception: Invalid pipeline transform."},
     {"Disembargo of an unknown context with a corrupt target",
      "abort: expected boundsCheck(segment, ptr, "
      "ref->structRef.wordSize()); Message contained out-of-bounds "

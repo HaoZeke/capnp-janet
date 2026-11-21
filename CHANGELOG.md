@@ -326,6 +326,9 @@ Pre-1.0 minor releases may include breaking API changes.
   the union arm, matching the C++ builder contract.
 - Standalone generated-module tests retain the native library search path and
   preload an instrumented runtime when required.
+- A call pipelined through a noop on a bootstrap answer fails with
+  `Invalid pipeline transform.`, as rpc.c++ answers it. A transform long
+  enough to pass the traversal limit twice is read once, as rpc.c++ does.
 
 ### Changed
 
