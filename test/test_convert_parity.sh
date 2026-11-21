@@ -14,6 +14,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 PARITY="$ROOT/schema/parity.capnp"
 HOLDER="$ROOT/test/fixtures/holder.capnp"
+NODE="$ROOT/test/fixtures/node.capnp"
 fails=0
 
 # words HEX... -> single-segment stream message on stdout
@@ -156,6 +157,34 @@ for v in '"0aF"' '"zz41"' '"4g"' '"g1"'; do
   compare "json-hex-$((i++))" "$PARITY" Parity "text binary"
 done
 in_fmt=binary
+
+# `capnp convert` lifts the nesting and traversal limits. A chain of 200
+# structs and nine reads of one 1M-word list both pass the defaults.
+python3 - "$TMP/in.bin" <<'EOF'
+import struct, sys
+d = 200
+w = [0x0002000100000000]
+for i in range(d + 1):
+    w += [7 if i == d else 0, 0x0002000100000004 if i < d else 0, 0]
+out = open(sys.argv[1], "wb")
+out.write(struct.pack("<II", 0, len(w)) + b"".join(struct.pack("<Q", x) for x in w))
+EOF
+compare deep-chain "$NODE" Node "text json binary canonical"
+python3 - "$TMP/in.bin" <<'EOF'
+import struct, sys
+n, count = 9, 1 << 20
+w = [0x0002000100000000]
+shared = 1 + 3 * n
+for i in range(n):
+    base = 1 + 3 * i
+    off = shared - (base + 2) - 1
+    nxt = 0x0002000100000004 if i < n - 1 else 0
+    w += [0, nxt, ((count << 3 | 5) << 32) | ((off << 2) | 1)]
+w += [0] * count
+out = open(sys.argv[1], "wb")
+out.write(struct.pack("<II", 0, len(w)) + b"".join(struct.pack("<Q", x) for x in w))
+EOF
+compare amplified-reads "$NODE" Node "binary"
 
 if [[ $fails -ne 0 ]]; then
   echo "convert parity: $fails failure(s)" >&2

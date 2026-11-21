@@ -40,4 +40,10 @@ CAPNP_JANET_HIDDEN int capnp_builder_init_list(const capnp_bptr_t *body,
                                                uint32_t nitems,
                                                capnp_bptr_t *start);
 
+/* Nesting allowed when a `capnp_dyn_t` encodes text or JSON, or parses
+ * text, for every instance in the process. Defaults to
+ * CAPNP_DEFAULT_DEPTH_LIMIT. JSON parsing keeps the limit of 64 that C++
+ * JsonCodec has. */
+CAPNP_JANET_HIDDEN void capnp_dyn_set_max_depth(int depth);
+
 #endif

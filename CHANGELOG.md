@@ -27,6 +27,10 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp-eval convert`, `decode` and `encode` lift the nesting and
+  traversal limits, as `capnp` does for every conversion. A struct nested
+  more than 64 deep, or more than 8M words read, used to fail. Canonical
+  output follows the message's nesting limit and no longer stops at 64.
 - A `Finish` with `releaseResultCaps` releases the export reference each
   capability in the stored Return took, as C++ does. Such references used
   to stay held until the connection closed.

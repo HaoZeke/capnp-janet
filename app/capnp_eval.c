@@ -18,7 +18,9 @@
 #include "capnp_internal.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -288,8 +290,6 @@ static int copy_list_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
 static int copy_ptr_untrimmed(capnp_builder_t *b, uint32_t slot_seg,
                               size_t slot_word, const capnp_ptr_t *src,
                               int depth) {
-  if (depth > 64)
-    return -1;
   if (!src || src->kind == CAPNP_PK_NULL) {
     capnp_store_le64(b->segs[slot_seg].data + slot_word * 8u, 0);
     return 0;
@@ -617,10 +617,19 @@ static int next_delimited_chunk(const char *s, size_t n, size_t *pos, int json,
   return 1;
 }
 
+/* `capnp` lifts the nesting and traversal limits for every conversion,
+ * since it is a debugging tool. */
+static void lift_limits(capnp_message_t *m) {
+  m->traversal_left = UINT64_MAX;
+  m->depth_limit = INT_MAX;
+}
+
 static int run_convert(capnp_dyn_t *dyn, const char *type_name,
                        int from_fmt, int to_fmt, int pretty, size_t seg_words) {
   size_t in_len = 0;
-  char *in_buf = read_all(stdin, &in_len);
+  char *in_buf;
+  capnp_dyn_set_max_depth(INT_MAX);
+  in_buf = read_all(stdin, &in_len);
   if (!in_buf)
     return 1;
   if (in_len == 0) {
@@ -640,6 +649,7 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
         free(in_buf);
         return 1;
       }
+      lift_limits(&m);
       if (write_converted_message(dyn, type_name, &m, to_fmt, pretty,
                                   seg_words)) {
         capnp_message_free(&m);
@@ -670,6 +680,7 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
         free(unpacked);
         return 1;
       }
+      lift_limits(&m);
       if (write_converted_message(dyn, type_name, &m, to_fmt, pretty,
                                   seg_words)) {
         capnp_message_free(&m);
@@ -707,6 +718,7 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
       free(raw);
       return 1;
     }
+    lift_limits(&m);
     if (from_fmt == FMT_CANONICAL) {
       uint8_t *can = NULL;
       size_t clen = 0;
@@ -758,6 +770,7 @@ static int run_convert(capnp_dyn_t *dyn, const char *type_name,
         return 1;
       }
       free(msg_bytes);
+      lift_limits(&m);
       if (write_converted_message(dyn, type_name, &m, to_fmt, pretty,
                                   seg_words)) {
         capnp_message_free(&m);

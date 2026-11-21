@@ -256,8 +256,8 @@ static int write_list_to_slot(capnp_builder_t *b, uint32_t slot_seg,
 
 int capnp_copy_ptr_to_word(capnp_builder_t *b, uint32_t slot_seg,
                            size_t slot_word, const capnp_ptr_t *src, int depth) {
-  if (depth > 64)
-    return CAPNP_ERR_DEPTH;
+  /* The reader's depth_left already bounds recursion, as the message's
+   * nesting limit bounds a C++ copy. */
   if (!src || src->kind == CAPNP_PK_NULL) {
     capnp_store_le64(wptr(b, slot_seg, slot_word), 0);
     return CAPNP_OK;

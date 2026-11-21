@@ -2,6 +2,8 @@
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_pointer.h>
 
+#include "capnp_internal.h"
+
 #include <ctype.h>
 #include <errno.h>
 #include <float.h>
@@ -50,7 +52,13 @@ enum {
 #define JSON_FIELD_TYPE_ID 0xe31026e735d69ddfull
 #define JSON_CALL_TYPE_ID 0xa0d9f6eca1c93d48ull
 
-#define MAX_DEPTH 64
+#define TYPE_MAX_DEPTH 64
+/* JsonCodec's default maxNestingDepth. */
+#define JSON_MAX_DEPTH 64
+/* Nesting allowed while encoding a value or parsing and building one from
+ * text; set from `dyn_max_depth` on entry to each public call. */
+static _Thread_local int value_depth = CAPNP_DEFAULT_DEPTH_LIMIT;
+static int dyn_max_depth = CAPNP_DEFAULT_DEPTH_LIMIT;
 
 typedef struct {
   char *data;
@@ -721,6 +729,10 @@ const char *capnp_dyn_error(const capnp_dyn_t *d) {
   return d->err;
 }
 
+void capnp_dyn_set_max_depth(int depth) {
+  dyn_max_depth = depth < 1 ? 1 : depth;
+}
+
 void capnp_dyn_free(capnp_dyn_t *d) {
   uint32_t i;
   if (!d)
@@ -823,7 +835,7 @@ static int resolve_type_proto(const capnp_dyn_t *d, const capnp_ptr_t *typ,
                               const brand_env_t *env, rtype_t *out, int depth) {
   uint16_t w;
   memset(out, 0, sizeof(*out));
-  if (depth > MAX_DEPTH || !typ || typ->kind != CAPNP_PK_STRUCT)
+  if (depth > TYPE_MAX_DEPTH || !typ || typ->kind != CAPNP_PK_STRUCT)
     return -1;
   w = capnp_get_u16(typ, 0, 0xffff);
   if (w == TY_LIST) {
@@ -894,7 +906,7 @@ static int parse_type_expr(const capnp_dyn_t *d, const char **pp, rtype_t *out,
   char name[160];
   size_t k = 0;
   memset(out, 0, sizeof(*out));
-  if (depth > MAX_DEPTH)
+  if (depth > TYPE_MAX_DEPTH)
     return -1;
   skip_spaces(pp);
   if (**pp == '.')
@@ -1999,7 +2011,7 @@ static int encode_text_list(buf_t *b, capnp_dyn_t *d,
   piece_list_t pl;
   uint32_t i, n;
   int next_ind = indent ? indent + 1 : 0;
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   if (buf_ch(b, '['))
     return -1;
@@ -2350,7 +2362,7 @@ static int encode_text_struct(buf_t *b, capnp_dyn_t *d,
   uint32_t i;
   uint16_t which = 0xffff;
   int next_ind = indent ? indent + 1 : 0;
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   if (buf_ch(b, '('))
     return -1;
@@ -2563,7 +2575,7 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
   disc_opts_t dopts;
   const char *tag_name = NULL;
 
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   memset(&dopts, 0, sizeof(dopts));
   if (disc_override && disc_override->present)
@@ -2765,7 +2777,7 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
                                     int *multiline, int has_prefix, int pretty,
                                     int depth) {
   uint16_t which;
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   which = (s && s->kind == CAPNP_PK_STRUCT) ? capnp_get_u16(s, 0, 0) : 0;
   switch (which) {
@@ -2917,7 +2929,7 @@ static int encode_json_list(buf_t *b, capnp_dyn_t *d,
   json_list_t jl;
   uint32_t i, n;
   int sub_indent;
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   if (buf_ch(b, '['))
     return -1;
@@ -3205,7 +3217,7 @@ static int encode_json_struct(buf_t *b, capnp_dyn_t *d,
   uint32_t i;
   int sub_indent;
 
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   if (st->id == JSON_VALUE_TYPE_ID)
     return encode_json_value_struct(b, s, indent, multiline, has_prefix, pretty,
@@ -3268,6 +3280,7 @@ static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
   *len = 0;
   encode_oom = 0;
   encode_wire_err = CAPNP_OK;
+  value_depth = dyn_max_depth;
   if (s->kind != CAPNP_PK_STRUCT && s->kind != CAPNP_PK_NULL)
     return CAPNP_ERR_KIND;
   if (resolve_root_type_name(d, type_name, &rt, &st) != CAPNP_OK)
@@ -3620,7 +3633,7 @@ static vnode_t *parse_json_arr(scan_t *sc) {
   vnode_t *arr;
   int expect_comma = 0;
   sc->i++; /* consume '[' */
-  if (++sc->depth > MAX_DEPTH)
+  if (++sc->depth > JSON_MAX_DEPTH)
     return NULL;
   arr = new_vnode(VK_LIST);
   if (!arr)
@@ -3659,7 +3672,7 @@ static vnode_t *parse_json_obj(scan_t *sc) {
   vnode_t *obj;
   int expect_comma = 0;
   sc->i++; /* consume '{' */
-  if (++sc->depth > MAX_DEPTH)
+  if (++sc->depth > JSON_MAX_DEPTH)
     return NULL;
   obj = new_vnode(VK_OBJ);
   if (!obj)
@@ -3962,7 +3975,7 @@ static vnode_t *parse_text_expr(scan_t *sc);
 static vnode_t *parse_text_tuple(scan_t *sc) {
   vnode_t *obj;
   sc->i++; /* consume '(' */
-  if (++sc->depth > MAX_DEPTH)
+  if (++sc->depth > value_depth)
     return NULL;
   if (tpeek(sc) == ')') {
     sc->i++;
@@ -4045,7 +4058,7 @@ static vnode_t *parse_text_tuple(scan_t *sc) {
 static vnode_t *parse_text_list(scan_t *sc) {
   vnode_t *arr;
   sc->i++; /* consume '[' */
-  if (++sc->depth > MAX_DEPTH)
+  if (++sc->depth > value_depth)
     return NULL;
   arr = new_vnode(VK_LIST);
   if (!arr)
@@ -4612,7 +4625,7 @@ static void clear_group_wire(capnp_dyn_t *d, const dyn_struct_t *g,
                              const brand_env_t *env, const capnp_bptr_t *body,
                              int depth) {
   uint32_t i;
-  if (!g || depth > MAX_DEPTH)
+  if (!g || depth > value_depth)
     return;
   if (g->disc_count) {
     if (write_disc(body, g, 0))
@@ -4634,7 +4647,7 @@ static void clear_field_wire(capnp_dyn_t *d, const dyn_struct_t *st,
                              const dyn_field_t *f, const brand_env_t *env,
                              const capnp_bptr_t *body, int depth) {
   rtype_t ft;
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return;
   if (f->is_group) {
     dyn_struct_t *g = find_struct_id(d, f->group_id);
@@ -4738,7 +4751,7 @@ static void dyn_finish_json_field(capnp_dyn_t *d, const dyn_field_t *f,
 static int build_json_value_struct(const vnode_t *v, const capnp_bptr_t *body,
                                    int depth) {
   uint32_t i;
-  if (depth > MAX_DEPTH || !v)
+  if (depth > value_depth || !v)
     return -1;
   switch (v->kind) {
   case VK_NULL:
@@ -4808,7 +4821,7 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
                                  uint16_t dwords, uint16_t index, int json,
                                  int depth) {
   uint32_t n, i;
-  if (depth > MAX_DEPTH || !v || v->kind != VK_LIST)
+  if (depth > value_depth || !v || v->kind != VK_LIST)
     return -1;
   n = v->count;
   if (elem_rt->list_depth > 0) {
@@ -5143,7 +5156,7 @@ static int copy_list_full(capnp_builder_t *b, uint32_t slot_seg, size_t slot_wor
 
 static int copy_ptr_full(capnp_builder_t *b, uint32_t slot_seg, size_t slot_word,
                          const capnp_ptr_t *src, int depth) {
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   if (!src || src->kind == CAPNP_PK_NULL) {
     capnp_store_le64(b->segs[slot_seg].data + slot_word * 8u, 0);
@@ -5262,7 +5275,7 @@ static int adopt_group_fields(capnp_dyn_t *d, const dyn_struct_t *g,
                               const capnp_bptr_t *dst, int depth) {
   uint32_t i;
   uint16_t which = 0xffff;
-  if (!g || depth > MAX_DEPTH)
+  if (!g || depth > value_depth)
     return -1;
   if (g->disc_count) {
     const dyn_field_t *af = NULL;
@@ -5343,7 +5356,7 @@ static int build_field_from_vnode(capnp_dyn_t *d, const dyn_struct_t *st,
   int rc = 0;
   int value_bad = 0;
 
-  if (depth > MAX_DEPTH || !v)
+  if (depth > value_depth || !v)
     return -1;
   if (f->disc != 0xffff && st->disc_count) {
     /* DynamicStruct::Builder::set calls setInUnion, which stores the
@@ -5597,7 +5610,7 @@ static int schema_claims_flat_key(capnp_dyn_t *d, const dyn_struct_t *st,
   disc_opts_t dopts;
   const char *tag_name = NULL;
 
-  if (!st || depth > MAX_DEPTH)
+  if (!st || depth > value_depth)
     return 0;
   memset(&dopts, 0, sizeof(dopts));
   if (disc_override && disc_override->present)
@@ -5716,7 +5729,7 @@ static int decode_json_field_entry(
   disc_opts_t dopts;
   const char *tag_name = NULL;
 
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   memset(&dopts, 0, sizeof(dopts));
   if (disc_override && disc_override->present)
@@ -5915,7 +5928,7 @@ static int build_struct_from_vnode(capnp_dyn_t *d,
                                    const capnp_bptr_t *body, int json,
                                    int depth) {
   uint32_t i;
-  if (depth > MAX_DEPTH || !v)
+  if (depth > value_depth || !v)
     return -1;
   if (st->id == JSON_VALUE_TYPE_ID && json)
     return build_json_value_struct(v, body, depth);
@@ -6034,6 +6047,7 @@ static int decode_root_impl(capnp_dyn_t *d, const char *type_name,
   dyn_set_err(d, "");
   d->bad_src = NULL;
   d->bad_n = 0;
+  value_depth = dyn_max_depth;
   if (resolve_root_type_name(d, type_name, &rt, &st) != CAPNP_OK) {
     dyn_set_err(d, "unknown type");
     return CAPNP_ERR_KIND;
@@ -6632,6 +6646,7 @@ int capnp_dyn_eval_ex(capnp_dyn_t *d, const char *expr, int json,
     return CAPNP_ERR_ARG;
   *out = NULL;
   *len = 0;
+  value_depth = dyn_max_depth;
   rc = resolve_eval_expr(d, expr, &ev);
   if (rc)
     return rc;
