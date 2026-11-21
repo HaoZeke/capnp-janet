@@ -246,7 +246,10 @@ CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
  * rpc.c++ reason. So does a Call or Bootstrap rpc.c++ refuses: one
  * naming an export we lack, an unknown target or sendResultsTo arm, or
  * a question id still in use. So does a Release of an export we lack, or
- * of more references than it has. */
+ * of more references than it has, and a Disembargo loopback: this vat
+ * exports no promise for one to name. A Disembargo with any other
+ * context aborts too, unless it is a provide naming a Provide this vat
+ * holds, which lifts that Accept's embargo. */
 CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
 
 /* --- client side -------------------------------------------------- */

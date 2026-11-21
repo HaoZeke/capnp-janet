@@ -8,6 +8,7 @@
 #include <capnp-janet/capnp_rpc.h>
 
 #include <pthread.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1038,22 +1039,19 @@ int capnp_rpc_write_third_party_cap(capnp_rpc_conn_t *c, capnp_bptr_t *cd,
   return CAPNP_OK;
 }
 
-static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
+/* The target in pointer 0 of a Call or Disembargo, resolved as rpc.c++
+ * getMessageTarget does: an export of ours in `*eid`, or in `*failure`
+ * why the promised answer it names holds no capability. A target rpc.c++
+ * refuses aborts. A null target reads as the default, importedCap 0. */
+static int message_target(capnp_rpc_conn_t *c, const capnp_ptr_t *body,
+                          int *eid, const char **failure, char *buf,
+                          size_t cap)
 {
-  capnp_builder_t b;
-  capnp_bptr_t ret, payload, results;
-  capnp_ptr_t target, params_payload, params;
-  uint32_t qid = capnp_get_u32(call, QUESTIONID_OFF, 0);
-  uint16_t send_to, which = TARGET_TAG_IMPORTEDCAP;
-  const char *failure = NULL;
-  char reason[256];
-  int eid = -1, rc, yourself, mode;
-
-  /* The checks and their order are rpc.c++ handleCall's: the target,
-   * then sendResultsTo, then the question id. A null target reads as
-   * the default MessageTarget, importedCap 0. */
-  memset(&params, 0, sizeof params);
-  if (capnp_getp(call, 0, &target) != CAPNP_OK)
+  capnp_ptr_t target;
+  uint16_t which = TARGET_TAG_IMPORTEDCAP;
+  *eid = -1;
+  *failure = NULL;
+  if (capnp_getp(body, 0, &target) != CAPNP_OK)
     memset(&target, 0, sizeof target);
   if (target.kind == CAPNP_PK_STRUCT)
     which = capnp_get_u16(&target, TARGET_TAG_OFF, 0);
@@ -1063,19 +1061,39 @@ static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
                       : 0;
     if (id >= CAPNP_RPC_MAX_EXPORTS || !c->exports[id].used)
       return protocol_abort(c, "Message target is not a current export ID.");
-    eid = (int)id;
+    *eid = (int)id;
   } else if (which == TARGET_TAG_PROMISEDANSWER) {
     capnp_ptr_t pa;
     if (capnp_getp(&target, 0, &pa) != CAPNP_OK)
       memset(&pa, 0, sizeof pa);
-    eid = resolve_promised_answer(c, &pa);
-    if (eid < 0)
-      failure = promised_failure(c, &pa, reason, sizeof reason);
+    *eid = resolve_promised_answer(c, &pa);
+    if (*eid < 0)
+      *failure = promised_failure(c, &pa, buf, cap);
   } else {
     /* rpc.c++ prints the target, and a MessageTarget with an unknown arm
      * prints as "()". */
     return protocol_abort(c, "Unknown message target type.; target = ()");
   }
+  return CAPNP_OK;
+}
+
+static int handle_call(capnp_rpc_conn_t *c, const capnp_ptr_t *call)
+{
+  capnp_builder_t b;
+  capnp_bptr_t ret, payload, results;
+  capnp_ptr_t params_payload, params;
+  uint32_t qid = capnp_get_u32(call, QUESTIONID_OFF, 0);
+  uint16_t send_to;
+  const char *failure = NULL;
+  char reason[256];
+  int eid = -1, rc, yourself, mode;
+
+  /* The checks and their order are rpc.c++ handleCall's: the target,
+   * then sendResultsTo, then the question id. */
+  memset(&params, 0, sizeof params);
+  rc = message_target(c, call, &eid, &failure, reason, sizeof reason);
+  if (rc != CAPNP_OK)
+    return rc;
 
   send_to = capnp_get_u16(call, CALL_SENDRESULTSTO_OFF, 0);
   if (send_to > CALL_SENDRESULTSTO_YOURSELF)
@@ -1289,55 +1307,147 @@ static int handle_join(capnp_rpc_conn_t *c, const capnp_ptr_t *join)
 
 static int release_provide_embargo(capnp_rpc_conn_t *c, uint32_t provide_qid);
 
-/* A Disembargo with `senderLoopback` is echoed back as `receiverLoopback`
- * carrying the same id. That reflection is what lets the sender know every
- * call it had already sent through a promise has arrived, so it can stop
- * routing new ones the long way round. */
+static int provision_known(capnp_rpc_conn_t *c, uint32_t provide_qid)
+{
+  int i;
+  for (i = 0; i < CAPNP_RPC_MAX_PROVISIONS; i++)
+    if (c->vat->provisions[i].used &&
+        c->vat->provisions[i].question_id == provide_qid)
+      return 1;
+  return 0;
+}
+
+/* Append to `*buf`, growing it; a failed allocation drops the rest. */
+static void text_append(char **buf, size_t *len, size_t *cap,
+                        const char *fmt, ...)
+{
+  va_list ap;
+  int n;
+  if (*buf == NULL)
+    return;
+  for (;;) {
+    va_start(ap, fmt);
+    n = vsnprintf(*buf + *len, *cap - *len, fmt, ap);
+    va_end(ap);
+    if (n < 0)
+      return;
+    if ((size_t)n < *cap - *len) {
+      *len += (size_t)n;
+      return;
+    }
+    {
+      char *grown = (char *)realloc(*buf, *cap * 2 + (size_t)n);
+      if (grown == NULL)
+        return;
+      *buf = grown;
+      *cap = *cap * 2 + (size_t)n;
+    }
+  }
+}
+
+/* The reason rpc.c++ gives for a Disembargo context it does not know:
+ * the message printed by kj, where a null pointer field is left out and
+ * an unknown union arm prints as "()". */
+static int abort_unimplemented_disembargo(capnp_rpc_conn_t *c,
+                                          const capnp_ptr_t *dis)
+{
+  size_t len = 0, cap = 128;
+  char *buf = (char *)malloc(cap);
+  capnp_ptr_t target, pa, ops, op;
+  const char *sep = "";
+  uint16_t ctx = capnp_get_u16(dis, DIS_CTX_TAG_OFF, 0);
+  int rc;
+  if (buf == NULL)
+    return protocol_abort(c, "Unimplemented Disembargo type.");
+  buf[0] = '\0';
+  text_append(&buf, &len, &cap, "Unimplemented Disembargo type.; disembargo = (");
+  if (capnp_getp(dis, 0, &target) == CAPNP_OK &&
+      target.kind == CAPNP_PK_STRUCT) {
+    uint16_t arm = capnp_get_u16(&target, TARGET_TAG_OFF, 0);
+    text_append(&buf, &len, &cap, "target = (");
+    if (arm == TARGET_TAG_IMPORTEDCAP) {
+      text_append(&buf, &len, &cap, "importedCap = %u",
+                  (unsigned)capnp_get_u32(&target, TARGET_IMPORTEDCAP_OFF, 0));
+    } else if (arm == TARGET_TAG_PROMISEDANSWER) {
+      if (capnp_getp(&target, 0, &pa) != CAPNP_OK)
+        memset(&pa, 0, sizeof pa);
+      text_append(&buf, &len, &cap, "promisedAnswer = (questionId = %u",
+                  (unsigned)capnp_get_u32(&pa, 0, 0));
+      if (pa.kind == CAPNP_PK_STRUCT && capnp_getp(&pa, 0, &ops) == CAPNP_OK &&
+          ops.kind == CAPNP_PK_LIST) {
+        uint32_t i, n = capnp_list_len(&ops);
+        text_append(&buf, &len, &cap, ", transform = [");
+        for (i = 0; i < n; i++) {
+          uint16_t tag;
+          if (capnp_list_get_struct(&ops, i, &op) != CAPNP_OK)
+            memset(&op, 0, sizeof op);
+          tag = capnp_get_u16(&op, 0, 0);
+          if (tag == 0)
+            text_append(&buf, &len, &cap, "%s(noop = void)", sep);
+          else if (tag == 1)
+            text_append(&buf, &len, &cap, "%s(getPointerField = %u)", sep,
+                        (unsigned)capnp_get_u16(&op, 2, 0));
+          else
+            text_append(&buf, &len, &cap, "%s()", sep);
+          sep = ", ";
+        }
+        text_append(&buf, &len, &cap, "]");
+      }
+      text_append(&buf, &len, &cap, ")");
+    }
+    text_append(&buf, &len, &cap, "), ");
+  }
+  if (ctx == DIS_CTX_ACCEPT)
+    text_append(&buf, &len, &cap, "context = (accept = void))");
+  else if (ctx == DIS_CTX_PROVIDE)
+    text_append(&buf, &len, &cap, "context = (provide = %u))",
+                (unsigned)capnp_get_u32(dis, DIS_CTX_VALUE_OFF, 0));
+  else
+    text_append(&buf, &len, &cap, "context = ())");
+  rc = protocol_abort(c, buf);
+  free(buf);
+  return rc;
+}
+
+/* A Disembargo as rpc.c++ answers it on a vat that exports no promises
+ * and raises no embargoes. A senderLoopback must name a capability that
+ * resolved back to the sender, and every export here is local, so it
+ * aborts once its target resolves; rpc.c++ prints both objects' brands
+ * in the reason. A receiverLoopback names no embargo of ours. rpc.c++
+ * refuses every other context. This vat serves level 3, so a provide
+ * naming a Provide it holds lifts that Accept's embargo; the introducer
+ * may send it before the recipient's Accept arrives on its own
+ * connection. */
 static int handle_disembargo(capnp_rpc_conn_t *c, const capnp_ptr_t *dis)
 {
-  capnp_builder_t b;
-  capnp_bptr_t root, msg, slot, out;
-  capnp_ptr_t target;
-  uint32_t id;
-  int rc;
+  const char *failure = NULL;
+  char reason[320];
+  int eid = -1, rc;
+  uint16_t ctx;
 
   if (dis->kind != CAPNP_PK_STRUCT)
     return CAPNP_OK;
-  if (capnp_get_u16(dis, DIS_CTX_TAG_OFF, 0) == DIS_CTX_PROVIDE)
+  ctx = capnp_get_u16(dis, DIS_CTX_TAG_OFF, 0);
+  if (ctx == DIS_CTX_PROVIDE &&
+      provision_known(c, capnp_get_u32(dis, DIS_CTX_VALUE_OFF, 0)))
     return release_provide_embargo(c, capnp_get_u32(dis, DIS_CTX_VALUE_OFF, 0));
-  /* receiverLoopback is the reply to an embargo we raised, and this vat
-   * raises none; accept it without echoing to avoid a loop. */
-  if (capnp_get_u16(dis, DIS_CTX_TAG_OFF, 0) != DIS_CTX_SENDER_LOOPBACK)
-    return CAPNP_OK;
-  id = capnp_get_u32(dis, DIS_CTX_VALUE_OFF, 0);
-
-  capnp_builder_init(&b);
-  rc = capnp_builder_root(&b, &root);
-  if (rc == CAPNP_OK)
-    rc = capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg);
-  if (rc == CAPNP_OK)
-    rc = capnp_builder_set_u16(&msg, MESSAGE_TAG_OFF, CAPNP_RPC_MSG_DISEMBARGO);
-  if (rc == CAPNP_OK)
-    rc = capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot);
-  if (rc == CAPNP_OK)
-    rc = capnp_builder_struct(&slot, DISEMBARGO_DW, DISEMBARGO_PW, &out);
-  /* Echo the target back untouched: the sender matches on it. */
-  if (rc == CAPNP_OK && capnp_getp(dis, 0, &target) == CAPNP_OK &&
-      target.kind != CAPNP_PK_NULL) {
-    capnp_bptr_t tslot;
-    if (capnp_builder_slot(&out, DISEMBARGO_DW, 0, &tslot) == CAPNP_OK)
-      (void)capnp_builder_copy_ptr(&tslot, &target);
-  }
-  /* `context` is a group, so it shares Disembargo's own data section
-   * rather than living behind a pointer. */
-  if (rc == CAPNP_OK)
-    rc = capnp_builder_set_u16(&out, DIS_CTX_TAG_OFF, DIS_CTX_RECEIVER_LOOPBACK);
-  if (rc == CAPNP_OK)
-    rc = capnp_builder_set_u32(&out, DIS_CTX_VALUE_OFF, id);
-  if (rc == CAPNP_OK)
-    rc = flush(c, &b);
-  capnp_builder_free(&b);
-  return rc;
+  if (ctx == DIS_CTX_RECEIVER_LOOPBACK)
+    return protocol_abort(c, "Invalid embargo ID in "
+                             "'Disembargo.context.receiverLoopback'.");
+  if (ctx != DIS_CTX_SENDER_LOOPBACK)
+    return abort_unimplemented_disembargo(c, dis);
+  rc = message_target(c, dis, &eid, &failure, reason, sizeof reason);
+  if (rc != CAPNP_OK)
+    return rc;
+  if (failure != NULL)
+    return protocol_abort(c, failure);
+  snprintf(reason, sizeof reason,
+           "expected target->getBrand() == this [%lx == %lx]; 'Disembargo' "
+           "of type 'senderLoopback' sent to an object that does not point "
+           "back to the sender.",
+           (unsigned long)(uintptr_t)c->exports[eid].server,
+           (unsigned long)(uintptr_t)c);
+  return protocol_abort(c, reason);
 }
 
 /* Echo a message we did not understand, per the spec. */

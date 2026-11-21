@@ -93,6 +93,11 @@ Pre-1.0 minor releases may include breaking API changes.
 - A call with `onlyPromisePipeline` is never returned, as rpc.c++ sends
   nothing for it; its answer stays for pipelining until `Finish`. It
   used to be returned like any other call.
+- A Disembargo `senderLoopback` aborts with rpc.c++'s reason for its
+  target, since every export here is local, and a `receiverLoopback`
+  aborts as naming no embargo. They used to be echoed or ignored. An
+  `accept`, an unknown context, or a `provide` naming no Provide aborts
+  with the text rpc.c++ prints.
 - A union discriminant of 0xffff names no member. JSON output used to
   print the first non-union field a second time, and `capnp_dyn_which`
   named that field; it now returns `CAPNP_ERR_KIND`.

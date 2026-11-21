@@ -311,8 +311,9 @@ static void send_finish(capnp_rpc_conn_t *c, uint32_t qid)
   capnp_builder_free(&b);
 }
 
-static void send_disembargo(capnp_rpc_conn_t *c, uint16_t which, uint32_t id)
+static int send_disembargo(capnp_rpc_conn_t *c, uint16_t which, uint32_t id)
 {
+  int rc;
   capnp_builder_t b;
   capnp_bptr_t root, msg, slot, dis, target;
   uint8_t *flat = NULL;
@@ -331,9 +332,34 @@ static void send_disembargo(capnp_rpc_conn_t *c, uint16_t which, uint32_t id)
   CHECK(capnp_builder_set_u16(&dis, 4, which) == CAPNP_OK, "ctx tag");
   CHECK(capnp_builder_set_u32(&dis, 0, id) == CAPNP_OK, "ctx id");
   CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
-  CHECK(capnp_rpc_handle(c, flat, len) == CAPNP_OK, "handle disembargo");
+  rc = capnp_rpc_handle(c, flat, len);
   free(flat);
   capnp_builder_free(&b);
+  return rc;
+}
+
+/* The frame is an Abort whose reason contains `want`. */
+static int is_abort(const uint8_t *frame, size_t len, const char *want)
+{
+  capnp_message_t m = {0};
+  capnp_ptr_t root, exc;
+  const char *text = NULL;
+  size_t n = 0;
+  int ok = capnp_message_from_flat(&m, frame, len) == CAPNP_OK &&
+           capnp_root(&m, &root) == CAPNP_OK &&
+           capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_ABORT &&
+           capnp_getp(&root, 0, &exc) == CAPNP_OK &&
+           capnp_get_text(&exc, 0, &text, &n) == CAPNP_OK && text != NULL;
+  if (ok) {
+    char buf[512];
+    if (n >= sizeof buf)
+      n = sizeof buf - 1;
+    memcpy(buf, text, n);
+    buf[n] = 0;
+    ok = strstr(buf, want) != NULL;
+  }
+  capnp_message_free(&m);
+  return ok;
 }
 
 /* Return union tag and, for results, the first u32 of the content. */
@@ -670,25 +696,33 @@ int main(void)
   }
   outbox_clear(&out);
 
-  /* Disembargo: senderLoopback is echoed as receiverLoopback. */
-  send_disembargo(&c, 0, 12345);
-  CHECK(out.n == 1, "disembargo echoed");
-  {
-    capnp_message_t m = {0};
-    capnp_ptr_t root, dis;
-    CHECK(capnp_message_from_flat(&m, out.data[0], out.len[0]) == CAPNP_OK, "reply");
-    CHECK(capnp_root(&m, &root) == CAPNP_OK, "reply root");
-    CHECK(capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_DISEMBARGO, "is disembargo");
-    CHECK(capnp_getp(&root, 0, &dis) == CAPNP_OK, "dis body");
-    CHECK(capnp_get_u16(&dis, 4, 0) == 1, "receiverLoopback");
-    CHECK(capnp_get_u32(&dis, 0, 0) == 12345, "same id echoed");
-    capnp_message_free(&m);
-  }
+  /* Disembargo: every export here is local, so a senderLoopback aborts
+   * as rpc.c++ does, and a receiverLoopback names no embargo of ours. */
+  CHECK(send_disembargo(&c, 0, 12345) == CAPNP_ERR_KIND && out.n == 1 &&
+            is_abort(out.data[0], out.len[0],
+                     "'Disembargo' of type 'senderLoopback' sent to an "
+                     "object that does not point back to the sender."),
+        "senderLoopback to a local export aborts");
   outbox_clear(&out);
-
-  /* receiverLoopback is absorbed: echoing it would bounce forever. */
-  send_disembargo(&c, 1, 999);
-  CHECK(out.n == 0, "receiverLoopback absorbed");
+  CHECK(send_disembargo(&c, 1, 999) == CAPNP_ERR_KIND && out.n == 1 &&
+            is_abort(out.data[0], out.len[0],
+                     "Invalid embargo ID in "
+                     "'Disembargo.context.receiverLoopback'."),
+        "receiverLoopback for no embargo aborts");
+  outbox_clear(&out);
+  /* rpc.c++ refuses every other context, printing the message. */
+  CHECK(send_disembargo(&c, 2, 0) == CAPNP_ERR_KIND && out.n == 1 &&
+            is_abort(out.data[0], out.len[0],
+                     "Unimplemented Disembargo type.; disembargo = (target = "
+                     "(importedCap = 0), context = (accept = void))"),
+        "accept aborts");
+  outbox_clear(&out);
+  CHECK(send_disembargo(&c, 9, 0) == CAPNP_ERR_KIND && out.n == 1 &&
+            is_abort(out.data[0], out.len[0],
+                     "Unimplemented Disembargo type.; disembargo = (target = "
+                     "(importedCap = 0), context = ())"),
+        "an unknown context aborts");
+  outbox_clear(&out);
 
 
   /* Level 3: a provided capability is claimable exactly once. */
@@ -796,10 +830,16 @@ int main(void)
     CHECK(exc, "a claimed provision cannot be claimed again");
     outbox_clear(&out);
 
-    /* A Disembargo naming a Provide we never received changes nothing. */
+    /* A Disembargo naming a Provide we never received is refused as
+     * rpc.c++ refuses every provide context, and the embargo stays. */
     send_disembargo_provide(&c, 999);
-    CHECK(out.n == 0, "unknown provide question ignored");
+    CHECK(out.n == 1 &&
+              is_abort(out.data[0], out.len[0],
+                       "Unimplemented Disembargo type.; disembargo = "
+                       "(context = (provide = 999))"),
+          "unknown provide question refused");
     CHECK(capnp_rpc_embargoed_accepts(&c) == 1, "still held");
+    outbox_clear(&out);
 
     send_disembargo_provide(&c, 70);
     CHECK(out.n == 1, "embargo lifted, accept answered");

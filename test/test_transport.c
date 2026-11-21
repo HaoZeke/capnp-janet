@@ -1015,7 +1015,10 @@ enum {
   VF_UNIMPL_RESOLVE,
   VF_FINISH,
   VF_RETURN,
-  VF_ABORT
+  VF_ABORT,
+  VF_TAG,
+  VF_DISEMBARGO,
+  VF_RESOLVE
 };
 enum { VT_IMPORT, VT_PROMISED, VT_UNKNOWN, VT_NULL };
 #define NULL_ANSWER 0xffffffffu
@@ -1126,6 +1129,24 @@ static const vscenario_t vat_diffs[] = {
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 2}}, 1, 1, 0, 0},
     {"call with onlyPromisePipeline reusing an active question",
      {{VF_CALL, 0, VT_IMPORT, 0, 0, 0, 1}}, 1, 99, 0, 0},
+    {"message type 20",
+     {{VF_TAG, 0, 0, 0, 0, 20, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"obsolete Save",
+     {{VF_TAG, 0, 0, 0, 0, 7, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"obsolete Delete",
+     {{VF_TAG, 0, 0, 0, 0, 9, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Disembargo senderLoopback to the bootstrap",
+     {{VF_DISEMBARGO, 0, 0, 0, 0, 0, 3},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Disembargo receiverLoopback",
+     {{VF_DISEMBARGO, 0, 0, 0, 1, 0, 3},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
+    {"Disembargo to an unknown export",
+     {{VF_DISEMBARGO, 0, 0, 55, 0, 0, 3},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0}}, 2, 1, 0, 0},
     {"Abort",
      {{VF_ABORT, 0, 0, 0, 0, 0, 0}}, 1, 99, 0, 0},
     {"Abort carrying a remote exception",
@@ -1280,6 +1301,37 @@ static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
              capnp_builder_set_u32(&cap, 4, f->tval);
       break;
     }
+    case VF_TAG:
+      /* A message of type `method` with an empty body. */
+      rc = capnp_builder_set_u16(&msg, 0, f->method) ||
+           capnp_builder_struct(&slot, 1, 1, &body);
+      break;
+    case VF_DISEMBARGO:
+      /* Context arm `send_to`, embargo id `count`, on import `tval`. */
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_DISEMBARGO) ||
+           capnp_builder_struct(&slot, 1, 1, &body) ||
+           capnp_builder_set_u32(&body, 0, f->count) ||
+           capnp_builder_set_u16(&body, 4, f->send_to) ||
+           capnp_builder_slot(&body, 1, 0, &slot) ||
+           capnp_builder_struct(&slot, 1, 1, &inner) ||
+           capnp_builder_set_u32(&inner, 0, f->tval);
+      break;
+    case VF_RESOLVE:
+      /* Promise `qid` resolved to senderHosted `tval`, or with
+       * `send_to` nonzero to an exception. */
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RESOLVE) ||
+           capnp_builder_struct(&slot, 1, 1, &body) ||
+           capnp_builder_set_u32(&body, 0, f->qid) ||
+           capnp_builder_set_u16(&body, 4, f->send_to ? 1 : 0) ||
+           capnp_builder_slot(&body, 1, 0, &slot);
+      if (rc == 0 && f->send_to)
+        rc = capnp_builder_struct(&slot, 1, 2, &inner) ||
+             capnp_builder_set_text(&inner, 1, 0, "gone", 4);
+      else if (rc == 0)
+        rc = capnp_builder_struct(&slot, 1, 1, &inner) ||
+             capnp_builder_set_u16(&inner, 0, 1) ||
+             capnp_builder_set_u32(&inner, 4, f->tval);
+      break;
     default:
       rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_FINISH) ||
            capnp_builder_struct(&slot, 1, 0, &body) ||
@@ -1336,6 +1388,9 @@ static int describe_reply(const uint8_t *frame, size_t n, uint32_t until,
                  (unsigned)arm);
       }
       end = aid == until;
+    } else if (tag == CAPNP_RPC_MSG_UNIMPLEMENTED) {
+      snprintf(ev, sizeof ev, "unimplemented %u",
+               (unsigned)capnp_get_u16(&body, 0, 0));
     } else {
       snprintf(ev, sizeof ev, "message %u", (unsigned)tag);
     }
@@ -1501,6 +1556,23 @@ static void vd_remote(uint16_t port, const vscenario_t *s, char *out,
   close(fd);
 }
 
+/* rpc.c++ prints object addresses in some reasons, as "[hex == hex]";
+ * they differ on every run, so only their place is compared. */
+static void mask_addresses(char *s) {
+  char *p = s;
+  while ((p = strchr(p, '[')) != NULL) {
+    size_t a = strspn(p + 1, "0123456789abcdef"), b;
+    if (a >= 8 && strncmp(p + 1 + a, " == ", 4) == 0 &&
+        (b = strspn(p + 5 + a, "0123456789abcdef")) >= 8 &&
+        p[5 + a + b] == ']') {
+      memmove(p + 1, p + 5 + a + b, strlen(p + 5 + a + b) + 1);
+      memmove(p + 8, p + 1, strlen(p + 1) + 1);
+      memcpy(p + 1, "address", 7);
+    }
+    p++;
+  }
+}
+
 /* `vat-diff <port>`: each scenario against `rpc_peer_server <port>` and
  * against this vat, printing both outcomes. */
 static int vat_diff(uint16_t port) {
@@ -1510,6 +1582,8 @@ static int vat_diff(uint16_t port) {
     char cpp[1024], ours[1024];
     vd_remote(port, &vat_diffs[i], cpp, sizeof cpp);
     vd_local(&vat_diffs[i], ours, sizeof ours);
+    mask_addresses(cpp);
+    mask_addresses(ours);
     if (vat_diffs[i].opaque) {
       opaque_reasons(cpp);
       opaque_reasons(ours);
