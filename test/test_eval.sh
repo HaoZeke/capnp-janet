@@ -66,4 +66,28 @@ cp "$ROOT/schema/codegen-features.capnp" "$LONG/$tail.capnp"
 SCHEMA_LONG="$LONG/$tail.capnp"
 test "${#SCHEMA_LONG}" -gt 4000
 check "$SCHEMA_LONG" answer
+
+# `capnp eval` knows --no-standard-import but rejects -q and --quiet.
+# `convert` and `decode` accept --quiet; `encode` rejects it.
+check "$ROOT/schema/codegen-features.capnp" answer --no-standard-import
+NODE="$ROOT/test/fixtures/node.capnp"
+printf '(v = 7)' | capnp encode "$NODE" Node >"$TMP/node.bin"
+status() {
+  if "$@" <"$TMP/node.bin" >/dev/null 2>&1; then echo ok; else echo error; fi
+}
+for args in "eval -q" "eval --quiet" "encode --quiet" "decode -q" \
+  "convert -q binary:text" "decode --quiet" "convert --quiet binary:text"; do
+  # shellcheck disable=SC2086
+  set -- $args
+  case $1 in
+    eval) tail=("$ROOT/schema/codegen-features.capnp" answer) ;;
+    *) tail=("$NODE" Node) ;;
+  esac
+  ref=$(status capnp "$@" "${tail[@]}")
+  ours=$(status "$BIN" "$@" "${tail[@]}")
+  if [[ $ref != "$ours" ]]; then
+    echo "capnp $args: capnp $ref, capnp-eval $ours" >&2
+    exit 1
+  fi
+done
 echo "ok eval"

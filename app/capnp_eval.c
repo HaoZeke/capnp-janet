@@ -793,7 +793,7 @@ int main(int argc, char **argv) {
   const char *pos_args[8];
   int npos = 0;
   int pretty = 1;
-  int flag_flat = 0, flag_packed = 0, flag_binary = 0;
+  int flag_flat = 0, flag_packed = 0, flag_binary = 0, flag_quiet = 0;
   int eval_fmt = FMT_TEXT;
   size_t seg_words = 0;
   int i;
@@ -808,8 +808,9 @@ int main(int argc, char **argv) {
       flag_packed = 1;
     } else if (strcmp(a, "-b") == 0 || strcmp(a, "--binary") == 0) {
       flag_binary = 1;
-    } else if (strcmp(a, "-q") == 0 || strcmp(a, "--quiet") == 0 ||
-               strcmp(a, "--no-standard-import") == 0) {
+    } else if (strcmp(a, "--quiet") == 0) {
+      flag_quiet = 1;
+    } else if (strcmp(a, "--no-standard-import") == 0) {
       /* accepted for CLI compatibility */
     } else if (strncmp(a, "-I", 2) == 0) {
       const char *dir = a[2] ? a + 2 : (i + 1 < argc ? argv[++i] : NULL);
@@ -843,6 +844,11 @@ int main(int argc, char **argv) {
 
   if (npos < 1) {
     fprintf(stderr, "usage: capnp-eval [eval|convert|decode|encode] ...\n");
+    return 2;
+  }
+  if (flag_quiet && strcmp(pos_args[0], "convert") != 0 &&
+      strcmp(pos_args[0], "decode") != 0) {
+    fprintf(stderr, "capnp-eval: unknown option --quiet\n");
     return 2;
   }
 

@@ -27,6 +27,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ### Fixed
 
+- `capnp-eval` rejects `-q` everywhere and `--quiet` outside `convert` and
+  `decode`, matching the option sets of the C++ `capnp` subcommands.
 - The traversal budget is spent the way C++ spends it: two words for the
   root pointer and nothing for pointer words inside their parent, so a
   message readable under a C++ limit is readable under the same limit here.
