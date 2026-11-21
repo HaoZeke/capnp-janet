@@ -226,6 +226,9 @@ CAPNP_JANET_EXPORT void capnp_rpc_init(capnp_rpc_conn_t *c, capnp_rpc_send_fn se
  * CAPNP_RPC_MAX_ANSWER_BYTES, which live on the heap. Call before the
  * connection goes away or is passed to capnp_rpc_init again. */
 CAPNP_JANET_EXPORT void capnp_rpc_free(capnp_rpc_conn_t *c);
+/* Without a bootstrap, a Bootstrap is answered as capnp-C++ answers it:
+ * a new promise export, then a Resolve breaking it with "This vat does
+ * not expose any public/bootstrap interfaces." */
 CAPNP_JANET_EXPORT void capnp_rpc_set_bootstrap(capnp_rpc_conn_t *c, void *server,
                              capnp_rpc_dispatch_fn dispatch);
 

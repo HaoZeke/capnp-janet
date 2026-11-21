@@ -112,6 +112,10 @@ Pre-1.0 minor releases may include breaking API changes.
 - A Return naming a question id with the high bit set is ignored, as
   rpc.c++ keeps those ids for calls that want no Return. It used to
   abort as naming no question.
+- A Bootstrap to a vat with no bootstrap capability is answered as
+  rpc.c++ answers it: a `senderPromise` that a Resolve then breaks with
+  `This vat does not expose any public/bootstrap interfaces.`. A
+  `senderLoopback` Disembargo to it aborts with that reason.
 - The JSON encoder follows every pointer under a `Json.Value`, as the
   copy in `JsonValueHandler` does, and fails on one it cannot read. A
   corrupt pointer the active member never reads used to pass, where

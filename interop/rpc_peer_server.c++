@@ -88,6 +88,9 @@ struct Peer {
 	      rpc(mode == "promise"
 	              ? kj::heap<capnp::RpcSystem<capnp::rpc::twoparty::VatId>>(
 	                    network, factory)
+	          : mode == "none"
+	              ? kj::heap<capnp::RpcSystem<capnp::rpc::twoparty::VatId>>(
+	                    network, kj::Maybe<capnp::Capability::Client>(nullptr))
 	              : kj::heap<capnp::RpcSystem<capnp::rpc::twoparty::VatId>>(
 	                    network, kj::Maybe<capnp::Capability::Client>(
 	                                 Adder::Client(kj::heap<AdderImpl>())))) {}
@@ -116,7 +119,7 @@ int main(int argc, char **argv) {
 	unsigned int port = argc > 1 ? (unsigned int)atoi(argv[1]) : 0;
 	auto io = kj::setupAsyncIo();
 	// "promise" serves a bootstrap that capnp-C++ sends as senderPromise
-	// and resolves right after.
+	// and resolves right after; "none" serves no bootstrap at all.
 	std::string mode = argc > 2 ? argv[2] : "";
 	Ignore ignore;
 	kj::TaskSet tasks(ignore);

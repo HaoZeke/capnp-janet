@@ -147,6 +147,8 @@ enum { KEEP_SEND, KEEP_REDIRECT, KEEP_QUIET };
 #define PA_OP_DW 1
 #define PA_OP_PW 0
 /* Resolve: promiseId @0 (u32), union tag at byte 4: cap @ptr0 is 0. */
+#define RESOLVE_DW 1
+#define RESOLVE_PW 1
 #define RESOLVE_PROMISEID_OFF 0
 #define RESOLVE_TAG_OFF 4
 #define RESOLVE_TAG_CAP 0
@@ -480,7 +482,8 @@ static int resolve_promised_answer(capnp_rpc_conn_t *c,
     goto out;
   if (capnp_list_get_struct(&table, cursor.count, &desc) != CAPNP_OK)
     goto out;
-  if (capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0) != CAPDESC_TAG_SENDERHOSTED)
+  if (capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0) != CAPDESC_TAG_SENDERHOSTED &&
+      capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0) != CAPDESC_TAG_SENDERPROMISE)
     goto out;
   {
     uint32_t id = capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0);
@@ -667,17 +670,23 @@ static int begin_return(capnp_builder_t *b, uint32_t answer_id,
 
 /* One-entry capTable naming a senderHosted export, with the payload's
  * content pointer aimed at it. */
-static int write_cap_table(const capnp_bptr_t *payload, int eid)
+static int write_cap_table_tag(const capnp_bptr_t *payload, int eid,
+                               uint16_t tag)
 {
   capnp_bptr_t cd;
   if (capnp_builder_set_list_struct(payload, PAYLOAD_DW, 1, 1, CAPDESC_DW,
                                     CAPDESC_PW, &cd))
     return CAPNP_ERR_ALLOC;
-  if (capnp_builder_set_u16(&cd, CAPDESC_TAG_OFF, CAPDESC_TAG_SENDERHOSTED))
+  if (capnp_builder_set_u16(&cd, CAPDESC_TAG_OFF, tag))
     return CAPNP_ERR_ALLOC;
   if (capnp_builder_set_u32(&cd, CAPDESC_SENDERHOSTED_OFF, (uint32_t)eid))
     return CAPNP_ERR_ALLOC;
   return CAPNP_OK;
+}
+
+static int write_cap_table(const capnp_bptr_t *payload, int eid)
+{
+  return write_cap_table_tag(payload, eid, CAPDESC_TAG_SENDERHOSTED);
 }
 
 static capnp_rpc_answer_t *answer_find(capnp_rpc_conn_t *c, uint32_t qid)
@@ -746,8 +755,11 @@ static int answer_release_caps(capnp_rpc_conn_t *c, uint32_t qid)
     n = capnp_list_len(&table);
     for (i = 0; i < n && rc == CAPNP_OK; i++) {
       capnp_ptr_t desc;
-      if (capnp_list_get_struct(&table, i, &desc) == CAPNP_OK &&
-          capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0) == CAPDESC_TAG_SENDERHOSTED)
+      uint16_t tag;
+      if (capnp_list_get_struct(&table, i, &desc) != CAPNP_OK)
+        continue;
+      tag = capnp_get_u16(&desc, CAPDESC_TAG_OFF, 0);
+      if (tag == CAPDESC_TAG_SENDERHOSTED || tag == CAPDESC_TAG_SENDERPROMISE)
         rc = export_release(c, capnp_get_u32(&desc, CAPDESC_SENDERHOSTED_OFF, 0), 1);
     }
   }
@@ -990,6 +1002,71 @@ static int send_return_exception(capnp_rpc_conn_t *c, uint32_t qid,
   return rc;
 }
 
+static int begin_message(capnp_builder_t *b, uint16_t tag, uint16_t dw,
+                         uint16_t pw, capnp_bptr_t *body_out);
+
+#define NO_BOOTSTRAP_REASON \
+  "This vat does not expose any public/bootstrap interfaces."
+
+/* The capability rpc.c++ hands out when it has no bootstrap: a promise
+ * already broken, so every call on it fails with that reason. */
+static char no_bootstrap_server;
+
+static int no_bootstrap_dispatch(void *server, uint64_t interface_id,
+                                 uint16_t method_id, const capnp_ptr_t *params,
+                                 const capnp_bptr_t *results)
+{
+  (void)server;
+  (void)interface_id;
+  (void)method_id;
+  (void)params;
+  (void)results;
+  (void)capnp_rpc_fail(EXCEPTION_TYPE_FAILED, NO_BOOTSTRAP_REASON);
+  return -1;
+}
+
+/* rpc.c++ BootstrapFactory makes a new broken promise for each Bootstrap,
+ * exports it as senderPromise, and then sends the Resolve that breaks
+ * it. */
+static int answer_no_bootstrap(capnp_rpc_conn_t *c, uint32_t qid)
+{
+  capnp_builder_t b;
+  capnp_bptr_t ret, payload, res;
+  int eid, rc;
+  for (eid = 0; eid < CAPNP_RPC_MAX_EXPORTS && c->exports[eid].used; eid++)
+    ;
+  if (eid == CAPNP_RPC_MAX_EXPORTS)
+    return answer_exception(c, qid, "export table full", KEEP_SEND);
+  c->exports[eid].used = 1;
+  c->exports[eid].refcount = 1;
+  c->exports[eid].server = &no_bootstrap_server;
+  c->exports[eid].dispatch = no_bootstrap_dispatch;
+
+  capnp_builder_init(&b);
+  rc = begin_return(&b, qid, &ret, &payload);
+  if (rc == CAPNP_OK)
+    rc = write_cap_table_tag(&payload, eid, CAPDESC_TAG_SENDERPROMISE);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_cap(&payload, PAYLOAD_DW, 0, 0);
+  if (rc == CAPNP_OK)
+    rc = flush_answer(c, &b, qid);
+  capnp_builder_free(&b);
+  if (rc != CAPNP_OK)
+    return rc;
+  capnp_builder_init(&b);
+  rc = begin_message(&b, CAPNP_RPC_MSG_RESOLVE, RESOLVE_DW, RESOLVE_PW, &res);
+  if (rc == CAPNP_OK &&
+      (capnp_builder_set_u32(&res, RESOLVE_PROMISEID_OFF, (uint32_t)eid) ||
+       capnp_builder_set_u16(&res, RESOLVE_TAG_OFF, RESOLVE_TAG_EXCEPTION)))
+    rc = CAPNP_ERR_ALLOC;
+  if (rc == CAPNP_OK)
+    rc = write_exception(&res, RESOLVE_DW, 0, NO_BOOTSTRAP_REASON);
+  if (rc == CAPNP_OK)
+    rc = flush(c, &b);
+  capnp_builder_free(&b);
+  return rc;
+}
+
 static int handle_bootstrap(capnp_rpc_conn_t *c, const capnp_ptr_t *boot)
 {
   capnp_builder_t b;
@@ -1016,7 +1093,7 @@ static int handle_bootstrap(capnp_rpc_conn_t *c, const capnp_ptr_t *boot)
                             "exports.",
                             0);
   if (c->bootstrap == NULL)
-    return answer_exception(c, qid, "no bootstrap capability", KEEP_SEND);
+    return answer_no_bootstrap(c, qid);
   eid = capnp_rpc_export(c, c->bootstrap, c->bootstrap_dispatch);
   if (eid < 0)
     return answer_exception(c, qid, "export table full", KEEP_SEND);
@@ -1588,6 +1665,10 @@ static int handle_disembargo(capnp_rpc_conn_t *c, const capnp_ptr_t *dis)
     return rc;
   if (failure != NULL)
     return protocol_abort(c, failure);
+  /* rpc.c++ waits for the target to resolve before its brand check, and
+   * a missing bootstrap resolves to its exception. */
+  if (c->exports[eid].server == &no_bootstrap_server)
+    return protocol_abort(c, NO_BOOTSTRAP_REASON);
   snprintf(reason, sizeof reason,
            "expected target->getBrand() == this [%lx == %lx]; 'Disembargo' "
            "of type 'senderLoopback' sent to an object that does not point "

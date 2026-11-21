@@ -920,6 +920,40 @@ int main(void)
   CHECK(feed_resolve(&vat, 7, 3, 0) == CAPNP_OK && g_to_client.tail == 0,
         "a resolution to our own export is quiet");
 
+  /* A vat with no bootstrap capability answers as rpc.c++ does: a fresh
+   * promise, broken by a Resolve right after, so calls on it fail. */
+  {
+    static capnp_rpc_conn_t nb, cl;
+    uint32_t bq, cq, v = 1;
+    capnp_rpc_init(&nb, send_to_client, NULL);
+    capnp_rpc_init(&cl, send_to_vat, NULL);
+    q_drop(&g_to_vat);
+    q_drop(&g_to_client);
+    bq = capnp_rpc_send_bootstrap(&cl);
+    pump(&nb, &g_to_vat);
+    CHECK(g_to_client.tail == 2, "no bootstrap: a Return and a Resolve");
+    pump(&cl, &g_to_client);
+    CHECK(capnp_rpc_is_answered(&cl, bq) && !capnp_rpc_is_failed(&cl, bq),
+          "no bootstrap: the question succeeds");
+    {
+      capnp_rpc_cap_ref_t ref;
+      CHECK(capnp_rpc_answer_cap(&cl, bq, 0, &ref) == 0 &&
+                ref.kind == CAPNP_RPC_CAP_IMPORT && ref.id == 0,
+            "no bootstrap: a promise import");
+    }
+    cq = capnp_rpc_send_call(&cl, 0, 0x1234, 0, 1, 0, fill_u32, &v);
+    pump(&nb, &g_to_vat);
+    CHECK(frame_exception(&g_to_client, 0,
+                          "This vat does not expose any public/bootstrap "
+                          "interfaces.",
+                          0),
+          "no bootstrap: a call fails with the rpc.c++ reason");
+    pump(&cl, &g_to_client);
+    CHECK(capnp_rpc_is_failed(&cl, cq), "no bootstrap: the call failed");
+    capnp_rpc_free(&nb);
+    capnp_rpc_free(&cl);
+  }
+
   /* An import a Return handed us is on the table until released. A
    * Resolve naming it when it was not a promise ends the connection, as
    * in rpc.c++ handleResolve, after the new capability is dropped. */
