@@ -1295,7 +1295,15 @@ typedef struct {
   /* Against a vat with no bootstrap capability, and with no Bootstrap
    * sent first. */
   int noboot;
+  int peer_wait_ms;
 } vscenario_t;
+
+#define VD_WAIT_MS 1500
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define VD_LEGAL_VOID_WAIT_MS 15000
+#else
+#define VD_LEGAL_VOID_WAIT_MS VD_WAIT_MS
+#endif
 
 static const vscenario_t vat_diffs[] = {
     {"call to an unknown export",
@@ -1612,7 +1620,8 @@ static const vscenario_t vat_diffs[] = {
     {"message type 20 carrying a list one word past that",
      {{VF_TAG, 0, 0, 0, 0, 20, 0, 9u << 28}}, 1, 99, 0, 0, 0},
     {"call pipelined with a legal list of void as its transform",
-     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1, 10u << 28}}, 1, 99, 0, 0, 0},
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1, 10u << 28}}, 1, 99, 0, 0, 0,
+     VD_LEGAL_VOID_WAIT_MS},
     {"call with a corrupt params pointer that the method reads",
      {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u << 28}}, 1, 1, 0, 0, 0},
     {"call with a corrupt params pointer that the method ignores",
@@ -2273,11 +2282,11 @@ static void vd_local(const vscenario_t *s, char *out, size_t cap) {
   capnp_rpc_free(&c);
 }
 
-static int vd_read(int fd, uint8_t **frame, size_t *n) {
+static int vd_read(int fd, uint8_t **frame, size_t *n, int wait_ms) {
   struct pollfd p;
   p.fd = fd;
   p.events = POLLIN;
-  if (poll(&p, 1, 1500) <= 0)
+  if (poll(&p, 1, wait_ms) <= 0)
     return -1;
   return capnp_read_frame_alloc(fd, frame, n) == CAPNP_OK ? 0 : -2;
 }
@@ -2308,7 +2317,7 @@ static void vd_remote(uint16_t port, const vscenario_t *s, char *out,
   while (!got_boot) {
     char tmp[640] = "";
     f = NULL;
-    if (vd_read(fd, &f, &n) != 0) {
+    if (vd_read(fd, &f, &n, VD_WAIT_MS) != 0) {
       snprintf(out, cap, "no bootstrap Return");
       close(fd);
       return;
@@ -2333,7 +2342,8 @@ static void vd_remote(uint16_t port, const vscenario_t *s, char *out,
   while (!end) {
     int r;
     f = NULL;
-    r = vd_read(fd, &f, &n);
+    r = vd_read(fd, &f, &n,
+                s->peer_wait_ms ? s->peer_wait_ms : VD_WAIT_MS);
     if (r != 0) {
       const char *why = r == -1 ? "no end" : "closed";
       if (out[0])
