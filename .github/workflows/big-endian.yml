@@ -69,4 +69,8 @@ jobs:
             capnp --version | grep -q '1.4.0'
             pkg-config --modversion capnp-rpc | grep -q '^1.4.0$'
             meson setup build
-            meson test -C build --print-errorlogs
+            # random_parity and convert_parity compare against `capnp` once
+            # per case, and under qemu they take about 200 s and 290 s
+            # against native timeouts of 60 s and 90 s. Scale every test
+            # timeout rather than loosening the native ones.
+            meson test -C build --print-errorlogs --timeout-multiplier 8
