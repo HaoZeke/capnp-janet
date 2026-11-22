@@ -8,6 +8,8 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-22
+
 ### Added
 
 - `capnp_rpc_result_cap` lets a method put capabilities in its results:
@@ -477,7 +479,8 @@ with fewer than two zero bytes). Canonical AddressBook matches
 `capnp convert binary:canonical`. Multi-segment builder, far/double-far,
 `capnpc-janet` v1, list upgrade views.
 
-[Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.5...main
+[Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.3.0...main
+[0.3.0]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.3...v0.2.4
 [0.2.3]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.2...v0.2.3
