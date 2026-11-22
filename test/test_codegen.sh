@@ -14,6 +14,12 @@ if ! command -v capnp >/dev/null 2>&1; then
 fi
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
+# `capnp compile` searches only /usr/include and /usr/local/include for
+# `/capnp/c++.capnp`, which adder.capnp imports.
+CAPNP_INC=$(pkg-config --variable=includedir capnp 2>/dev/null || true)
+if [[ ! -f "$CAPNP_INC/capnp/c++.capnp" ]]; then
+  CAPNP_INC="$(dirname "$(command -v capnp)")/../include"
+fi
 cp "$ROOT/schema/addressbook.capnp" "$TMP/"
 cd "$TMP"
 capnp compile "-o$PLUGIN" addressbook.capnp
@@ -44,7 +50,7 @@ fi
 # caller need not spell them. A parameter struct sized wrong drops
 # arguments past the end without complaint.
 cp "$ROOT/schema/adder.capnp" "$TMP/"
-capnp compile "-o$PLUGIN" adder.capnp
+capnp compile "-I$CAPNP_INC" "-o$PLUGIN" adder.capnp
 test -f adder.janet
 grep -q 'Adder-interface-id' adder.janet
 grep -q '0xea01e10cbc414411' adder.janet
@@ -154,7 +160,7 @@ grep -q '(def Wrap-origin-default "' defaults.janet
 grep -q '(def Wrap-labels-default "' defaults.janet
 grep -q '(defn Wrap-get-origin \[ptr\]' defaults.janet
 grep -q '(defn Wrap-get-labels \[ptr\]' defaults.janet
-grep -q '(v :kind) :null' defaults.janet
+grep -q '(capnp/kind v) :null' defaults.janet
 python3 - "$TMP/defaults.janet" "$TMP/origin.bin" "$TMP/labels.bin" <<'PY'
 import re, pathlib, sys
 text = pathlib.Path(sys.argv[1]).read_text()
@@ -170,6 +176,32 @@ PY
 capnp decode "$ROOT/schema/defaults.capnp" Point <"$TMP/origin.bin" >"$TMP/origin.txt"
 grep -q 'x = 4' "$TMP/origin.txt"
 grep -q 'y = 5' "$TMP/origin.txt"
+
+# Each output holds only its own file's nodes, as with capnpc-c++: not
+# those of another requested file, nor of an import.
+mkdir "$TMP/multi"
+cat >"$TMP/multi/one.capnp" <<'EOF'
+@0xa1b2c3d4e5f60001;
+struct Alpha { x @0 :UInt32; }
+EOF
+cat >"$TMP/multi/two.capnp" <<'EOF'
+@0xa1b2c3d4e5f60002;
+using One = import "one.capnp";
+struct Beta { a @0 :One.Alpha; }
+EOF
+(cd "$TMP/multi" && capnp compile "-o$PLUGIN" one.capnp two.capnp >/dev/null)
+grep -q '(def Alpha-data-words' "$TMP/multi/one.janet"
+grep -q '(def Beta-data-words' "$TMP/multi/two.janet"
+if grep -q Beta "$TMP/multi/one.janet" || grep -q Alpha-data "$TMP/multi/two.janet"; then
+  echo "FAIL: generated module holds another file's nodes" >&2
+  exit 1
+fi
+(cd "$TMP/multi" && rm -f one.janet && capnp compile "-o$PLUGIN" two.capnp >/dev/null)
+test ! -e "$TMP/multi/one.janet"
+if grep -q Alpha-data "$TMP/multi/two.janet"; then
+  echo "FAIL: generated module holds an imported file's nodes" >&2
+  exit 1
+fi
 
 MODULE=${CAPNP_JANET_MODULE:-$BUILD/capnp.so}
 if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then
@@ -192,6 +224,11 @@ if command -v janet >/dev/null 2>&1 && [[ -f "$MODULE" ]]; then
     RUNTIME_ENV+=("LD_PRELOAD=$ASAN_RUNTIME${LD_PRELOAD:+:$LD_PRELOAD}")
   fi
   "${RUNTIME_ENV[@]}" janet "$ROOT/test/generated_builder_smoke.janet"
+  "${RUNTIME_ENV[@]}" janet "$ROOT/test/generated_consts.janet"
+  "${RUNTIME_ENV[@]}" janet "$ROOT/test/generated_iface.janet"
+elif [[ "${CAPNP_JANET_NEED_MODULE:-}" == 1 ]]; then
+  echo "FAIL: janet or $MODULE missing" >&2
+  exit 1
 fi
 
 echo "ok codegen"

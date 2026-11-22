@@ -3,6 +3,9 @@
  * With no arguments, two vats on a Unix socket and two on TCP loopback
  * call an adder and check the sum. `dial <port>` calls the capnp-C++
  * Adder. `serve <port>` listens and answers one C++ client.
+ * `bad-return <port>` answers the bootstrap of each of seven C++ clients
+ * with a Return rpc.c++ refuses, and checks that the Abort it sends
+ * back gives the reason this vat gives for the same Return.
  */
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_message.h>
@@ -12,6 +15,15 @@
 #include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
+#if !defined(CAPNP_HAS_MALLINFO2) && defined(__GLIBC__) &&                   \
+    (__GLIBC__ > 2 || __GLIBC_MINOR__ >= 33)
+#define CAPNP_HAS_MALLINFO2 1
+#endif
+#ifdef CAPNP_HAS_MALLINFO2
+#include <malloc.h>
+#endif
+#include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <semaphore.h>
 #include <signal.h>
@@ -20,6 +32,7 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/time.h>
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <time.h>
@@ -58,9 +71,10 @@ static int fill_add(void *ctx, const capnp_bptr_t *params) {
   return 0;
 }
 
-static void child_serve(int lfd) {
+static void child_serve(int lfd, capnp_link_t *parent_client) {
   capnp_link_t *link = (capnp_link_t *)calloc(1, sizeof(*link));
   int i;
+  free(parent_client);
   if (!link || capnp_link_accept(lfd, link))
     _exit(1);
   capnp_rpc_set_bootstrap(&link->conn, &g_server_obj, adder_dispatch);
@@ -73,19 +87,17 @@ static void child_serve(int lfd) {
   _exit(0);
 }
 
-static void client_add(capnp_link_t *link, const char *what) {
+static int client_add(capnp_link_t *link, const char *what) {
   uint32_t qboot, qcall;
-  int i;
+  int i, cap;
   qboot = capnp_rpc_send_bootstrap(&link->conn);
   check(qboot != (uint32_t)-1, "bootstrap");
   check(capnp_link_recv(link) == CAPNP_OK, "bootstrap reply");
   check(capnp_rpc_is_answered(&link->conn, qboot), "answered bootstrap");
-  {
-    int cap = capnp_rpc_answer_cap_id(&link->conn, qboot);
-    check(cap >= 0, "bootstrap cap");
-    qcall = capnp_rpc_send_call(&link->conn, (uint32_t)cap, ADDER_IFACE, 0, 2, 0,
-                                fill_add, NULL);
-  }
+  cap = capnp_rpc_answer_cap_id(&link->conn, qboot);
+  check(cap >= 0, "bootstrap cap");
+  qcall = capnp_rpc_send_call(&link->conn, (uint32_t)cap, ADDER_IFACE, 0, 2, 0,
+                              fill_add, NULL);
   check(qcall != (uint32_t)-1, "call");
   check(capnp_link_recv(link) == CAPNP_OK, "call reply");
   check(capnp_rpc_is_answered(&link->conn, qcall) &&
@@ -100,6 +112,84 @@ static void client_add(capnp_link_t *link, const char *what) {
     capnp_message_free(&m);
   }
   (void)i;
+  return cap;
+}
+
+static int big_dispatch(void *server, uint64_t interface_id, uint16_t method_id,
+                        const capnp_ptr_t *params, const capnp_bptr_t *results) {
+  capnp_bptr_t body;
+  uint32_t n = capnp_get_u32(params, 0, 0);
+  uint8_t *big = (uint8_t *)malloc(n ? n : 1);
+  int rc;
+  (void)server;
+  (void)interface_id;
+  (void)method_id;
+  if (!big)
+    return CAPNP_ERR_ALLOC;
+  memset(big, 0xab, n);
+  rc = capnp_builder_struct(results, 0, 1, &body);
+  if (rc == CAPNP_OK)
+    rc = capnp_builder_set_data(&body, 0, 0, big, n);
+  free(big);
+  return rc;
+}
+
+static int fill_len(void *ctx, const capnp_bptr_t *params) {
+  return capnp_builder_set_u32(params, 0, *(uint32_t *)ctx);
+}
+
+static size_t heap_in_use(void) {
+#ifdef CAPNP_HAS_MALLINFO2
+  return mallinfo2().uordblks;
+#else
+  return 0;
+#endif
+}
+
+/* A call whose result is @n bytes of Data, over two links on a socket
+ * pair. Neither side sends Finish, so closing each link has to free the
+ * answer and the return it keeps. */
+static void test_link_large_result(uint32_t n, const char *what) {
+  capnp_link_t *srv = (capnp_link_t *)calloc(1, sizeof(*srv));
+  capnp_link_t *cli = (capnp_link_t *)calloc(1, sizeof(*cli));
+  int sv[2], bufsz = 1 << 21, cap, i;
+  uint32_t qb, qc;
+  size_t before = heap_in_use(), after;
+  check(srv && cli && socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0,
+        "large link pair");
+  for (i = 0; i < 2; i++) {
+    setsockopt(sv[i], SOL_SOCKET, SO_SNDBUF, &bufsz, sizeof(bufsz));
+    setsockopt(sv[i], SOL_SOCKET, SO_RCVBUF, &bufsz, sizeof(bufsz));
+  }
+  check(capnp_link_from_fd(srv, sv[0]) == CAPNP_OK &&
+            capnp_link_from_fd(cli, sv[1]) == CAPNP_OK,
+        "large link setup");
+  capnp_rpc_set_bootstrap(&srv->conn, &g_server_obj, big_dispatch);
+  qb = capnp_rpc_send_bootstrap(&cli->conn);
+  check(capnp_link_recv(srv) == CAPNP_OK, "large bootstrap served");
+  check(capnp_link_recv(cli) == CAPNP_OK, "large bootstrap reply");
+  cap = capnp_rpc_answer_cap_id(&cli->conn, qb);
+  qc = capnp_rpc_send_call(&cli->conn, (uint32_t)cap, ADDER_IFACE, 0, 1, 0,
+                           fill_len, &n);
+  check(capnp_link_recv(srv) == CAPNP_OK, "large call served");
+  check(capnp_link_recv(cli) == CAPNP_OK, what);
+  {
+    capnp_message_t m = {0};
+    capnp_ptr_t content;
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    check(capnp_rpc_answer_content(&cli->conn, qc, &m, &content) == CAPNP_OK &&
+              capnp_get_data(&content, 0, &data, &len) == CAPNP_OK &&
+              len == n && data[n - 1] == 0xab,
+          "large link result content");
+    capnp_message_free(&m);
+  }
+  capnp_link_close(srv);
+  capnp_link_close(cli);
+  free(srv);
+  free(cli);
+  after = heap_in_use();
+  check(after <= before + 4096, "closed links free their large frames");
 }
 
 static int count_fds(void) {
@@ -254,7 +344,7 @@ static void loopback(int unix_sock) {
   }
   pid = fork();
   if (pid == 0)
-    child_serve(lfd);
+    child_serve(lfd, client);
   if (unix_sock)
     check(have_dir && capnp_link_dial_unix(client, path) == CAPNP_OK, "dial unix");
   else
@@ -289,7 +379,22 @@ static int dial_peer(uint16_t port) {
     free(client);
     return 1;
   }
-  client_add(client, "cpp sum");
+  {
+    int cap = client_add(client, "cpp sum");
+    uint32_t n = 70000, q;
+    capnp_message_t m = {0};
+    capnp_ptr_t content;
+    const uint8_t *data = NULL;
+    size_t len = 0;
+    q = capnp_rpc_send_call(&client->conn, (uint32_t)cap, ADDER_IFACE, 1, 1, 0,
+                            fill_len, &n);
+    check(capnp_link_recv(client) == CAPNP_OK, "cpp echo over 64 KiB");
+    check(capnp_rpc_answer_content(&client->conn, q, &m, &content) == CAPNP_OK &&
+              capnp_get_data(&content, 0, &data, &len) == CAPNP_OK &&
+              len == n && data[n - 1] == 0xab,
+          "cpp echo content");
+    capnp_message_free(&m);
+  }
   capnp_link_close(client);
   free(client);
   return g_fail ? 1 : 0;
@@ -315,6 +420,177 @@ static int serve_peer(uint16_t port) {
   close(lfd);
   free(link);
   return 0;
+}
+
+/* `skew` moves the answer id off the bootstrap question. `twice` instead
+ * answers the bootstrap and the add call properly, then sends the add
+ * Return again while the client still holds the response. */
+static const struct {
+  uint16_t tag;
+  uint32_t take_from;
+  uint32_t skew;
+  int twice;
+  const char *name;
+} bad_returns[] = {
+    {2, 0, 0, 0, "canceled"},
+    {3, 0, 0, 0, "resultsSentElsewhere"},
+    {4, 99, 0, 0, "takeFromOtherQuestion"},
+    {5, 0, 0, 0, "acceptFromThirdParty"},
+    {9, 0, 0, 0, "unknown arm"},
+    {0, 0, 77, 0, "unknown question"},
+    {0, 0, 0, 1, "duplicate"},
+};
+#define N_BAD_RETURNS (sizeof bad_returns / sizeof bad_returns[0])
+
+static int build_return(uint32_t answer, uint16_t tag, uint32_t take_from,
+                        uint8_t **out, size_t *len) {
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, ret;
+  int rc;
+  capnp_builder_init(&b);
+  rc = capnp_builder_root(&b, &root) ||
+       capnp_builder_struct(&root, 1, 1, &msg) ||
+       capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RETURN) ||
+       capnp_builder_slot(&msg, 1, 0, &slot) ||
+       capnp_builder_struct(&slot, 2, 1, &ret) ||
+       capnp_builder_set_u32(&ret, 0, answer) ||
+       capnp_builder_set_u16(&ret, 6, tag) ||
+       capnp_builder_set_u32(&ret, 8, take_from) ||
+       capnp_builder_serialize(&b, out, len);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+/* The reason text of an Abort frame, copied into `reason`; else -1. */
+static int abort_reason(const uint8_t *frame, size_t n, char *reason,
+                        size_t cap) {
+  capnp_message_t m = {0};
+  capnp_ptr_t root, exc;
+  const char *text = NULL;
+  size_t tn = 0;
+  int rc = -1;
+  if (capnp_message_from_flat(&m, frame, n) == CAPNP_OK &&
+      capnp_root(&m, &root) == CAPNP_OK &&
+      capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_ABORT &&
+      capnp_getp(&root, 0, &exc) == CAPNP_OK &&
+      capnp_get_text(&exc, 0, &text, &tn) == CAPNP_OK && tn < cap) {
+    memcpy(reason, text, tn);
+    reason[tn] = 0;
+    rc = 0;
+  }
+  capnp_message_free(&m);
+  return rc;
+}
+
+static char g_local_abort[256];
+
+static int keep_abort(void *ctx, const uint8_t *data, size_t len) {
+  (void)ctx;
+  if (abort_reason(data, len, g_local_abort, sizeof g_local_abort))
+    g_local_abort[0] = 0;
+  return 0;
+}
+
+/* The Abort this vat sends for the same Return to its own bootstrap. */
+static int local_abort(size_t i) {
+  static capnp_rpc_conn_t c;
+  uint8_t *out = NULL;
+  size_t len = 0;
+  uint32_t q;
+  int rc;
+  capnp_rpc_init(&c, keep_abort, NULL);
+  q = capnp_rpc_send_bootstrap(&c);
+  g_local_abort[0] = 0;
+  rc = build_return(q + bad_returns[i].skew, bad_returns[i].tag,
+                    bad_returns[i].take_from, &out, &len) ||
+       (bad_returns[i].twice && capnp_rpc_handle(&c, out, len) != CAPNP_OK) ||
+       capnp_rpc_handle(&c, out, len) != CAPNP_ERR_KIND;
+  free(out);
+  capnp_rpc_free(&c);
+  return rc;
+}
+
+static int g_dup_fd = -1;
+static uint8_t *g_dup_last;
+static size_t g_dup_len;
+
+static int send_dup(void *ctx, const uint8_t *data, size_t len) {
+  (void)ctx;
+  free(g_dup_last);
+  g_dup_last = (uint8_t *)malloc(len);
+  if (g_dup_last == NULL)
+    return -1;
+  memcpy(g_dup_last, data, len);
+  g_dup_len = len;
+  return capnp_write_all(g_dup_fd, data, len) == CAPNP_OK ? 0 : -1;
+}
+
+static int serve_bad_returns(uint16_t port) {
+  static capnp_rpc_conn_t vat;
+  int lfd = -1, failed = 0;
+  uint16_t bound = 0;
+  size_t i;
+  if (capnp_listen_tcp("127.0.0.1", port, &lfd, &bound) != CAPNP_OK)
+    return 1;
+  printf("%u\n", bound);
+  fflush(stdout);
+  for (i = 0; i < N_BAD_RETURNS; i++) {
+    char cpp[256] = "";
+    int fd = accept(lfd, NULL, NULL), sent = 0;
+    if (fd < 0)
+      return 1;
+    g_dup_fd = fd;
+    capnp_rpc_init(&vat, send_dup, NULL);
+    capnp_rpc_set_bootstrap(&vat, &g_server_obj, adder_dispatch);
+    for (;;) {
+      capnp_message_t m = {0};
+      capnp_ptr_t root, body;
+      uint8_t *frame = NULL;
+      size_t n = 0;
+      int tag = -1, done = 0;
+      if (capnp_read_frame_alloc(fd, &frame, &n) != CAPNP_OK)
+        break;
+      if (capnp_message_from_flat(&m, frame, n) == CAPNP_OK &&
+          capnp_root(&m, &root) == CAPNP_OK)
+        tag = capnp_get_u16(&root, 0, 0);
+      if (bad_returns[i].twice && tag != CAPNP_RPC_MSG_ABORT) {
+        (void)capnp_rpc_handle(&vat, frame, n);
+        if (tag == CAPNP_RPC_MSG_CALL && g_dup_last != NULL)
+          (void)capnp_write_all(fd, g_dup_last, g_dup_len);
+      } else if (tag == CAPNP_RPC_MSG_BOOTSTRAP && !sent &&
+                 capnp_getp(&root, 0, &body) == CAPNP_OK) {
+        uint8_t *out = NULL;
+        size_t len = 0;
+        sent = build_return(capnp_get_u32(&body, 0, 0) + bad_returns[i].skew,
+                            bad_returns[i].tag, bad_returns[i].take_from, &out,
+                            &len) == 0 &&
+               capnp_write_all(fd, out, len) == CAPNP_OK;
+        free(out);
+      }
+      if (tag == CAPNP_RPC_MSG_ABORT) {
+        abort_reason(frame, n, cpp, sizeof cpp);
+        done = 1;
+      }
+      capnp_message_free(&m);
+      free(frame);
+      if (done)
+        break;
+    }
+    close(fd);
+    capnp_rpc_free(&vat);
+    free(g_dup_last);
+    g_dup_last = NULL;
+    if (local_abort(i) ||
+        cpp[0] == 0 || strcmp(cpp, g_local_abort) != 0) {
+      fprintf(stderr, "FAIL Return %s: capnp-C++ \"%s\", this vat \"%s\"\n",
+              bad_returns[i].name, cpp, g_local_abort);
+      failed++;
+    } else {
+      printf("same Return %s: %s\n", bad_returns[i].name, cpp);
+    }
+  }
+  close(lfd);
+  return failed != 0;
 }
 
 /* Segment table is little-endian on the wire. The sizes below are
@@ -368,6 +644,286 @@ static void test_frame_little_endian(void) {
   check(capnp_load_le64(buf + 32) == 0xaabbccddeeff0011ULL, "seg1 word1");
   close(sv[0]);
   close(sv[1]);
+}
+
+/* C++ stream readers take at most 511 segments. */
+static void test_frame_segment_limit(void) {
+  static uint8_t frame[8 + 4 * 512 + 8 * 512], buf[sizeof(frame)];
+  uint32_t nsegs, i;
+  for (nsegs = 511; nsegs <= 512; nsegs++) {
+    int sv[2];
+    size_t n = 0, table = 4 + 4 * (size_t)nsegs;
+    int rc;
+    table += table % 8;
+    memset(frame, 0, sizeof(frame));
+    capnp_store_le32(frame, nsegs - 1);
+    for (i = 0; i < nsegs; i++)
+      capnp_store_le32(frame + 4 + 4 * i, 1);
+    check(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "socketpair");
+    check(capnp_write_all(sv[0], frame, table + 8 * nsegs) == CAPNP_OK,
+          "write frame");
+    rc = capnp_read_frame(sv[1], buf, sizeof(buf), &n);
+    if (nsegs == 511)
+      check(rc == CAPNP_OK && n == table + 8 * nsegs, "511 segments read");
+    else
+      check(rc == CAPNP_ERR_FRAMING, "512 segments refused");
+    close(sv[0]);
+    close(sv[1]);
+  }
+}
+
+/* C++ RPC refuses a frame of more than 8388608 words, counting the
+ * segment table, before it reads the body. A one-segment frame of
+ * 8388607 words is in range, so the reader waits for the body and here
+ * meets end of file. */
+static void test_frame_alloc_limit(void) {
+  uint32_t words;
+  for (words = 8388607; words <= 8388608; words++) {
+    uint8_t head[8], *buf = (uint8_t *)1;
+    size_t n = 0;
+    int sv[2], rc;
+    capnp_store_le32(head, 0);
+    capnp_store_le32(head + 4, words);
+    check(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0, "limit socketpair");
+    check(capnp_write_all(sv[0], head, 8) == CAPNP_OK, "limit header");
+    close(sv[0]);
+    rc = capnp_read_frame_alloc(sv[1], &buf, &n);
+    if (words == 8388607)
+      check(rc == CAPNP_ERR_FRAMING && buf == NULL, "frame at the limit read");
+    else
+      check(rc == CAPNP_ERR_BOUNDS && buf == NULL, "frame over the limit refused");
+    close(sv[1]);
+  }
+}
+
+/* The "type reason" of an Abort or of a Return that carries an
+ * exception, added to `out` after " | " when `out` is not empty. */
+static void add_reason(const uint8_t *f, size_t n, char *out, size_t cap) {
+  capnp_message_t m = {0};
+  capnp_ptr_t root, body, exc;
+  const char *text = NULL;
+  size_t tn = 0, used = strlen(out);
+  uint16_t tag;
+  int ok = 0;
+  if (capnp_message_from_flat(&m, f, n) == CAPNP_OK &&
+      capnp_root(&m, &root) == CAPNP_OK &&
+      capnp_getp(&root, 0, &body) == CAPNP_OK) {
+    tag = capnp_get_u16(&root, 0, 0);
+    if (tag == CAPNP_RPC_MSG_ABORT) {
+      exc = body;
+      ok = 1;
+    } else if (tag == CAPNP_RPC_MSG_RETURN && capnp_get_u16(&body, 6, 0) == 1) {
+      ok = capnp_getp(&body, 0, &exc) == CAPNP_OK;
+    }
+  }
+  if (ok && capnp_get_text(&exc, 0, &text, &tn) == CAPNP_OK &&
+      used + tn + 8 < cap)
+    snprintf(out + used, cap - used, "%s%u %.*s", used ? " | " : "",
+             (unsigned)capnp_get_u16(&exc, 4, 0), (int)tn, text);
+  capnp_message_free(&m);
+}
+
+/* add_reason for each whole frame of the `got` bytes at `back`. */
+static void reasons_of(const uint8_t *back, size_t got, char *out,
+                       size_t cap) {
+  size_t at = 0;
+  out[0] = 0;
+  while (got - at >= 8) {
+    uint32_t segs = capnp_load_le32(back + at) + 1, i;
+    size_t len = 4 + 4 * (size_t)segs;
+    len += len & 4;
+    for (i = 0; i < segs && at + 8 + 4 * (size_t)i <= got; i++)
+      len += 8 * (size_t)capnp_load_le32(back + at + 4 + 4 * (size_t)i);
+    if (len > got - at)
+      break;
+    add_reason(back + at, len, out, cap);
+    at += len;
+  }
+}
+
+/* Sends `n` bytes to a link vat and closes the stream. `out` gets the
+ * reason of each Abort or exception Return the vat sends back. */
+static void link_abort_for(const uint8_t *in, size_t n, char *out,
+                           size_t cap) {
+  capnp_link_t *link = (capnp_link_t *)calloc(1, sizeof(*link));
+  static uint8_t back[4096];
+  size_t got = 0;
+  ssize_t r;
+  int sv[2];
+  out[0] = 0;
+  if (!link || socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+    free(link);
+    return;
+  }
+  capnp_link_from_fd(link, sv[1]);
+  capnp_rpc_set_bootstrap(&link->conn, &g_server_obj, adder_dispatch);
+  if (n)
+    capnp_write_all(sv[0], in, n);
+  shutdown(sv[0], SHUT_WR);
+  while (capnp_link_recv(link) == CAPNP_OK)
+    ;
+  capnp_link_close(link);
+  free(link);
+  while ((r = read(sv[0], back + got, sizeof(back) - got)) > 0)
+    got += (size_t)r;
+  close(sv[0]);
+  reasons_of(back, got, out, cap);
+}
+
+/* rpc.c++ answers a stream that ends, or a frame its reader refuses,
+ * with an Abort: type 2 is disconnected, 0 failed. */
+static void test_link_framing_aborts(void) {
+  static const struct {
+    uint8_t in[24];
+    size_t n;
+    const char *want;
+  } cases[] = {
+      {{0}, 0, "2 Peer disconnected."},
+      {{0, 0, 0}, 3, "2 stream disconnected prematurely"},
+      {{0, 0, 0, 0, 2, 0, 0, 0, 0, 0}, 10,
+       "2 stream disconnected prematurely"},
+      {{0, 0, 0, 0, 0, 0, 0x88, 0}, 8,
+       "0 expected expectedSizeInWords <= options.traversalLimitInWords "
+       "[8912897 <= 8388608]; incoming RPC message exceeds size limit"},
+      {{0xff, 0xff, 0xff, 0xff, 0, 0, 0, 0}, 8,
+       "0 expected segmentCount != 0 [0 != 0]; Message segment count too "
+       "large, caused overflow."},
+  };
+  char got[512];
+  size_t i;
+  for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+    link_abort_for(cases[i].in, cases[i].n, got, sizeof got);
+    if (strcmp(got, cases[i].want) != 0) {
+      fprintf(stderr, "FAIL framing abort %zu: got \"%s\"\n", i, got);
+      g_fail++;
+    }
+  }
+}
+
+static size_t unhex(const char *h, uint8_t *out, size_t cap) {
+  size_t n = 0;
+  unsigned v;
+  while (h[0] && h[1] && n < cap && sscanf(h, "%2x", &v) == 1) {
+    out[n++] = (uint8_t)v;
+    h += 2;
+  }
+  return n;
+}
+
+/* rpc.c++ reads each message through PointerReader, which refuses a
+ * pointer it cannot follow with these reasons. */
+static void test_link_pointer_aborts(void) {
+  static const struct {
+    const char *hex;
+    const char *want;
+  } cases[] = {
+      {"0000000000000000",
+       "0 expected segment != nullptr && "
+       "segment->checkObject(segment->getStartPtr(), ONE * WORDS); Message "
+       "did not contain a root pointer."},
+      {"00000000010000000200000009000000",
+       "0 expected segment != nullptr [0 != nullptr]; Message contains far "
+       "pointer to unknown segment."},
+      {"00000000030000000000000001000100080000000000000014000000"
+       "01000000",
+       "0 expected boundsCheck(segment, ptr, ref->structRef.wordSize()); "
+       "Message contained out-of-bounds struct pointer. This usually "
+       "indicates that the input data was corrupted, used a different "
+       "encoding than specified (e.g. packed vs. non-packed), or was not a "
+       "Cap'n Proto message to begin with. Note that this error is NOT due "
+       "to a schema mismatch; the input is invalid regardless of schema."},
+      {"00000000060000000000000001000100010000000000000000000000"
+       "01000200000000000000000000000000000000000700000000000000",
+       "0 expected ptr->isCapability(); unknown pointer type"},
+      {"000000000200000000000000010000000500000000000000",
+       "0 'Resolve' contained 'CapDescriptor.none'."},
+      {"0000000004000000000000000100010008000000000000000000000001000000"
+       "0000000000000000000000000b00000000000000010001000500000000000000"
+       "0000000001000100070000000000000000000000010001000400000000000000"
+       "00000000010001000000000000000000010000000f0000000400000001000000"
+       "1600000001000000",
+       "0 Unsupported pipeline op.; (uint)opReader.which() = 22"},
+      {"00000000050000000000000001000100080000000000000000000000"
+       "0100010000000000000000001400000001000000",
+       "0 This vat only supports a bootstrap interface, not the old "
+       "Cap'n-Proto-0.4-style named exports. | 2 Peer disconnected."},
+      {"00000000050000000000000001000100080000000000000000000000"
+       "0100010000000000000000000200000009000000",
+       "0 expected segment != nullptr [0 != nullptr]; Message contains far "
+       "pointer to unknown segment. | 2 Peer disconnected."},
+  };
+  uint8_t in[256];
+  char got[768];
+  size_t i, n;
+  for (i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+    n = unhex(cases[i].hex, in, sizeof in);
+    link_abort_for(in, n, got, sizeof got);
+    if (strcmp(got, cases[i].want) != 0) {
+      fprintf(stderr, "FAIL pointer abort %zu: got \"%s\"\n", i, got);
+      g_fail++;
+    }
+  }
+}
+
+#define LOOPBACK_BOOT \
+  "0000000004000000000000000100010008000000000000000000000001000000" \
+  "0000000000000000"
+#define LOOPBACK_DIS \
+  "000000000900000000000000010001000d000000000000000000000001000100" \
+  "0000000000000000000000000100010000000000010000000000000001000100" \
+  "00000000000000000000000000000000"
+#define LOOPBACK_CALL \
+  "0000000011000000000000000100010002000000000000000000000003000300" \
+  "0100000000000000114441bc0ce101ea00000000000000000800000001000100" \
+  "1400000000000200000000000000000000000000010000000000000001000100" \
+  "0000000000000000000000000000000004000000020000000000000000000000" \
+  "14000000000000001600000000000000"
+/* rpc.c++ checks a senderLoopback target from evalLast, so frames that
+ * arrive with it are read first, and a stream that ends before the loop
+ * goes idle never sees the brand abort. */
+static void test_link_loopback_waits_for_idle(void) {
+  capnp_link_t *link = (capnp_link_t *)calloc(1, sizeof(*link));
+  static uint8_t back[4096];
+  static const char brand[] = "0 expected target->getBrand() == this";
+  uint8_t in[512];
+  char got[768];
+  size_t n, len = 0;
+  ssize_t r;
+  int sv[2], r1, r2, r3;
+  n = unhex(LOOPBACK_BOOT LOOPBACK_DIS LOOPBACK_CALL, in, sizeof in);
+  link_abort_for(in, n, got, sizeof got);
+  if (strcmp(got, "2 Peer disconnected.") != 0) {
+    fprintf(stderr, "FAIL loopback before end: got \"%s\"\n", got);
+    g_fail++;
+  }
+  if (!link || socketpair(AF_UNIX, SOCK_STREAM, 0, sv) != 0) {
+    free(link);
+    g_fail++;
+    return;
+  }
+  n = unhex(LOOPBACK_BOOT LOOPBACK_DIS, in, sizeof in);
+  {
+    struct timeval tv = {2, 0};
+    setsockopt(sv[1], SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+  }
+  capnp_link_from_fd(link, sv[1]);
+  capnp_rpc_set_bootstrap(&link->conn, &g_server_obj, adder_dispatch);
+  capnp_write_all(sv[0], in, n);
+  r1 = capnp_link_recv(link);
+  r2 = capnp_link_recv(link);
+  r3 = capnp_link_recv(link);
+  capnp_link_close(link);
+  free(link);
+  while ((r = read(sv[0], back + len, sizeof(back) - len)) > 0)
+    len += (size_t)r;
+  close(sv[0]);
+  reasons_of(back, len, got, sizeof got);
+  if (r1 != CAPNP_OK || r2 != CAPNP_OK || r3 != CAPNP_ERR_KIND ||
+      strncmp(got, brand, sizeof brand - 1) != 0) {
+    fprintf(stderr, "FAIL loopback at idle: %d %d %d \"%s\"\n", r1, r2, r3,
+            got);
+    g_fail++;
+  }
 }
 
 static uint8_t g_boot[256];
@@ -681,13 +1237,1363 @@ static void test_write_sigpipe_two_threads(void) {
 }
 #endif
 
+/* --- vat-diff: the same frames to capnp-C++ and to this vat ---------- */
+
+enum {
+  VF_BOOT,
+  VF_CALL,
+  VF_RELEASE,
+  VF_UNIMPL,
+  VF_UNIMPL_RESOLVE,
+  VF_FINISH,
+  VF_RETURN,
+  VF_ABORT,
+  VF_TAG,
+  VF_DISEMBARGO,
+  VF_RESOLVE
+};
+enum { VT_IMPORT, VT_PROMISED, VT_UNKNOWN, VT_NULL };
+#define NULL_ANSWER 0xffffffffu
+
+typedef struct {
+  int kind;
+  /* Question id, or the export a Release names. */
+  uint32_t qid;
+  int target;
+  /* The export or question a call targets. */
+  uint32_t tval;
+  uint16_t send_to;
+  uint16_t method;
+  /* Release count; for a Bootstrap, nonzero sends a deprecatedObjectId;
+   * for a Finish, nonzero clears requireEarlyCancellationWorkaround;
+   * for a promised target, how many getPointerField 0 steps follow. For
+   * an Unimplemented Resolve, `method` is the descriptor arm naming
+   * export `tval`, and `send_to` nonzero sends an exception. */
+  uint32_t count;
+  /* For a call, the low byte is how many capTable entries of the params
+   * name the caller's export 5, as senderHosted, or senderPromise with
+   * 0x100 set. Bits 16 to 23 name another export than 5, and bits 24 to
+   * 27 pick a list of exports from `vf_id_lists`. 0x200 makes the last
+   * entry a descriptor arm no reader knows. Bits 28 to 31 pick a pointer
+   * of the built frame for `vf_corrupt` to rewrite. */
+  uint32_t pcaps;
+} vframe_t;
+
+/* After a Bootstrap on question 0 has been answered, `frames` go to each
+ * vat, and the replies up to an Abort or the Return for `until` are
+ * compared. `opaque` compares only which exception reasons repeat, for
+ * a method whose own error text is the server's business. `known` marks
+ * a difference listed in the notes, printed without failing; one that
+ * stops differing fails, so the list stays true. */
+typedef struct {
+  const char *name;
+  vframe_t frames[5];
+  int nframes;
+  uint32_t until;
+  int opaque;
+  int known;
+  /* Against a vat with no bootstrap capability, and with no Bootstrap
+   * sent first. */
+  int noboot;
+  int peer_wait_ms;
+} vscenario_t;
+
+#define VD_WAIT_MS 1500
+#if defined(__BYTE_ORDER__) && __BYTE_ORDER__ == __ORDER_BIG_ENDIAN__
+#define VD_LEGAL_VOID_WAIT_MS 15000
+#else
+#define VD_LEGAL_VOID_WAIT_MS VD_WAIT_MS
+#endif
+
+static const vscenario_t vat_diffs[] = {
+    {"call to an unknown export",
+     {{VF_CALL, 1, VT_IMPORT, 99, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
+    {"call pipelined on a missing answer",
+     {{VF_CALL, 1, VT_PROMISED, 50, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
+    {"call pipelined on the bootstrap answer",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
+    {"call pipelined on a finished answer",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"call pipelined on a failed answer",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0, 0}}, 2, 2, 1, 0, 0},
+    {"call with a null target",
+     {{VF_CALL, 1, VT_NULL, 0, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
+    {"call with an unknown target arm",
+     {{VF_CALL, 1, VT_UNKNOWN, 0, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
+    {"sendResultsTo.thirdParty",
+     {{VF_CALL, 1, VT_IMPORT, 0, 2, 0, 0, 0}}, 1, 1, 0, 0, 0},
+    {"sendResultsTo unknown arm",
+     {{VF_CALL, 1, VT_IMPORT, 0, 7, 0, 0, 0}}, 1, 1, 0, 0, 0},
+    {"call reusing an active question",
+     {{VF_CALL, 0, VT_IMPORT, 0, 0, 0, 0, 0}}, 1, 99, 0, 0, 0},
+    {"call with results sent to yourself reusing an active question",
+     {{VF_CALL, 0, VT_IMPORT, 0, 1, 0, 0, 0}}, 1, 99, 0, 0, 0},
+    {"call on a null promisedAnswer",
+     {{VF_CALL, 1, VT_PROMISED, NULL_ANSWER, 0, 0, 0, 0}}, 1, 1, 0, 0, 0},
+    {"bootstrap reusing an active question",
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0}}, 1, 0, 0, 0, 0},
+    {"bootstrap with deprecatedObjectId",
+     {{VF_BOOT, 1, 0, 0, 0, 0, 1, 0}}, 1, 1, 0, 0, 0},
+    {"Finish for an unknown question",
+     {{VF_FINISH, 33, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Return for an unknown question",
+     {{VF_RETURN, 5, 0, 0, 0, 0, 0, 0}}, 1, 5, 0, 0, 0},
+    {"Unimplemented for a Call",
+     {{VF_UNIMPL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Unimplemented for a Resolve of the bootstrap",
+     {{VF_UNIMPL_RESOLVE, 0, 0, 0, 0, 1, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Unimplemented for a Resolve of an unknown export",
+     {{VF_UNIMPL_RESOLVE, 0, 0, 77, 0, 2, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Unimplemented for a Resolve to an exception",
+     {{VF_UNIMPL_RESOLVE, 0, 0, 0, 1, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"call pipelined through the bootstrap capability",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1, 0}}, 1, 1, 0, 0, 0},
+    {"call pipelined through a field with no capability",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 1, 0}}, 2, 2, 0, 0, 0},
+    {"call pipelined on results that are no capability",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"results sent to yourself, then a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 1, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"results sent to yourself, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 1, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"question reused after a Return without capabilities",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+    {"call with onlyPromisePipeline",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"call with onlyPromisePipeline, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"call with noPromisePipelining",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 2, 0}}, 1, 1, 0, 0, 0},
+    {"call with onlyPromisePipeline reusing an active question",
+     {{VF_CALL, 0, VT_IMPORT, 0, 0, 0, 1, 0}}, 1, 99, 0, 0, 0},
+    {"message type 20",
+     {{VF_TAG, 0, 0, 0, 0, 20, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"obsolete Save",
+     {{VF_TAG, 0, 0, 0, 0, 7, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"obsolete Delete",
+     {{VF_TAG, 0, 0, 0, 0, 9, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Disembargo senderLoopback to the bootstrap",
+     {{VF_DISEMBARGO, 0, 0, 0, 0, 0, 3, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Disembargo receiverLoopback",
+     {{VF_DISEMBARGO, 0, 0, 0, 1, 0, 3, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Disembargo to an unknown export",
+     {{VF_DISEMBARGO, 0, 0, 55, 0, 0, 3, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Resolve of an unknown promise to a capability",
+     {{VF_RESOLVE, 7, 0, 3, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Resolve of an unknown promise to an exception",
+     {{VF_RESOLVE, 7, 0, 0, 1, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Resolve of an unknown promise to a capability under its id",
+     {{VF_RESOLVE, 3, 0, 3, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+    {"Resolve of an unknown promise to a promise under its id",
+     {{VF_RESOLVE, 3, 0, 3, 4, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+    {"Resolve to CapDescriptor.none",
+     {{VF_RESOLVE, 7, 0, 0, 2, 0, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Resolve with an unknown arm",
+     {{VF_RESOLVE, 7, 0, 0, 3, 0, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Return for a high question id",
+     {{VF_RETURN, 0x80000005u, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Provide, which this vat serves at level 3",
+     {{VF_TAG, 0, 0, 0, 0, 10, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
+    {"Accept, which this vat serves at level 3",
+     {{VF_TAG, 0, 0, 0, 0, 11, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
+    {"Join, which this vat serves at level 3",
+     {{VF_TAG, 0, 0, 0, 0, 12, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
+    {"Disembargo accept",
+     {{VF_DISEMBARGO, 0, 0, 3, 2, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Disembargo provide naming no Provide",
+     {{VF_DISEMBARGO, 0, 0, 0, 3, 0, 4, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Disembargo with an unknown context arm",
+     {{VF_DISEMBARGO, 0, 0, 0, 9, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Disembargo accept on a promised answer with a transform",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 5, 2, 3, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Disembargo provide on a promised answer with an unknown op",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 2, 3, 0x101, 7, 0}}, 1, 99, 0, 0, 0},
+    {"call pipelined with an unknown op",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 0x102, 0}}, 1, 99, 0, 0, 0},
+    {"call pipelined on a missing answer with an unknown op",
+     {{VF_CALL, 1, VT_PROMISED, 50, 0, 0, 0x101, 0}}, 1, 99, 0, 0, 0},
+    {"Disembargo senderLoopback on a missing answer with an unknown op",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 99, 0, 0x101, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Disembargo accept on a null promised answer",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 2, 0x400, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Disembargo accept on an empty transform",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 2, 0x200, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Disembargo accept with no target",
+     {{VF_DISEMBARGO, 0, VT_NULL, 0, 2, 0, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Disembargo provide on an unknown target arm",
+     {{VF_DISEMBARGO, 0, VT_UNKNOWN, 0, 3, 0, 4294967295u, 0}}, 1, 99, 0, 0, 0},
+    {"unknown method",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 0}}, 1, 1, 0, 0, 0},
+    {"call pipelined on an unknown method's answer",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"Abort",
+     {{VF_ABORT, 0, 0, 0, 0, 0, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Abort carrying a remote exception",
+     {{VF_ABORT, 0, 0, 0, 1, 0, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Abort of type disconnected",
+     {{VF_ABORT, 0, 0, 0, 0, 2, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Abort carrying a remote exception of type unimplemented",
+     {{VF_ABORT, 0, 0, 0, 1, 3, 0, 0}}, 1, 99, 0, 0, 0},
+    {"Release of an unknown export",
+     {{VF_RELEASE, 99, 0, 0, 0, 0, 1, 0}}, 1, 99, 0, 0, 0},
+    {"Release beyond the reference count",
+     {{VF_RELEASE, 0, 0, 0, 0, 0, 5, 0}}, 1, 99, 0, 0, 0},
+    {"Release of the last reference",
+     {{VF_RELEASE, 0, 0, 0, 0, 0, 1, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Finish releasing a released result",
+     {{VF_RELEASE, 0, 0, 0, 0, 0, 1, 0},
+      {VF_FINISH, 0, 0, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+    {"capability in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"one capability twice in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 2},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"promise in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0x101},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of a failing call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of a failing call, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"capability in the params of a call returning one",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of a call returning one, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"capability in the params of a call sent to yourself",
+     {{VF_CALL, 1, VT_IMPORT, 0, 1, 0, 0, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of a call sent to yourself, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 1, 0, 0, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"capability in the params of an onlyPromisePipeline call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of an onlyPromisePipeline call, released "
+     "once capnp-C++ is idle",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"capability in the params of an onlyPromisePipeline call, released "
+     "by a Finish without the early cancellation workaround",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 1, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"capability in the params of an onlyPromisePipeline call, Finish alone",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+    {"capability in the params of a pipelined call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 1, 1},
+      {VF_CALL, 3, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 3, 0, 0, 0},
+    {"capability in the params of a call on a reused question",
+     {{VF_CALL, 0, VT_IMPORT, 0, 0, 0, 0, 1}}, 1, 99, 0, 0, 0},
+    {"capability in the params of a call to an unknown export",
+     {{VF_CALL, 1, VT_IMPORT, 99, 0, 0, 0, 1}}, 1, 99, 0, 0, 0},
+    {"capability in the params of a call on a missing answer",
+     {{VF_CALL, 1, VT_PROMISED, 50, 0, 0, 0, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"capability in the params of a call sent to a third party",
+     {{VF_CALL, 1, VT_IMPORT, 0, 2, 0, 0, 1}}, 1, 99, 0, 0, 0},
+    {"Resolve of an import a call's params carry",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
+      {VF_RESOLVE, 5, 0, 8, 0, 0, 0, 0}}, 2, 99, 0, 0, 0},
+    {"Resolve of an import a call's params carry to that import",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
+      {VF_RESOLVE, 5, 0, 5, 0, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Resolve of a promise a call's params carry to itself",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 5, 4, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Resolve of a promise a call's params carry to a capability under its id",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 5, 0, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Resolve of a promise a call's params carry",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 8, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"Resolve of a promise a call's params carry, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 8, 0, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"two Resolves of a promise a call's params carry",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 8, 0, 0, 0, 0},
+      {VF_RESOLVE, 5, 0, 9, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Resolve to an exception of a promise a call's params carry",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0x101},
+      {VF_RESOLVE, 5, 0, 0, 1, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"three capabilities in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u << 24},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"repeated capabilities in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 2u << 24},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"two capabilities in the params of a call returning one, then Finish",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 3u << 24},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 2, 0, 0, 0},
+    {"Finish releasing a released result with a capability in the params",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1},
+      {VF_RELEASE, 0, 0, 0, 0, 0, 2, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Disembargo after a Finish that waits for capnp-C++ to be idle",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_DISEMBARGO, 0, 0, 0, 0, 0, 3, 0}}, 3, 99, 0, 0, 0},
+    {"Finishes of two onlyPromisePipeline calls, first then second",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 1, 1u | (6u << 16)},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_FINISH, 2, 0, 0, 0, 0, 0, 0}}, 4, 99, 0, 0, 0},
+    {"Finishes of two onlyPromisePipeline calls, second then first",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 1, 1u | (6u << 16)},
+      {VF_FINISH, 2, 0, 0, 0, 0, 0, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 4, 99, 0, 0, 0},
+    {"call with an amplified list of void as its capTable",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | (2u << 28)}}, 1, 99, 0, 0, 0},
+    {"call with an amplified list of empty structs as its capTable",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | (3u << 28)}}, 1, 99, 0, 0, 0},
+    {"call pipelined with an amplified list of void as its transform",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1, 2u << 28}}, 1, 99, 0, 0, 0},
+    {"call pipelined with an amplified list of empty structs as its transform",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1, 3u << 28}}, 1, 99, 0, 0, 0},
+    {"call with bit 31 set in its capTable tag",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | (11u << 28)},
+      {VF_CALL, 2, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 2, 0, 0, 0},
+    {"call with bit 31 set in an empty-struct capTable tag",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | (12u << 28)}}, 1, 1, 0, 0, 0},
+    {"call pipelined with bit 31 set in its transform tag",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 0},
+      {VF_CALL, 2, VT_PROMISED, 1, 0, 0, 1, 11u << 28}}, 2, 2, 0, 0, 0},
+    {"message type 20 carrying a composite list with bit 31 set",
+     {{VF_TAG, 0, 0, 0, 0, 20, 0, 13u << 28}}, 1, 99, 0, 0, 0},
+    {"message type 20 carrying an amplified list of void",
+     {{VF_TAG, 0, 0, 0, 0, 20, 0, 4u << 28}}, 1, 99, 0, 0, 0},
+    {"message type 20 carrying the longest list a copy can read",
+     {{VF_TAG, 0, 0, 0, 0, 20, 0, 8u << 28}}, 1, 99, 0, 0, 0},
+    {"message type 20 carrying a list one word past that",
+     {{VF_TAG, 0, 0, 0, 0, 20, 0, 9u << 28}}, 1, 99, 0, 0, 0},
+    {"call pipelined with a legal list of void as its transform",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 1, 10u << 28}}, 1, 99, 0, 0, 0,
+     VD_LEGAL_VOID_WAIT_MS},
+    {"call with a corrupt params pointer that the method reads",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u << 28}}, 1, 1, 0, 0, 0},
+    {"call with a corrupt params pointer that the method ignores",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 2, 0, 1u << 28}}, 1, 1, 0, 0, 0},
+    {"call to an unknown method with a corrupt params pointer",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 9, 0, 1u << 28}}, 1, 1, 0, 0, 0},
+    {"capability descriptor of an unknown arm in the params of a call",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 1u | 0x200}}, 1, 99, 0, 0, 0},
+    {"capability then a descriptor of an unknown arm in the params",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 2u | 0x200}}, 1, 99, 0, 0, 0},
+    {"call pipelined on the bootstrap answer through a noop",
+     {{VF_CALL, 1, VT_PROMISED, 0, 0, 0, 0x201, 0}}, 1, 1, 0, 0, 0},
+    {"Disembargo of an unknown context with a corrupt target",
+     {{VF_DISEMBARGO, 0, VT_IMPORT, 0, 9, 0, 0, 5u << 28}}, 1, 99, 0, 0, 0},
+    {"Disembargo of an unknown context with a corrupt promisedAnswer",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 9, 1, 0, 6u << 28}}, 1, 99, 0, 0, 0},
+    {"Disembargo of an unknown context with a corrupt transform",
+     {{VF_DISEMBARGO, 0, VT_PROMISED, 1, 9, 1, 0, 7u << 28}}, 1, 99, 0, 0, 0},
+    {"Disembargo before a call whose Finish waits for capnp-C++ to be idle",
+     {{VF_DISEMBARGO, 0, 0, 0, 0, 0, 3, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"Disembargo between a call and its Finish that waits to be idle",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_DISEMBARGO, 0, 0, 0, 0, 0, 3, 0},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0}}, 3, 99, 0, 0, 0},
+    {"two Disembargoes, a call and its Finish that waits to be idle",
+     {{VF_CALL, 1, VT_IMPORT, 0, 0, 0, 1, 1},
+      {VF_FINISH, 1, 0, 0, 0, 0, 0, 0},
+      {VF_DISEMBARGO, 0, 0, 0, 0, 0, 3, 0},
+      {VF_DISEMBARGO, 0, 0, 0, 0, 0, 4, 0}}, 4, 99, 0, 0, 0},
+    {"Bootstrap of a vat with no bootstrap capability",
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 1},
+    {"Disembargo senderLoopback to a missing bootstrap",
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_DISEMBARGO, 0, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 1},
+    {"Disembargo senderLoopback pipelined on a missing bootstrap",
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_DISEMBARGO, 0, VT_PROMISED, 0, 0, 0, 0, 0}}, 2, 99, 0, 0, 1},
+    {"call pipelined on a missing bootstrap",
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_PROMISED, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 1},
+    {"Release of a missing bootstrap",
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_RELEASE, 0, 0, 0, 0, 0, 1, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 1, 0, 0, 1},
+    {"two Bootstraps with no bootstrap capability",
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_BOOT, 1, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 2, VT_IMPORT, 1, 0, 0, 0, 0}}, 3, 2, 0, 0, 1},
+    {"Finish of a missing bootstrap",
+     {{VF_BOOT, 0, 0, 0, 0, 0, 0, 0},
+      {VF_FINISH, 0, 0, 0, 0, 0, 0, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 3, 1, 0, 0, 1},
+};
+#define N_VAT_DIFFS (sizeof vat_diffs / sizeof vat_diffs[0])
+
+/* Method 0 adds and method 2 returns the bootstrap capability; any
+ * other method fails as the generated C++ server fails an unknown one. */
+static int vd_dispatch(void *server, uint64_t interface_id, uint16_t method_id,
+                       const capnp_ptr_t *params, const capnp_bptr_t *results) {
+  if (method_id == 2) {
+    capnp_rpc_cap_ref_t self = {CAPNP_RPC_CAP_EXPORT, 0};
+    capnp_bptr_t body;
+    int idx = capnp_rpc_result_cap(&self);
+    if (idx < 0 || capnp_builder_struct(results, 0, 1, &body))
+      return CAPNP_ERR_ALLOC;
+    return capnp_builder_set_cap(&body, 0, 0, (uint32_t)idx);
+  }
+  if (method_id != 0) {
+    (void)capnp_rpc_unimplemented("adder.capnp:Adder", interface_id,
+                                  method_id);
+    return CAPNP_ERR_ARG;
+  }
+  return adder_dispatch(server, interface_id, method_id, params, results);
+}
+
+static int build_target(const capnp_bptr_t *call, const vframe_t *f) {
+  capnp_bptr_t slot, target, pa;
+  if (f->target == VT_NULL)
+    return 0;
+  if (capnp_builder_slot(call, 3, 0, &slot) ||
+      capnp_builder_struct(&slot, 1, 1, &target))
+    return -1;
+  switch (f->target) {
+  case VT_IMPORT:
+    return capnp_builder_set_u32(&target, 0, f->tval);
+  case VT_PROMISED: {
+    capnp_bptr_t ops;
+    uint32_t i;
+    /* A `tval` of NULL_ANSWER leaves the promisedAnswer null. */
+    if (f->tval == NULL_ANSWER)
+      return capnp_builder_set_u16(&target, 4, 1);
+    if (capnp_builder_set_u16(&target, 4, 1) ||
+        capnp_builder_slot(&target, 1, 0, &slot) ||
+        capnp_builder_struct(&slot, 1, 1, &pa) ||
+        capnp_builder_set_u32(&pa, 0, f->tval))
+      return -1;
+    /* `count` low byte ops of getPointerField; 0x100 makes the last
+     * one an unknown arm, and 0x200 makes the first a noop. */
+    if ((f->count & 0xff) == 0)
+      return 0;
+    if (capnp_builder_set_list_struct(&pa, 1, 0, f->count & 0xff, 1, 0, &ops))
+      return -1;
+    for (i = 0; i < (f->count & 0xff); i++) {
+      capnp_bptr_t e = ops;
+      e.word += i;
+      if (capnp_builder_set_u16(&e, 0,
+                                (f->count & 0x100) && i + 1 == (f->count & 0xff)
+                                    ? 5
+                                : (f->count & 0x200) && i == 0 ? 0
+                                                               : 1))
+        return -1;
+    }
+    return 0;
+  }
+  default:
+    return capnp_builder_set_u16(&target, 4, 2);
+  }
+}
+
+/* Export lists a call's capTable can name, picked by bits 24 to 27 of
+ * `pcaps`; the first entry of each is its length. */
+static const uint32_t vf_id_lists[][6] = {
+    {0},
+    {3, 5, 6, 7},
+    {5, 5, 6, 5, 7, 6},
+    {2, 5, 6},
+};
+
+static int build_vcall(const capnp_bptr_t *slot0, const vframe_t *f) {
+  capnp_bptr_t call, slot, payload, content, table, e;
+  /* For a call on an import, `count` bit 1 sets onlyPromisePipeline and
+   * bit 2 noPromisePipelining. */
+  uint32_t hints = f->target == VT_PROMISED ? 0 : f->count;
+  uint32_t list = (f->pcaps >> 24) & 0xf;
+  uint32_t i, n = list ? vf_id_lists[list][0] : f->pcaps & 0xff;
+  uint32_t base = (f->pcaps >> 16) & 0xff ? (f->pcaps >> 16) & 0xff : 5;
+  if (capnp_builder_struct(slot0, 3, 3, &call) ||
+      capnp_builder_set_bool(&call, 130, (hints & 1) != 0) ||
+      capnp_builder_set_bool(&call, 129, (hints & 2) != 0) ||
+      capnp_builder_set_u32(&call, 0, f->qid) ||
+      capnp_builder_set_u16(&call, 4, f->method) ||
+      capnp_builder_set_u16(&call, 6, f->send_to) ||
+      capnp_builder_set_u64(&call, 8, ADDER_IFACE) ||
+      build_target(&call, f) ||
+      capnp_builder_slot(&call, 3, 1, &slot) ||
+      capnp_builder_struct(&slot, 0, 2, &payload) ||
+      capnp_builder_slot(&payload, 0, 0, &slot) ||
+      capnp_builder_struct(&slot, 2, 0, &content) ||
+      capnp_builder_set_u64(&content, 0, 20) ||
+      capnp_builder_set_u64(&content, 8, 22))
+    return -1;
+  if (n == 0)
+    return 0;
+  if (capnp_builder_set_list_struct(&payload, 1, 0, n, 1, 1, &table))
+    return -1;
+  for (i = 0; i < n; i++) {
+    uint16_t arm = (f->pcaps & 0x100) ? 2 : 1;
+    e = table;
+    e.word += (size_t)i * 2;
+    if ((f->pcaps & 0x200) && i + 1 == n)
+      arm = 9;
+    if (capnp_builder_set_u16(&e, 0, arm) ||
+        capnp_builder_set_u32(&e, 4, list ? vf_id_lists[list][i + 1] : base))
+      return -1;
+  }
+  return 0;
+}
+
+static int build_dis_promised(const capnp_bptr_t *target, const vframe_t *f) {
+  capnp_bptr_t slot, pa, ops, e;
+  uint32_t i, n = f->method & 0xff;
+  if (capnp_builder_slot(target, 1, 0, &slot))
+    return -1;
+  if (f->method & 0x400)
+    return 0;
+  if (capnp_builder_struct(&slot, 1, 1, &pa) ||
+      capnp_builder_set_u32(&pa, 0, f->tval))
+    return -1;
+  if (f->method & 0x200)
+    return capnp_builder_set_list_struct(&pa, 1, 0, 0, 1, 0, &ops);
+  if (n == 0)
+    return 0;
+  if (capnp_builder_set_list_struct(&pa, 1, 0, n, 1, 0, &ops))
+    return -1;
+  for (i = 0; i < n; i++) {
+    e = ops;
+    e.word += i;
+    if (capnp_builder_set_u16(&e, 0,
+                              (i & 1) ? 0 : (i == 0 && (f->method & 0x100)) ? 5 : 1) ||
+        capnp_builder_set_u16(&e, 2, (uint16_t)(i * 3)))
+      return -1;
+  }
+  return 0;
+}
+
+static int build_vframe_raw(const vframe_t *f, uint8_t **out, size_t *len) {
+  capnp_builder_t b;
+  capnp_bptr_t root, msg, slot, body, inner;
+  int rc;
+  if (f->kind == VF_RETURN)
+    return build_return(f->qid, 0, 0, out, len);
+  if (f->kind == VF_ABORT) {
+    /* `send_to` nonzero sends what rpc.c++ answers an Abort with, and
+     * `method` is the Exception.type. */
+    const char *why = f->send_to ? "remote exception: gone" : "gone";
+    capnp_builder_init(&b);
+    rc = capnp_builder_root(&b, &root) ||
+         capnp_builder_struct(&root, 1, 1, &msg) ||
+         capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_ABORT) ||
+         capnp_builder_slot(&msg, 1, 0, &slot) ||
+         capnp_builder_struct(&slot, 1, 2, &body) ||
+         capnp_builder_set_text(&body, 1, 0, why, strlen(why)) ||
+         capnp_builder_set_u16(&body, 4, f->method) ||
+         capnp_builder_serialize(&b, out, len);
+    capnp_builder_free(&b);
+    return rc;
+  }
+  capnp_builder_init(&b);
+  rc = capnp_builder_root(&b, &root) ||
+       capnp_builder_struct(&root, 1, 1, &msg) ||
+       capnp_builder_slot(&msg, 1, 0, &slot);
+  if (rc == 0) {
+    switch (f->kind) {
+    case VF_BOOT:
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_BOOTSTRAP) ||
+           capnp_builder_struct(&slot, 1, 1, &body) ||
+           capnp_builder_set_u32(&body, 0, f->qid);
+      if (rc == 0 && f->count)
+        rc = capnp_builder_slot(&body, 1, 0, &slot) ||
+             capnp_builder_struct(&slot, 1, 0, &inner) ||
+             capnp_builder_set_u32(&inner, 0, f->count);
+      break;
+    case VF_CALL:
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_CALL) ||
+           build_vcall(&slot, f);
+      break;
+    case VF_RELEASE:
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RELEASE) ||
+           capnp_builder_struct(&slot, 1, 0, &body) ||
+           capnp_builder_set_u32(&body, 0, f->qid) ||
+           capnp_builder_set_u32(&body, 4, f->count);
+      break;
+    case VF_UNIMPL:
+      /* Unimplemented carries the refused message: a Call here. */
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_UNIMPLEMENTED) ||
+           capnp_builder_struct(&slot, 1, 1, &inner) ||
+           capnp_builder_set_u16(&inner, 0, CAPNP_RPC_MSG_CALL) ||
+           capnp_builder_slot(&inner, 1, 0, &slot) || build_vcall(&slot, f);
+      break;
+    case VF_UNIMPL_RESOLVE: {
+      capnp_bptr_t res, cap;
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_UNIMPLEMENTED) ||
+           capnp_builder_struct(&slot, 1, 1, &inner) ||
+           capnp_builder_set_u16(&inner, 0, CAPNP_RPC_MSG_RESOLVE) ||
+           capnp_builder_slot(&inner, 1, 0, &slot) ||
+           capnp_builder_struct(&slot, 1, 1, &res) ||
+           capnp_builder_set_u16(&res, 4, f->send_to ? 1 : 0) ||
+           capnp_builder_slot(&res, 1, 0, &slot);
+      if (rc == 0 && f->send_to)
+        rc = capnp_builder_struct(&slot, 1, 2, &cap) ||
+             capnp_builder_set_text(&cap, 1, 0, "gone", 4);
+      else if (rc == 0)
+        rc = capnp_builder_struct(&slot, 1, 1, &cap) ||
+             capnp_builder_set_u16(&cap, 0, f->method) ||
+             capnp_builder_set_u32(&cap, 4, f->tval);
+      break;
+    }
+    case VF_TAG:
+      /* A message of type `method` with an empty body. */
+      rc = capnp_builder_set_u16(&msg, 0, f->method) ||
+           capnp_builder_struct(&slot, 1, 1, &body);
+      break;
+    case VF_DISEMBARGO:
+      /* Context arm `send_to`, embargo id `count`, on import `tval`. A
+       * promised target names question `tval`, with `method` low byte
+       * ops alternating getPointerField and noop; 0x100 makes the first
+       * op an unknown arm, 0x200 sends an empty transform, and 0x400 a
+       * null promisedAnswer. */
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_DISEMBARGO) ||
+           capnp_builder_struct(&slot, 1, 1, &body) ||
+           capnp_builder_set_u32(&body, 0, f->count) ||
+           capnp_builder_set_u16(&body, 4, f->send_to) ||
+           capnp_builder_slot(&body, 1, 0, &slot);
+      if (rc == 0 && f->target != VT_NULL)
+        rc = capnp_builder_struct(&slot, 1, 1, &inner) ||
+             capnp_builder_set_u16(&inner, 4,
+                                   f->target == VT_PROMISED  ? 1
+                                   : f->target == VT_UNKNOWN ? 7
+                                                             : 0) ||
+             (f->target != VT_PROMISED &&
+              capnp_builder_set_u32(&inner, 0, f->tval));
+      if (rc == 0 && f->target == VT_PROMISED)
+        rc = build_dis_promised(&inner, f);
+      break;
+    case VF_RESOLVE:
+      /* Promise `qid` resolved to senderHosted `tval`; with `send_to` 1
+       * to an exception, 2 to a none descriptor, 3 by an unknown arm, 4
+       * to senderPromise `tval`. */
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_RESOLVE) ||
+           capnp_builder_struct(&slot, 1, 1, &body) ||
+           capnp_builder_set_u32(&body, 0, f->qid) ||
+           capnp_builder_set_u16(&body, 4,
+                                 f->send_to == 1 ? 1 : f->send_to == 3 ? 9 : 0) ||
+           capnp_builder_slot(&body, 1, 0, &slot);
+      if (rc == 0 && f->send_to == 1)
+        rc = capnp_builder_struct(&slot, 1, 2, &inner) ||
+             capnp_builder_set_text(&inner, 1, 0, "gone", 4);
+      else if (rc == 0 && (f->send_to == 0 || f->send_to == 4))
+        rc = capnp_builder_struct(&slot, 1, 1, &inner) ||
+             capnp_builder_set_u16(&inner, 0, f->send_to ? 2 : 1) ||
+             capnp_builder_set_u32(&inner, 4, f->tval);
+      else if (rc == 0 && f->send_to == 2)
+        rc = capnp_builder_struct(&slot, 1, 1, &inner);
+      break;
+    default:
+      rc = capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_FINISH) ||
+           capnp_builder_struct(&slot, 1, 0, &body) ||
+           capnp_builder_set_u32(&body, 0, f->qid) ||
+           capnp_builder_set_bool(&body, 33, f->count != 0);
+      break;
+    }
+  }
+  if (rc == 0)
+    rc = capnp_builder_serialize(&b, out, len);
+  capnp_builder_free(&b);
+  return rc;
+}
+
+#define VF_AMPLIFIED 20000000u
+#define VF_BIG_LEGAL 8388000u
+#define VF_BODY_FITS 8388602u
+
+static uint64_t vf_word(const uint8_t *frame, size_t w) {
+  return capnp_load_le64(frame + 8 + w * 8);
+}
+
+static void vf_set_word(uint8_t *frame, size_t w, uint64_t v) {
+  capnp_store_le64(frame + 8 + w * 8, v);
+}
+
+/* A list pointer to the word after it, of `esize` and `count`. */
+static uint64_t vf_list_word(unsigned esize, uint32_t count) {
+  return 1u | ((uint64_t)esize << 32) | ((uint64_t)count << 35);
+}
+
+/* Rewrite one pointer of a built frame, which is one segment of
+ * single-word-aligned objects laid out in the order they were built:
+ *   1  the params content, an offset past the segment,
+ *   2  the first list as an amplified list of void,
+ *   3  the first list as an amplified list of zero-sized structs,
+ *   4  a message body as an amplified list of void,
+ *   5  the Disembargo target, an offset past the segment,
+ *   6  the Disembargo promisedAnswer, an offset past the segment,
+ *   7  the Disembargo transform, an offset past the segment. */
+static int vf_corrupt(uint32_t bad, uint8_t **frame, size_t *len) {
+  size_t words = (*len - 8) / 8, w;
+  uint8_t *f = *frame;
+  uint32_t amp = VF_AMPLIFIED;
+  if (bad == 10) {
+    bad = 2;
+    amp = VF_BIG_LEGAL;
+  }
+  switch (bad) {
+  case 8:
+  case 9:
+    vf_set_word(f, 2, vf_list_word(0, bad == 8 ? VF_BODY_FITS
+                                                : VF_BODY_FITS + 1));
+    return 0;
+  case 1:
+    for (w = 0; w < words; w++) {
+      uint64_t v = vf_word(f, w);
+      if ((v & 3) == 0 && (v >> 32) == 2) {
+        vf_set_word(f, w, ((uint64_t)0x40000u << 2) | (v & 0xffffffff00000000ull));
+        return 0;
+      }
+    }
+    return -1;
+  case 2:
+  case 3:
+    for (w = 0; w < words; w++) {
+      uint64_t v = vf_word(f, w);
+      if (w > 0 && (v & 3) == 1 && (v >> 32) != 0 && ((v >> 32) & 7) == 7) {
+        if (bad == 2) {
+          vf_set_word(f, w, vf_list_word(0, amp));
+        } else {
+          uint8_t *grown = (uint8_t *)realloc(f, *len + 8);
+          if (grown == NULL)
+            return -1;
+          f = grown;
+          *frame = f;
+          vf_set_word(f, words, (uint64_t)VF_AMPLIFIED << 2);
+          capnp_store_le32(f + 4, (uint32_t)(words + 1));
+          *len += 8;
+          vf_set_word(f, w, 1u | ((uint64_t)(words - w - 1) << 2) |
+                                (7ull << 32));
+        }
+        return 0;
+      }
+    }
+    return -1;
+  case 4:
+    vf_set_word(f, 2, vf_list_word(0, VF_AMPLIFIED));
+    return 0;
+  case 5:
+    vf_set_word(f, 4, (vf_word(f, 4) & 0xffffffff00000000ull) |
+                          ((uint64_t)0x40000u << 2));
+    return 0;
+  case 6:
+    vf_set_word(f, 6, (vf_word(f, 6) & 0xffffffff00000000ull) |
+                          ((uint64_t)0x40000u << 2));
+    return 0;
+  case 7:
+    vf_set_word(f, 8, (vf_word(f, 8) & 0xffffffff00000000ull) |
+                          ((uint64_t)0x40000u << 2) | 1u);
+    return 0;
+  case 11:
+  case 12:
+    for (w = 0; w < words; w++) {
+      uint64_t v = vf_word(f, w);
+      if (w > 0 && (v & 3) == 1 && (v >> 32) != 0 && ((v >> 32) & 7) == 7) {
+        if (bad == 11) {
+          size_t tw = w + 1u + (size_t)((v >> 2) & 0x3fffffffu);
+          if (tw >= words)
+            return -1;
+          vf_set_word(f, tw, vf_word(f, tw) | 0x80000000ull);
+        } else {
+          uint8_t *grown = (uint8_t *)realloc(f, *len + 8);
+          if (grown == NULL)
+            return -1;
+          f = grown;
+          *frame = f;
+          vf_set_word(f, words, 0x80000000ull);
+          capnp_store_le32(f + 4, (uint32_t)(words + 1));
+          *len += 8;
+          vf_set_word(f, w, 1u | ((uint64_t)(words - w - 1) << 2) |
+                                (7ull << 32));
+        }
+        return 0;
+      }
+    }
+    return -1;
+  case 13: {
+    uint8_t *grown = (uint8_t *)realloc(f, *len + 16);
+    if (grown == NULL)
+      return -1;
+    f = grown;
+    *frame = f;
+    vf_set_word(f, words, (1ull << 32) | 0x80000000ull | (1ull << 2));
+    vf_set_word(f, words + 1, 0);
+    capnp_store_le32(f + 4, (uint32_t)(words + 2));
+    *len += 16;
+    vf_set_word(f, 2, 1u | ((uint64_t)(words - 3) << 2) | (7ull << 32) |
+                          (1ull << 35));
+    return 0;
+  }
+  default:
+    return -1;
+  }
+}
+
+static int build_vframe(const vframe_t *f, uint8_t **out, size_t *len) {
+  int rc = build_vframe_raw(f, out, len);
+  if (rc == 0 && f->pcaps >> 28)
+    rc = vf_corrupt(f->pcaps >> 28, out, len);
+  return rc;
+}
+
+/* An Exception's type when it is not `failed`. */
+static const char *exc_type(const capnp_ptr_t *exc) {
+  static const char *names[] = {"", " (overloaded)", " (disconnected)",
+                                " (unimplemented)"};
+  uint16_t t = exc->kind == CAPNP_PK_STRUCT ? capnp_get_u16(exc, 4, 0) : 0;
+  return t < 4 ? names[t] : " (unknown type)";
+}
+
+/* Append one reply to `out`; 1 when it ends the exchange. */
+static int describe_reply(const uint8_t *frame, size_t n, uint32_t until,
+                          char *out, size_t cap) {
+  capnp_message_t m = {0};
+  capnp_ptr_t root, body, p, content;
+  char ev[640];
+  const char *text = NULL;
+  size_t tn = 0;
+  int end = 0;
+  uint16_t tag;
+  snprintf(ev, sizeof ev, "unreadable");
+  if (capnp_message_from_flat(&m, frame, n) == CAPNP_OK &&
+      capnp_root(&m, &root) == CAPNP_OK) {
+    tag = capnp_get_u16(&root, 0, 0);
+    if (capnp_getp(&root, 0, &body) != CAPNP_OK)
+      memset(&body, 0, sizeof body);
+    if (tag == CAPNP_RPC_MSG_ABORT) {
+      if (capnp_get_text(&body, 0, &text, &tn) != CAPNP_OK || text == NULL)
+        tn = 0;
+      snprintf(ev, sizeof ev, "abort: %.*s%s", (int)tn, tn ? text : "",
+               exc_type(&body));
+      end = 1;
+    } else if (tag == CAPNP_RPC_MSG_RETURN) {
+      uint32_t aid = capnp_get_u32(&body, 0, 0);
+      uint16_t arm = capnp_get_u16(&body, 6, 0);
+      if (arm == 0) {
+        long long sum = -1;
+        capnp_ptr_t table, desc;
+        memset(&content, 0, sizeof content);
+        if (capnp_getp(&body, 0, &p) == CAPNP_OK &&
+            capnp_getp(&p, 0, &content) == CAPNP_OK &&
+            content.kind == CAPNP_PK_STRUCT)
+          sum = (long long)capnp_get_u64(&content, 0, 0);
+        /* A capability prints as its descriptor arm and id. */
+        if (content.kind == CAPNP_PK_CAP &&
+            capnp_getp(&p, 1, &table) == CAPNP_OK &&
+            capnp_list_get_struct(&table, content.count, &desc) == CAPNP_OK)
+          snprintf(ev, sizeof ev, "return %u results cap %u:%u",
+                   (unsigned)aid, (unsigned)capnp_get_u16(&desc, 0, 0),
+                   (unsigned)capnp_get_u32(&desc, 4, 0));
+        else
+          snprintf(ev, sizeof ev, "return %u results %lld", (unsigned)aid,
+                   sum);
+      } else if (arm == 1) {
+        if (capnp_getp(&body, 0, &p) != CAPNP_OK ||
+            capnp_get_text(&p, 0, &text, &tn) != CAPNP_OK || text == NULL)
+          tn = 0;
+        snprintf(ev, sizeof ev, "return %u exception: %.*s%s", (unsigned)aid,
+                 (int)tn, tn ? text : "", exc_type(&p));
+      } else {
+        snprintf(ev, sizeof ev, "return %u arm %u", (unsigned)aid,
+                 (unsigned)arm);
+      }
+      /* Stored inverted: a clear bit is the default, true. */
+      if (!capnp_get_bool(&body, 32, 0))
+        strncat(ev, " releaseParamCaps", sizeof ev - strlen(ev) - 1);
+      end = aid == until;
+    } else if (tag == CAPNP_RPC_MSG_UNIMPLEMENTED) {
+      snprintf(ev, sizeof ev, "unimplemented %u",
+               (unsigned)capnp_get_u16(&body, 0, 0));
+    } else if (tag == CAPNP_RPC_MSG_RELEASE) {
+      snprintf(ev, sizeof ev, "release %u x%u",
+               (unsigned)capnp_get_u32(&body, 0, 0),
+               (unsigned)capnp_get_u32(&body, 4, 0));
+    } else if (tag == CAPNP_RPC_MSG_RESOLVE) {
+      uint32_t pid = capnp_get_u32(&body, 0, 0);
+      if (capnp_getp(&body, 0, &p) != CAPNP_OK)
+        memset(&p, 0, sizeof p);
+      if (capnp_get_u16(&body, 4, 0) == 1) {
+        if (capnp_get_text(&p, 0, &text, &tn) != CAPNP_OK || text == NULL)
+          tn = 0;
+        snprintf(ev, sizeof ev, "resolve %u exception: %.*s%s", (unsigned)pid,
+                 (int)tn, tn ? text : "", exc_type(&p));
+      } else {
+        snprintf(ev, sizeof ev, "resolve %u cap %u:%u", (unsigned)pid,
+                 (unsigned)capnp_get_u16(&p, 0, 0),
+                 (unsigned)capnp_get_u32(&p, 4, 0));
+      }
+    } else {
+      snprintf(ev, sizeof ev, "message %u", (unsigned)tag);
+    }
+  }
+  capnp_message_free(&m);
+  if (out[0] && strlen(out) + 2 < cap)
+    strcat(out, " | ");
+  strncat(out, ev, cap - strlen(out) - 1);
+  return end;
+}
+
+/* Replace each distinct exception reason with R1, R2, ... in order. */
+static void opaque_reasons(char *s) {
+  char seen[4][256];
+  int nseen = 0;
+  char out[1024] = "";
+  char *p = s;
+  for (;;) {
+    char *e = strstr(p, "exception: "), *stop;
+    size_t len;
+    int k;
+    if (e == NULL) {
+      strncat(out, p, sizeof out - strlen(out) - 1);
+      break;
+    }
+    e += strlen("exception: ");
+    strncat(out, p, (size_t)(e - p) < sizeof out - strlen(out) - 1
+                        ? (size_t)(e - p)
+                        : sizeof out - strlen(out) - 1);
+    stop = strstr(e, " | ");
+    len = stop ? (size_t)(stop - e) : strlen(e);
+    if (len > 255)
+      len = 255;
+    for (k = 0; k < nseen; k++)
+      if (strlen(seen[k]) == len && memcmp(seen[k], e, len) == 0)
+        break;
+    if (k == nseen && nseen < 4) {
+      memcpy(seen[nseen], e, len);
+      seen[nseen][len] = 0;
+      nseen++;
+    }
+    {
+      char tok[16];
+      snprintf(tok, sizeof tok, "R%d", k + 1);
+      strncat(out, tok, sizeof out - strlen(out) - 1);
+    }
+    p = e + (stop ? (size_t)(stop - e) : strlen(e));
+  }
+  strcpy(s, out);
+}
+
+#define VD_MAX_SENT 16
+static uint8_t *g_vd_sent[VD_MAX_SENT];
+static size_t g_vd_len[VD_MAX_SENT];
+static int g_vd_n;
+
+static int vd_capture(void *ctx, const uint8_t *data, size_t len) {
+  (void)ctx;
+  if (g_vd_n >= VD_MAX_SENT)
+    return 0;
+  g_vd_sent[g_vd_n] = (uint8_t *)malloc(len);
+  if (g_vd_sent[g_vd_n] == NULL)
+    return -1;
+  memcpy(g_vd_sent[g_vd_n], data, len);
+  g_vd_len[g_vd_n++] = len;
+  return 0;
+}
+
+static void vd_clear(void) {
+  while (g_vd_n > 0)
+    free(g_vd_sent[--g_vd_n]);
+}
+
+static void vd_local(const vscenario_t *s, char *out, size_t cap) {
+  static capnp_rpc_conn_t c;
+  uint8_t *f = NULL;
+  size_t n = 0;
+  int i, end = 0;
+  vframe_t boot = {VF_BOOT, 0, 0, 0, 0, 0, 0, 0};
+  out[0] = 0;
+  capnp_rpc_init(&c, vd_capture, NULL);
+  if (!s->noboot) {
+    capnp_rpc_set_bootstrap(&c, &g_server_obj, vd_dispatch);
+    if (build_vframe(&boot, &f, &n) == 0)
+      (void)capnp_rpc_handle(&c, f, n);
+    free(f);
+    vd_clear();
+  }
+  (void)capnp_rpc_idle(&c);
+  for (i = 0; i < s->nframes; i++) {
+    f = NULL;
+    if (build_vframe(&s->frames[i], &f, &n) == 0)
+      (void)capnp_rpc_handle(&c, f, n);
+    free(f);
+  }
+  (void)capnp_rpc_idle(&c);
+  for (i = 0; i < g_vd_n && !end; i++)
+    end = describe_reply(g_vd_sent[i], g_vd_len[i], s->until, out, cap);
+  if (!end)
+    strncat(out, out[0] ? " | no end" : "no end", cap - strlen(out) - 1);
+  vd_clear();
+  capnp_rpc_free(&c);
+}
+
+static int vd_read(int fd, uint8_t **frame, size_t *n, int wait_ms) {
+  struct pollfd p;
+  p.fd = fd;
+  p.events = POLLIN;
+  if (poll(&p, 1, wait_ms) <= 0)
+    return -1;
+  return capnp_read_frame_alloc(fd, frame, n) == CAPNP_OK ? 0 : -2;
+}
+
+static void vd_remote(uint16_t port, const vscenario_t *s, char *out,
+                      size_t cap) {
+  struct sockaddr_in addr;
+  uint8_t *f = NULL;
+  size_t n = 0;
+  int fd, i, end = 0, got_boot = 0;
+  vframe_t boot = {VF_BOOT, 0, 0, 0, 0, 0, 0, 0};
+  out[0] = 0;
+  fd = socket(AF_INET, SOCK_STREAM, 0);
+  memset(&addr, 0, sizeof addr);
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(port);
+  addr.sin_addr.s_addr = htonl(0x7f000001);
+  if (fd < 0 || connect(fd, (struct sockaddr *)&addr, sizeof addr) != 0) {
+    snprintf(out, cap, "connect failed");
+    if (fd >= 0)
+      close(fd);
+    return;
+  }
+  got_boot = s->noboot;
+  if (!got_boot && build_vframe(&boot, &f, &n) == 0)
+    (void)capnp_write_all(fd, f, n);
+  free(f);
+  while (!got_boot) {
+    char tmp[640] = "";
+    f = NULL;
+    if (vd_read(fd, &f, &n, VD_WAIT_MS) != 0) {
+      snprintf(out, cap, "no bootstrap Return");
+      close(fd);
+      return;
+    }
+    got_boot = describe_reply(f, n, 0, tmp, sizeof tmp);
+    free(f);
+  }
+  {
+    /* One write, so capnp-C++ reads every frame before it is idle. */
+    uint8_t all[4096];
+    size_t used = 0;
+    for (i = 0; i < s->nframes; i++) {
+      f = NULL;
+      if (build_vframe(&s->frames[i], &f, &n) == 0 && used + n <= sizeof all) {
+        memcpy(all + used, f, n);
+        used += n;
+      }
+      free(f);
+    }
+    (void)capnp_write_all(fd, all, used);
+  }
+  while (!end) {
+    int r;
+    f = NULL;
+    r = vd_read(fd, &f, &n,
+                s->peer_wait_ms ? s->peer_wait_ms : VD_WAIT_MS);
+    if (r != 0) {
+      const char *why = r == -1 ? "no end" : "closed";
+      if (out[0])
+        strncat(out, " | ", cap - strlen(out) - 1);
+      strncat(out, why, cap - strlen(out) - 1);
+      break;
+    }
+    end = describe_reply(f, n, s->until, out, cap);
+    free(f);
+  }
+  close(fd);
+}
+
+/* rpc.c++ prints object addresses in some reasons, as "[hex == hex]";
+ * they differ on every run, so only their place is compared. */
+static void mask_addresses(char *s) {
+  char *p = s;
+  while ((p = strchr(p, '[')) != NULL) {
+    size_t a = strspn(p + 1, "0123456789abcdef"), b;
+    if (a >= 1 && strncmp(p + 1 + a, " == ", 4) == 0 &&
+        (b = strspn(p + 5 + a, "0123456789abcdef")) >= 1 &&
+        p[5 + a + b] == ']') {
+      memmove(p + 1, p + 5 + a + b, strlen(p + 5 + a + b) + 1);
+      memmove(p + 8, p + 1, strlen(p + 1) + 1);
+      memcpy(p + 1, "address", 7);
+    }
+    p++;
+  }
+}
+
+/* `vat-diff <port> <noboot-port>`: each scenario against
+ * `rpc_peer_server <port>`, or `rpc_peer_server <noboot-port> none` for
+ * a vat with no bootstrap, and against this vat, printing both
+ * outcomes. */
+static int vat_diff(uint16_t port, uint16_t noboot_port) {
+  size_t i;
+  int failed = 0;
+  for (i = 0; i < N_VAT_DIFFS; i++) {
+    char cpp[1024], ours[1024];
+    vd_remote(vat_diffs[i].noboot ? noboot_port : port, &vat_diffs[i], cpp,
+              sizeof cpp);
+    vd_local(&vat_diffs[i], ours, sizeof ours);
+    mask_addresses(cpp);
+    mask_addresses(ours);
+    if (vat_diffs[i].opaque) {
+      opaque_reasons(cpp);
+      opaque_reasons(ours);
+    }
+    if (strcmp(cpp, ours) == 0) {
+      printf("same %s: %s\n", vat_diffs[i].name, cpp);
+      if (vat_diffs[i].known) {
+        fprintf(stderr, "FAIL %s: listed as a difference but the same\n",
+                vat_diffs[i].name);
+        failed++;
+      }
+    } else if (vat_diffs[i].known) {
+      printf("known difference %s: capnp-C++ \"%s\", this vat \"%s\"\n",
+             vat_diffs[i].name, cpp, ours);
+    } else {
+      fprintf(stderr, "FAIL %s: capnp-C++ \"%s\", this vat \"%s\"\n",
+              vat_diffs[i].name, cpp, ours);
+      failed++;
+    }
+  }
+  return failed != 0;
+}
+
+/* What capnp-C++ 1.4.0 answered in vat-diff, so this vat is checked
+ * against it with no C++ peer running. */
+static const struct {
+  const char *name;
+  const char *cpp;
+} vat_recorded[] = {
+    {"Unimplemented for a Call",
+     "abort: Peer did not implement required RPC message type.; "
+     "(uint)message.which() = 2"},
+    {"Unimplemented for a Resolve of the bootstrap",
+     "abort: Message target is not a current export ID."},
+    {"Unimplemented for a Resolve of an unknown export",
+     "abort: Tried to release invalid export ID."},
+    {"Unimplemented for a Resolve to an exception", "return 1 results 42"},
+    {"call pipelined through the bootstrap capability",
+     "return 1 exception: Invalid pipeline transform."},
+    {"call pipelined through a field with no capability",
+     "return 1 results 42 | return 2 exception: Pipeline call on a request "
+     "that returned no capabilities or was already closed."},
+    {"call pipelined on results that are no capability",
+     "return 1 results 42 | return 2 exception: Pipeline call on a request "
+     "that returned no capabilities or was already closed."},
+    {"call pipelined with an unknown op",
+     "abort: Unsupported pipeline op.; (uint)opReader.which() = 5"},
+    {"call pipelined on a missing answer with an unknown op",
+     "abort: Unsupported pipeline op.; (uint)opReader.which() = 5"},
+    {"Disembargo senderLoopback on a missing answer with an unknown op",
+     "abort: Unsupported pipeline op.; (uint)opReader.which() = 5"},
+    {"capability in the params of an onlyPromisePipeline call, released "
+     "once capnp-C++ is idle",
+     "return 2 results 42 | release 5 x1 | no end"},
+    {"capability in the params of an onlyPromisePipeline call, released "
+     "by a Finish without the early cancellation workaround",
+     "release 5 x1 | return 2 results 42 | no end"},
+    {"three capabilities in the params of a call",
+     "return 1 results 42 | release 7 x1 | release 6 x1 | release 5 "
+     "x1 | return 2 results 42"},
+    {"repeated capabilities in the params of a call",
+     "return 1 results 42 | release 7 x1 | release 6 x2 | release 5 "
+     "x2 | return 2 results 42"},
+    {"two capabilities in the params of a call returning one, then "
+     "Finish",
+     "return 1 results 0 | release 6 x1 | release 5 x1 | return 2 "
+     "results 42"},
+    {"Finish releasing a released result with a capability in the "
+     "params",
+     "return 1 results 0 | release 5 x1 | abort: Tried to release "
+     "invalid export ID."},
+    {"Disembargo after a Finish that waits for capnp-C++ to be idle",
+     "abort: expected target->getBrand() == this [address]; "
+     "'Disembargo' of type 'senderLoopback' sent to an object that "
+     "does not point back to the sender."},
+    {"Finishes of two onlyPromisePipeline calls, first then second",
+     "release 6 x1 | release 5 x1 | no end"},
+    {"Finishes of two onlyPromisePipeline calls, second then first",
+     "release 5 x1 | release 6 x1 | no end"},
+    {"call with an amplified list of void as its capTable",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"call with an amplified list of empty structs as its capTable",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"call pipelined with an amplified list of void as its transform",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"call pipelined with an amplified list of empty structs as its "
+     "transform",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"call with bit 31 set in its capTable tag",
+     "return 1 results 42 | release 5 x1 | return 2 results 42"},
+    {"call with bit 31 set in an empty-struct capTable tag",
+     "return 1 results 42"},
+    {"call pipelined with bit 31 set in its transform tag",
+     "return 1 results 0 | return 2 results 42"},
+    {"message type 20 carrying a composite list with bit 31 set",
+     "unimplemented 20 | no end"},
+    {"message type 20 carrying an amplified list of void",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"message type 20 carrying the longest list a copy can read",
+     "unimplemented 20 | no end"},
+    {"message type 20 carrying a list one word past that",
+     "abort: Exceeded message traversal limit.  See "
+     "capnp::ReaderOptions."},
+    {"call pipelined with a legal list of void as its transform",
+     "return 1 exception: Invalid pipeline transform. | no end"},
+    {"call with a corrupt params pointer that the method reads",
+     "return 1 exception: expected boundsCheck(segment, ptr, "
+     "ref->structRef.wordSize()); Message contained out-of-bounds "
+     "struct pointer. This usually indicates that the input data was "
+     "corrupted, used a different encoding than specified (e.g. "
+     "packed vs. non-packed), or was not a Cap'n Proto message to "
+     "begin with. Note that this error is NOT due to a schema "
+     "mismatch; the input is invalid regardless of schema."},
+    {"call with a corrupt params pointer that the method ignores",
+     "return 1 results 0"},
+    {"call to an unknown method with a corrupt params pointer",
+     "return 1 exception: Method not implemented.; interfaceName = "
+     "adder.capnp:Adder; typeId = 16862005924666098705; methodId = 9 "
+     "(unimplemented)"},
+    {"capability descriptor of an unknown arm in the params of a call",
+     "abort: unknown CapDescriptor type"},
+    {"capability then a descriptor of an unknown arm in the params",
+     "release 5 x1 | abort: unknown CapDescriptor type"},
+    {"call pipelined on the bootstrap answer through a noop",
+     "return 1 exception: Invalid pipeline transform."},
+    {"Disembargo of an unknown context with a corrupt target",
+     "abort: expected boundsCheck(segment, ptr, "
+     "ref->structRef.wordSize()); Message contained out-of-bounds "
+     "struct pointer. This usually indicates that the input data was "
+     "corrupted, used a different encoding than specified (e.g. "
+     "packed vs. non-packed), or was not a Cap'n Proto message to "
+     "begin with. Note that this error is NOT due to a schema "
+     "mismatch; the input is invalid regardless of schema."},
+    {"Disembargo of an unknown context with a corrupt promisedAnswer",
+     "abort: expected boundsCheck(segment, ptr, "
+     "ref->structRef.wordSize()); Message contained out-of-bounds "
+     "struct pointer. This usually indicates that the input data was "
+     "corrupted, used a different encoding than specified (e.g. "
+     "packed vs. non-packed), or was not a Cap'n Proto message to "
+     "begin with. Note that this error is NOT due to a schema "
+     "mismatch; the input is invalid regardless of schema."},
+    {"Disembargo of an unknown context with a corrupt transform",
+     "abort: expected boundsCheck(segment, ptr, wordCount + "
+     "POINTER_SIZE_IN_WORDS); Message contains out-of-bounds list "
+     "pointer. This usually indicates that the input data was "
+     "corrupted, used a different encoding than specified (e.g. "
+     "packed vs. non-packed), or was not a Cap'n Proto message to "
+     "begin with. Note that this error is NOT due to a schema "
+     "mismatch; the input is invalid regardless of schema."},
+    {"Disembargo before a call whose Finish waits for capnp-C++ to be "
+     "idle",
+     "release 5 x1 | abort: expected target->getBrand() == this "
+     "[address]; 'Disembargo' of type 'senderLoopback' sent to an "
+     "object that does not point back to the sender."},
+    {"Disembargo between a call and its Finish that waits to be idle",
+     "release 5 x1 | abort: expected target->getBrand() == this "
+     "[address]; 'Disembargo' of type 'senderLoopback' sent to an "
+     "object that does not point back to the sender."},
+    {"two Disembargoes, a call and its Finish that waits to be idle",
+     "abort: expected target->getBrand() == this [address]; "
+     "'Disembargo' of type 'senderLoopback' sent to an object that "
+     "does not point back to the sender."},
+};
+
+static void test_vat_recorded(void) {
+  size_t i, j;
+  for (i = 0; i < sizeof vat_recorded / sizeof vat_recorded[0]; i++) {
+    char ours[1024] = "";
+    for (j = 0; j < N_VAT_DIFFS; j++)
+      if (strcmp(vat_diffs[j].name, vat_recorded[i].name) == 0)
+        break;
+    if (j < N_VAT_DIFFS) {
+      vd_local(&vat_diffs[j], ours, sizeof ours);
+      mask_addresses(ours);
+      if (vat_diffs[j].opaque)
+        opaque_reasons(ours);
+    }
+    if (strcmp(ours, vat_recorded[i].cpp) != 0) {
+      fprintf(stderr, "FAIL recorded %s: capnp-C++ \"%s\", this vat \"%s\"\n",
+              vat_recorded[i].name, vat_recorded[i].cpp, ours);
+      g_fail++;
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   if (argc >= 3 && strcmp(argv[1], "dial") == 0)
     return dial_peer((uint16_t)atoi(argv[2]));
   if (argc >= 3 && strcmp(argv[1], "serve") == 0)
     return serve_peer((uint16_t)atoi(argv[2]));
+  if (argc >= 3 && strcmp(argv[1], "bad-return") == 0)
+    return serve_bad_returns((uint16_t)atoi(argv[2]));
+  if (argc >= 4 && strcmp(argv[1], "vat-diff") == 0)
+    return vat_diff((uint16_t)atoi(argv[2]), (uint16_t)atoi(argv[3]));
   test_ipv4_literal();
   test_frame_little_endian();
+  test_frame_segment_limit();
+  test_frame_alloc_limit();
+  test_link_framing_aborts();
+  test_link_pointer_aborts();
+  test_link_loopback_waits_for_idle();
   test_bootstrap_frame_little_endian();
   test_size_to_i32();
   test_write_pipe();
@@ -701,8 +2607,11 @@ int main(int argc, char **argv) {
   test_unix_replaces_only_socket();
   test_unix_keeps_live_socket();
   test_link_setup_closes_fd();
+  test_link_large_result(10000, "large link result");
+  test_link_large_result(70000, "link result over 64 KiB");
   loopback(1);
   loopback(0);
+  test_vat_recorded();
   if (g_fail) {
     fprintf(stderr, "%d transport checks failed\n", g_fail);
     return 1;

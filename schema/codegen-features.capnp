@@ -44,6 +44,9 @@ struct CodegenFeatures {
   tones @26 :List(Tone);
   matrix @27 :List(List(Text));
   anything @28 :AnyPointer;
+  motto @29 :Text = "inner";
+  blob @30 :Data = 0x"0102";
+  favourite @31 :Child = (code = 9, name = "nine");
 
   struct Child {
     code @0 :UInt32;

@@ -266,6 +266,44 @@ static int cmd_read(const char *req, const char *msg) {
         "inactive union arm rejected");
   capnp_message_free(&em);
 
+  /* A discriminant of 0xffff names no member. It must not match the
+   * fields outside the union. */
+  {
+    uint8_t *a = NULL, *b = NULL;
+    size_t an = 0, bn = 0, k, at = 0;
+    capnp_message_t um = {0};
+    capnp_ptr_t uroot;
+    CHECK(capnp_dyn_decode_text(d, "Conform", "()", 2, &a, &an) == CAPNP_OK &&
+              capnp_dyn_decode_text(d, "Conform", "(note = \"\")", 11, &b,
+                                    &bn) == CAPNP_OK,
+          "decode union pair");
+    /* Past the first word, which holds the segment size, the data
+     * section comes first, so the first byte that differs is the
+     * discriminant. */
+    for (k = 8; a && b && k < an && k < bn; k++)
+      if (a[k] != b[k]) {
+        at = k & ~(size_t)1;
+        break;
+      }
+    CHECK(at > 0, "find discriminant");
+    if (at > 0) {
+      a[at] = 0xff;
+      a[at + 1] = 0xff;
+      CHECK(capnp_message_from_flat(&um, a, an) == CAPNP_OK &&
+                capnp_root(&um, &uroot) == CAPNP_OK,
+            "open 0xffff union");
+      wname = NULL;
+      CHECK(capnp_dyn_which(d, &uroot, "Conform", &wname) == CAPNP_ERR_KIND,
+            "0xffff names no member");
+      CHECK(capnp_dyn_get_bool(d, &uroot, "Conform", "flag", &flag) ==
+                CAPNP_OK,
+            "non-union field beside 0xffff");
+      capnp_message_free(&um);
+    }
+    free(a);
+    free(b);
+  }
+
   capnp_message_free(&m);
   capnp_dyn_free(d);
   return harness_finish();
@@ -378,6 +416,86 @@ static int cmd_edges(const char *conform_req, const char *parity_req) {
         "Parity lI32 list default [9, 8]");
   capnp_message_free(&m);
 
+  /* 3b. DynamicStruct::Reader::get reads Text at any depth, throws on a
+   * corrupt pointer and on a pointer of the wrong kind. */
+  {
+    static const char in[] = "(vText = \"hello\", vStruct = (x = 1))";
+    uint8_t *buf = NULL;
+    size_t blen = 0;
+    uint16_t i, ti = 0xffff, si = 0xffff;
+    size_t base;
+    capnp_ptr_t q;
+    CHECK(capnp_dyn_decode_text(dp, "Parity", in, sizeof in - 1, &buf,
+                                &blen) == CAPNP_OK,
+          "decode vText hello");
+    CHECK(capnp_message_view_flat(&m, buf, blen) == CAPNP_OK, "view hello");
+    m.depth_limit = 1;
+    CHECK(capnp_root(&m, &root) == CAPNP_OK && root.depth_left == 0,
+          "root at depth_left 0");
+    CHECK(capnp_dyn_get_text(dp, &root, "Parity", "vText", &txt, &tlen) ==
+              CAPNP_OK,
+          "vText readable at depth_left 0");
+    CHECK_STREQ(txt, tlen, "hello", "vText at depth_left 0 is hello");
+    CHECK(capnp_dyn_get_ptr(dp, &root, "Parity", "vText", &q) == CAPNP_OK &&
+              q.kind == CAPNP_PK_LIST && q.count == 6,
+          "vText pointer readable at depth_left 0");
+    CHECK(capnp_dyn_get_ptr(dp, &root, "Parity", "vStruct", &q) ==
+              CAPNP_ERR_DEPTH,
+          "vStruct at depth_left 0 is too deeply nested");
+    m.depth_limit = CAPNP_DEFAULT_DEPTH_LIMIT;
+    CHECK(capnp_root(&m, &root) == CAPNP_OK, "root again");
+    for (i = 0; i < root.pwords; i++) {
+      const char *t = NULL;
+      size_t tl = 0;
+      if (capnp_get_text(&root, i, &t, &tl) == CAPNP_OK && tl == 5 &&
+          memcmp(t, "hello", 5) == 0)
+        ti = i;
+      if (capnp_getp(&root, i, &q) == CAPNP_OK && q.kind == CAPNP_PK_STRUCT)
+        si = i;
+    }
+    CHECK(ti != 0xffff && si != 0xffff, "found vText and vStruct slots");
+    base = (size_t)(m.segs[0].data - buf) +
+           (root.word + root.dwords) * CAPNP_WORD_BYTES;
+    {
+      uint8_t saved[8];
+      memcpy(saved, buf + base + ti * 8u, 8);
+      /* Swap the two pointers' kinds: struct where Text is expected. */
+      memcpy(buf + base + ti * 8u, buf + base + si * 8u, 8);
+      CHECK(capnp_dyn_get_text(dp, &root, "Parity", "vText", &txt, &tlen) ==
+                CAPNP_ERR_KIND,
+            "struct pointer in vText fails");
+      CHECK(capnp_dyn_get_ptr(dp, &root, "Parity", "vText", &q) ==
+                CAPNP_ERR_KIND,
+            "struct pointer read as vText pointer fails");
+      {
+        /* The Text pointer moved to the vStruct slot, re-aimed at the
+         * same bytes. */
+        uint64_t w = capnp_load_le64(saved);
+        int32_t off = (int32_t)(uint32_t)w >> 2;
+        off -= (int32_t)si - (int32_t)ti;
+        w = (w & 0xffffffff00000003ull) | (((uint64_t)(uint32_t)off << 2) &
+                                           0xfffffffcull);
+        capnp_store_le64(buf + base + si * 8u, w);
+      }
+      CHECK(capnp_dyn_get_ptr(dp, &root, "Parity", "vStruct", &q) ==
+                CAPNP_ERR_KIND,
+            "list pointer read as vStruct fails");
+      /* Out-of-bounds list offset. */
+      memcpy(buf + base + ti * 8u, saved, 8);
+      capnp_store_le64(buf + base + ti * 8u,
+                       (capnp_load_le64(saved) & 0xffffffff00000003ull) |
+                           (0x100000ull << 2));
+      CHECK(capnp_dyn_get_text(dp, &root, "Parity", "vText", &txt, &tlen) ==
+                CAPNP_ERR_BOUNDS,
+            "out-of-bounds vText fails");
+      CHECK(capnp_dyn_get_ptr(dp, &root, "Parity", "vText", &q) ==
+                CAPNP_ERR_BOUNDS,
+            "out-of-bounds vText pointer fails");
+    }
+    capnp_message_free(&m);
+    free(buf);
+  }
+
   /* 4. Unknown enum ordinal in JSON and text */
   {
     const char *e_in = "{\"vEnum\": 99, \"lEnum\": [\"emerald\", 77]}";
@@ -409,6 +527,40 @@ static int cmd_edges(const char *conform_req, const char *parity_req) {
   }
   capnp_message_free(&m);
 
+  /* 4b. base64 and hex strings decode as `capnp convert` does: stray
+   * characters skipped, bad hex digits read as 0, odd tails dropped. */
+  {
+    static const struct {
+      const char *in, *want;
+    } lenient[] = {
+        {"{\"b64Data\":\"not!base64!\"}", "\"b64Data\":\"notbase6\""},
+        {"{\"hexData\":\"123\"}", "\"hexData\":\"12\""},
+        {"{\"hexData\":\"12zz\"}", "\"hexData\":\"1200\""},
+    };
+    size_t k;
+    for (k = 0; k < sizeof(lenient) / sizeof(lenient[0]); k++) {
+      char *jout = NULL;
+      size_t jlen = 0;
+      capnp_message_t lm = {0};
+      capnp_ptr_t lroot;
+      msg = NULL;
+      CHECK(capnp_dyn_decode_json(dp, "Parity", lenient[k].in,
+                                  strlen(lenient[k].in), &msg,
+                                  &mn) == CAPNP_OK,
+            lenient[k].in);
+      if (msg && capnp_message_from_flat(&lm, msg, mn) == CAPNP_OK &&
+          capnp_root(&lm, &lroot) == CAPNP_OK &&
+          capnp_dyn_encode_json_short(dp, "Parity", &lroot, &jout, &jlen) ==
+              CAPNP_OK)
+        CHECK(strstr(jout, lenient[k].want) != NULL, lenient[k].want);
+      else
+        CHECK(0, lenient[k].in);
+      free(jout);
+      free(msg);
+      capnp_message_free(&lm);
+    }
+  }
+
   /* 5. Strict JSON grammar and trailing-token rejection + error-path leak
    * check (under ASan/LSan) */
   {
@@ -430,9 +582,6 @@ static int cmd_edges(const char *conform_req, const char *parity_req) {
         "{\"vU64\":\"18446744073709551616\"}",
         "{\"vI64\":\"9223372036854775808\"}",
         "{\"vI64\":\"177a\"}",
-        "{\"b64Data\":\"not!base64!\"}",
-        "{\"hexData\":\"123\"}",
-        "{\"hexData\":\"12zz\"}",
         "{\"vText\":\"unterminated",
     };
     const char *bad_text[] = {

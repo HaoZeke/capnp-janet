@@ -74,6 +74,27 @@ static void flush_wire(wire_t *w)
   }
 }
 
+static int frame_tag(const wire_t *w, int i)
+{
+  capnp_message_t m = {0};
+  capnp_ptr_t root;
+  int tag = -1;
+  if (i >= w->n || capnp_message_from_flat(&m, w->data[i], w->len[i]) != CAPNP_OK)
+    return -1;
+  if (capnp_root(&m, &root) == CAPNP_OK)
+    tag = capnp_get_u16(&root, 0, 0);
+  capnp_message_free(&m);
+  return tag;
+}
+
+static void drop_wire(wire_t *w)
+{
+  int i;
+  for (i = 0; i < w->n; i++)
+    free(w->data[i]);
+  w->n = 0;
+}
+
 /* Answers with its own mark, so a call shows which object it reached. */
 typedef struct marked {
   int calls;
@@ -216,6 +237,12 @@ int main(void)
   /* 2. Alice tells Carol where to go. Carol records the introduction
    *    rather than dialling: reaching Bob is the network's job, and here
    *    the connection already exists. */
+  /* The call below addresses Carol's export 0, which needs Alice to have
+   * bootstrapped Carol: rpc.c++ aborts a call to any other id. */
+  q = capnp_rpc_send_bootstrap(&alice_to_carol);
+  flush_wire(&a2c);
+  flush_wire(&c2a);
+  CHECK(capnp_rpc_is_answered(&alice_to_carol, q), "Alice bootstrapped Carol");
   tell_where_to_go(&alice_to_carol, &carol_to_alice, 90, "10.0.0.1", 5000, nonce, 7);
   CHECK(capnp_rpc_pending_introductions(&carol_to_alice, learned, 4) == 1,
         "introduction recorded");
@@ -266,12 +293,15 @@ int main(void)
   CHECK(sidecar.calls == 0, "and not the sidecar");
   CHECK(capnp_rpc_is_answered(&carol_to_bob, q), "the call was answered");
 
-  /* The direct Alice-to-Carol injection queues Carol's Return and the vine
-   * Release without passing through the wire pump above. Deliver both so
-   * the transport observes the complete exchange and owns no frames. */
+  /* Alice wrote question 90 and vine 7 by hand, so her tables have
+   * neither, and rpc.c++ aborts on a Return or Release naming them. Check
+   * Carol's two replies and drop them. */
   CHECK(c2a.n == 2, "return and vine release queued for Alice");
-  flush_wire(&c2a);
+  CHECK(frame_tag(&c2a, 0) == CAPNP_RPC_MSG_RETURN, "Carol returned question 90");
+  CHECK(frame_tag(&c2a, 1) == CAPNP_RPC_MSG_RELEASE, "Carol released the vine");
+  drop_wire(&c2a);
   CHECK(c2a.n == 0, "Carol-to-Alice transport drained");
+  CHECK(a2c.n == 0, "Alice-to-Carol transport drained");
 
   if (g_failures != 0) {
     fprintf(stderr, "%d failure(s)\n", g_failures);

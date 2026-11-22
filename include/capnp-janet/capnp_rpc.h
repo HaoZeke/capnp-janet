@@ -41,6 +41,8 @@ extern "C" {
 /* Long enough for a hostname; a longer one is refused, not truncated. */
 #define CAPNP_RPC_MAX_HOST 64
 #define CAPNP_RPC_MAX_JOINS 8
+/* Capabilities one method may put in its results. */
+#define CAPNP_RPC_MAX_RESULT_CAPS 16
 /* Outstanding unacknowledged calls a stream may hold. */
 #define CAPNP_RPC_STREAM_MAX_WINDOW 64
 #define CAPNP_RPC_MAX_JOIN_PARTS 16
@@ -66,7 +68,10 @@ struct capnp_rpc_conn;
 /* Handle one call on an exported capability. `results` is the empty
  * content pointer in the return Payload. Allocate the result struct
  * with capnp_builder_struct at whatever size the method returns, then
- * fill that body. Return 0 to answer, non-zero for an exception. */
+ * fill that body. Return 0 to answer, non-zero for an exception.
+ * Capabilities the caller put in the params are released as rpc.c++
+ * releases them: after a Return with no capability in it, after an
+ * exception, and otherwise when the caller finishes the call. */
 typedef int (*capnp_rpc_dispatch_fn)(void *server, uint64_t interface_id,
                                      uint16_t method_id,
                                      const capnp_ptr_t *params,
@@ -82,6 +87,9 @@ typedef int (*capnp_rpc_send_fn)(void *ctx, const uint8_t *data, size_t len);
  * still be here when the pipelined call arrives.
  */
 typedef struct capnp_rpc_answer {
+  /* Nonzero while in use. 2 marks a call that asked for
+   * sendResultsTo.yourself: the Return in `frame` waits for a
+   * takeFromOtherQuestion to collect it. */
   int used;
   uint32_t question_id;
   uint8_t frame[CAPNP_RPC_MAX_ANSWER_BYTES];
@@ -95,8 +103,13 @@ typedef struct capnp_rpc_export {
   capnp_rpc_dispatch_fn dispatch;
 } capnp_rpc_export_t;
 
-/* A question this vat asked, from send until its Return arrives. */
+/* A question this vat asked, from send until both its Return has arrived
+ * and the caller has finished it, as in rpc.c++. */
 typedef struct capnp_rpc_question {
+  /* Nonzero while in use. Bit 2 marks a call sent with
+   * sendResultsTo.yourself, whose Return must be resultsSentElsewhere;
+   * bit 4 marks one finished before its Return; bit 8 one whose Return
+   * said `noFinishNeeded`. */
   int used;
   uint32_t question_id;
   int answered;
@@ -212,6 +225,13 @@ typedef struct capnp_rpc_conn {
 
 CAPNP_JANET_EXPORT void capnp_rpc_init(capnp_rpc_conn_t *c, capnp_rpc_send_fn send,
                     void *send_ctx);
+/* Free the stored answers and replies longer than
+ * CAPNP_RPC_MAX_ANSWER_BYTES, which live on the heap. Call before the
+ * connection goes away or is passed to capnp_rpc_init again. */
+CAPNP_JANET_EXPORT void capnp_rpc_free(capnp_rpc_conn_t *c);
+/* Without a bootstrap, a Bootstrap is answered as capnp-C++ answers it:
+ * a new promise export, then a Resolve breaking it with "This vat does
+ * not expose any public/bootstrap interfaces." */
 CAPNP_JANET_EXPORT void capnp_rpc_set_bootstrap(capnp_rpc_conn_t *c, void *server,
                              capnp_rpc_dispatch_fn dispatch);
 
@@ -219,8 +239,31 @@ CAPNP_JANET_EXPORT void capnp_rpc_set_bootstrap(capnp_rpc_conn_t *c, void *serve
 CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
                      capnp_rpc_dispatch_fn dispatch);
 
-/* Handle one framed message. 0 when handled, non-zero on a bad frame. */
+/* Handle one framed message. 0 when handled, non-zero on a bad frame.
+ * CAPNP_ERR_IO means the peer sent Abort: every unanswered question
+ * fails, and the Abort is answered once with a remote exception of the
+ * same type unless this vat has sent an Abort of its own. A reason that
+ * already starts with the remote prefix is echoed unchanged.
+ * CAPNP_ERR_KIND also covers an
+ * Unimplemented reply to anything but Resolve, which ends the
+ * connection with an Abort carrying the rpc.c++ reason.
+ * A Return that rpc.c++ refuses, including one naming no question we
+ * hold, also ends it with CAPNP_ERR_KIND, after an Abort carrying the
+ * rpc.c++ reason. So does a Call or Bootstrap rpc.c++ refuses: one
+ * naming an export we lack, an unknown target or sendResultsTo arm, or
+ * a question id still in use. So does a Release of an export we lack, or
+ * of more references than it has, and a Disembargo loopback: this vat
+ * exports no promise for one to name. A Disembargo with any other
+ * context aborts too, unless it is a provide naming a Provide this vat
+ * holds, which lifts that Accept's embargo. So does a Resolve naming an
+ * import that a Return or a running call's params handed us as
+ * senderHosted, and that is not yet released. */
 CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
+/* Reports that no complete frame is waiting. rpc.c++ checks the target
+ * of a senderLoopback Disembargo once its event loop is idle, so after
+ * the first call that abort waits for the next call here, which sends
+ * it and returns CAPNP_ERR_KIND. capnp_rpc_recv_fd calls this itself. */
+CAPNP_JANET_EXPORT int capnp_rpc_idle(capnp_rpc_conn_t *c);
 
 /* --- client side -------------------------------------------------- */
 
@@ -243,10 +286,85 @@ CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_call(capnp_rpc_conn_t *c, uint32_t im
                              uint16_t params_dwords, uint16_t params_pwords,
                              capnp_rpc_fill_fn fill, void *fill_ctx);
 
-/* Tell the peer we are done with an answer, and drop our copy. */
+/* A capability a call passes in its params: one of this vat's exports,
+ * sent as senderHosted, or one of the peer's, sent back to it as
+ * receiverHosted. A capability pointer in the params names its index in
+ * the call's `caps`. */
+enum { CAPNP_RPC_CAP_EXPORT = 0, CAPNP_RPC_CAP_IMPORT = 1 };
+typedef struct capnp_rpc_cap_ref {
+  int kind;
+  uint32_t id;
+} capnp_rpc_cap_ref_t;
+
+/* From inside a dispatch function: list `cap` in the capTable of the
+ * results being built, and return its index for capnp_builder_set_cap.
+ * Returns -1 outside a dispatch, for an export this connection lacks,
+ * or past CAPNP_RPC_MAX_RESULT_CAPS. Each export sent takes a reference
+ * the peer gives back with Release or Finish.releaseResultCaps. */
+CAPNP_JANET_EXPORT int capnp_rpc_result_cap(const capnp_rpc_cap_ref_t *cap);
+
+/* Exception.type values. */
+enum {
+  CAPNP_RPC_EXCEPTION_FAILED = 0,
+  CAPNP_RPC_EXCEPTION_OVERLOADED = 1,
+  CAPNP_RPC_EXCEPTION_DISCONNECTED = 2,
+  CAPNP_RPC_EXCEPTION_UNIMPLEMENTED = 3
+};
+
+/* From inside a dispatch function that then returns non-zero: answer the
+ * call with an exception of `type` carrying `reason`, which is copied.
+ * Without it the exception is "method failed" of type failed. Returns
+ * -1 outside a dispatch. */
+CAPNP_JANET_EXPORT int capnp_rpc_fail(int type, const char *reason);
+
+/* capnp_rpc_fail with the exception capnp-C++ raises for a method its
+ * server does not implement: type unimplemented, naming the interface
+ * as `interface_name` (for example "adder.capnp:Adder"), its type id,
+ * and the method. */
+CAPNP_JANET_EXPORT int capnp_rpc_unimplemented(const char *interface_name,
+                                               uint64_t interface_id,
+                                               uint16_t method_id);
+
+/* A call, addressed to an imported capability or, for promise
+ * pipelining, to the capability that question `target`'s results hold
+ * at the end of `transform`. Each transform entry is a getPointerField
+ * step, the pointer index to follow. The question must still be ours:
+ * asked and not yet finished. */
+typedef struct capnp_rpc_call {
+  int promised;
+  uint32_t target;
+  const uint16_t *transform;
+  uint32_t transform_len;
+  uint64_t interface_id;
+  uint16_t method_id;
+  uint16_t params_dwords;
+  uint16_t params_pwords;
+  capnp_rpc_fill_fn fill;
+  void *fill_ctx;
+  const capnp_rpc_cap_ref_t *caps;
+  uint32_t ncaps;
+  /* sendResultsTo.yourself: the peer keeps the results for a later
+   * Return.takeFromOtherQuestion and answers resultsSentElsewhere. */
+  int results_to_yourself;
+} capnp_rpc_call_t;
+
+/* Send `call`. Returns the questionId, or (uint32_t)-1 when the table
+ * is full, the promised question or an exported cap is unknown, or
+ * `fill` failed. Each export sent gains a reference, which the peer
+ * gives back with Release. */
+CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_call_ex(capnp_rpc_conn_t *c,
+                                                   const capnp_rpc_call_t *call);
+
+/* Tell the peer we are done with an answer, and drop our copy. After the
+ * Return has arrived the result capabilities stay imported
+ * (releaseResultCaps = false); before it, the peer releases them, and
+ * the question waits in the table for that Return. A Return that said
+ * `noFinishNeeded` only drops the copy, as rpc.c++ sends nothing then. */
 CAPNP_JANET_EXPORT int capnp_rpc_send_finish(capnp_rpc_conn_t *c, uint32_t question_id);
 
-/* Drop `count` references to an import. */
+/* Drop `count` references to an import. Each descriptor of a Return
+ * naming it counts one; once all are dropped a Resolve naming it is no
+ * longer refused. */
 CAPNP_JANET_EXPORT int capnp_rpc_send_release(capnp_rpc_conn_t *c, uint32_t import_id,
                            uint32_t count);
 
@@ -261,6 +379,14 @@ CAPNP_JANET_EXPORT int capnp_rpc_is_failed(capnp_rpc_conn_t *c, uint32_t questio
  * the answer's capTable; calling it needs the id the descriptor beside
  * it names, which is what this reads. */
 CAPNP_JANET_EXPORT int capnp_rpc_answer_cap_id(capnp_rpc_conn_t *c, uint32_t question_id);
+
+/* Entry `index` of an answer's capTable, the index a capability pointer
+ * in its results names: an import for a capability the peer hosts, or
+ * an export of ours the peer handed back. Returns 0 and fills `out`, or
+ * -1 when there is no such entry. */
+CAPNP_JANET_EXPORT int capnp_rpc_answer_cap(capnp_rpc_conn_t *c, uint32_t question_id,
+                                            uint32_t index,
+                                            capnp_rpc_cap_ref_t *out);
 
 CAPNP_JANET_EXPORT int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
                              capnp_message_t *msg_out, capnp_ptr_t *out);

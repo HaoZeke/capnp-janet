@@ -23,6 +23,10 @@ CAPNP_JANET_EXPORT int capnp_accept_fd(int listen_fd, int *fd);
 
 CAPNP_JANET_EXPORT int capnp_write_all(int fd, const uint8_t *data, size_t len);
 CAPNP_JANET_EXPORT int capnp_read_frame(int fd, uint8_t *buf, size_t cap, size_t *out_len);
+/* Reads one frame into a buffer the caller frees. As in C++ RPC, the
+ * frame, segment table included, may have CAPNP_DEFAULT_TRAVERSAL_WORDS
+ * words at most. */
+CAPNP_JANET_EXPORT int capnp_read_frame_alloc(int fd, uint8_t **out, size_t *out_len);
 
 /* Janet buffers count bytes in an int32_t. A longer frame cannot be
  * copied into one. */
@@ -39,6 +43,11 @@ CAPNP_JANET_EXPORT int capnp_link_dial_tcp(capnp_link_t *link, const char *host,
 CAPNP_JANET_EXPORT int capnp_link_dial_unix(capnp_link_t *link, const char *path);
 CAPNP_JANET_EXPORT int capnp_link_accept(int listen_fd, capnp_link_t *link);
 CAPNP_JANET_EXPORT int capnp_link_recv(capnp_link_t *link);
+/* Reads one frame from `fd` for `conn` and handles it, buffering what
+ * arrives early as C++ BufferedMessageStream does. A stream that ends,
+ * or a frame C++ would refuse, is answered with the Abort rpc.c++ sends,
+ * and the call fails. capnp_link_recv is this on the link's socket. */
+CAPNP_JANET_EXPORT int capnp_rpc_recv_fd(capnp_rpc_conn_t *conn, int fd);
 CAPNP_JANET_EXPORT void capnp_link_close(capnp_link_t *link);
 
 #endif

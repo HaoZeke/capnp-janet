@@ -1,0 +1,535 @@
+#!/usr/bin/env bash
+# capnp-eval convert against `capnp convert` on hand-built wire messages.
+# Exit status has to agree; when both succeed the output has to match.
+set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+BUILD="${CAPNP_JANET_BUILD:-$ROOT/build}"
+BIN="$BUILD/capnp-eval"
+if [[ ! -x "$BIN" ]] || ! command -v capnp >/dev/null; then
+  echo "SKIP: needs capnp-eval and capnp" >&2
+  exit 77
+fi
+INC="$(dirname "$(dirname "$(command -v capnp)")")/include"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+PARITY="$ROOT/schema/parity.capnp"
+HOLDER="$ROOT/test/fixtures/holder.capnp"
+NODE="$ROOT/test/fixtures/node.capnp"
+fails=0
+
+# words HEX... -> single-segment stream message on stdout
+words() {
+  python3 - "$@" <<'EOF'
+import struct, sys
+w = [int(x, 16) for x in sys.argv[1:]]
+sys.stdout.buffer.write(struct.pack("<II", 0, len(w)))
+sys.stdout.buffer.write(b"".join(struct.pack("<Q", x) for x in w))
+EOF
+}
+
+# compare NAME SCHEMA ROOT FORMATS: converts $TMP/in.bin from $in_fmt with
+# "${extra[@]}". With full=1 the output has to match on failure too.
+extra=()
+in_fmt=binary
+full=0
+compare() {
+  local name="$1" schema="$2" root="$3" fmts="$4" fmt ref_rc our_rc
+  for fmt in $fmts; do
+    ref_rc=0
+    our_rc=0
+    capnp convert -I"$INC" "$in_fmt:$fmt" "${extra[@]}" "$schema" "$root" \
+      <"$TMP/in.bin" >"$TMP/ref.out" 2>/dev/null || ref_rc=$?
+    "$BIN" convert -I"$INC" "$in_fmt:$fmt" "${extra[@]}" "$schema" "$root" \
+      <"$TMP/in.bin" >"$TMP/our.out" 2>/dev/null || our_rc=$?
+    if [[ $((ref_rc == 0)) -ne $((our_rc == 0)) ]]; then
+      echo "FAIL $name $fmt: status capnp=$ref_rc capnp-eval=$our_rc" >&2
+      fails=$((fails + 1))
+    elif [[ $ref_rc -eq 0 || $full -eq 1 ]] &&
+      ! cmp -s "$TMP/ref.out" "$TMP/our.out"; then
+      echo "FAIL $name $fmt: output differs" >&2
+      fails=$((fails + 1))
+    fi
+  done
+}
+
+# check_framed NAME SCHEMA ROOT FORMATS -- HEX...: HEX starts with the
+# segment table
+check_framed() {
+  local name="$1" schema="$2" root="$3" fmts="$4"
+  shift 5
+  python3 -c 'import struct, sys
+sys.stdout.buffer.write(b"".join(struct.pack("<Q", int(x, 16)) for x in sys.argv[1:]))' \
+    "$@" >"$TMP/in.bin"
+  compare "$name" "$schema" "$root" "$fmts"
+}
+
+# check NAME SCHEMA ROOT FORMATS -- HEX...
+check() {
+  local name="$1" schema="$2" root="$3" fmts="$4"
+  shift 5
+  words "$@" >"$TMP/in.bin"
+  compare "$name" "$schema" "$root" "$fmts"
+}
+
+# check_text NAME SCHEMA ROOT FORMATS TEXT: input encoded by `capnp encode`
+check_text() {
+  printf '%s' "$5" | capnp encode -I"$INC" "$2" "$3" >"$TMP/in.bin"
+  compare "$1" "$2" "$3" "$4"
+}
+
+# Corrupt pointers read as defaults in C++, which prints the result and
+# then fails the conversion. Reading any capability fails at once there.
+full=1
+ALL="text json binary packed flat flat-packed canonical"
+check text-oob "$PARITY" Parity "$ALL" -- \
+  0001000000000000 0000001a00000029
+check struct-as-text "$PARITY" Parity "$ALL" -- \
+  0001000000000000 0000000100000000 0
+check text-no-nul "$PARITY" Parity "$ALL" -- \
+  0001000000000000 0000001200000001 0000000000006261
+check list-as-struct "$PARITY" Parity "$ALL" -- \
+  0003000000000000 0 0 0000000a00000001 0000000000000007
+check bytes-as-int32-list "$PARITY" Parity "text json" -- \
+  0008000000000000 0 0 0 0 0 0 0 0000000a00000001 0000000000000007
+check bits-as-uint8-list "$PARITY" Parity "text json" -- \
+  000a000000000000 0 0 0 0 0 0 0 0 0 0000000900000001 0000000000000001
+check ptr-structs-as-int16-list "$PARITY" Parity "text json" -- \
+  0007000000000000 0 0 0 0 0 0 0000000f00000001 0001000000000004 0
+check struct-as-cap "$HOLDER" Holder "$ALL" -- \
+  0001000100000000 0000000000000007 0000000100000000 0
+check cap "$HOLDER" Holder "$ALL" -- \
+  0001000100000000 0000000000000007 0000000000000003
+check oob-list-root "$PARITY" Parity "$ALL" -- 0000000a00000005
+
+# parity_ptr SLOT PTR CONTENT...: a Parity root with every field zero but
+# pointer SLOT, followed by CONTENT. The root is 1 + 10 + 32 words.
+parity_ptr() {
+  local slot="$1" ptr="$2" i
+  shift 2
+  echo 0020000a00000000
+  for ((i = 0; i < 42; i++)); do
+    if ((i == 10 + slot)); then echo "$ptr"; else echo 0; fi
+  done
+  echo "$@"
+}
+
+# Wider list elements: low bytes per element, bools by bit index from the
+# start, and a void list read as empty structs. Offsets point past the root.
+check u8-from-int16-list "$PARITY" Parity "text json" -- \
+  $(parity_ptr 9 0000001300000059 0000000003040102)
+check bool-from-byte-list "$PARITY" Parity "text json" -- \
+  $(parity_ptr 4 000000120000006d 0000000000000203)
+check bool-from-int64-list "$PARITY" Parity "text json" -- \
+  $(parity_ptr 4 000000150000006d 0000000000000006 0)
+check structs-from-void-list "$PARITY" Parity "text json" -- \
+  $(parity_ptr 18 0000001000000035)
+# A pointer field is absent when its far pointer or kind cannot be
+# followed. A null or unreadable struct prints its defaults, union
+# member 0 included, and a flattened one does the same in JSON.
+check far-unknown-segment "$PARITY" Parity "text json" -- \
+  $(parity_ptr 8 0000000500000002)
+# An inactive union member is never asked `has`, so its pointer is not
+# followed.
+for extra in "" "--short"; do
+  extra=($extra)
+  check far-in-inactive-member "$PARITY" Parity "text json" -- \
+    $(parity_ptr 31 0000000500000002)
+done
+extra=()
+check other-not-cap "$PARITY" Parity "text json" -- \
+  $(parity_ptr 8 0000000000000007)
+check struct-oob "$PARITY" Parity "text json" -- \
+  $(parity_ptr 26 000100010000fff0)
+check flatten-null "$PARITY" Parity "text json" -- \
+  $(parity_ptr 26 0001000100000014 0000000100000000 0)
+# canonicalize copies a corrupt last pointer as null, which leaves the
+# copy untruncated and fails its isCanonical check.
+full=1
+check oob-last-pointer "$PARITY" Parity "$ALL" -- \
+  $(parity_ptr 31 000000017ffffff0)
+check oob-middle-pointer "$PARITY" Parity "$ALL" -- \
+  $(parity_ptr 3 000000017ffffff0)
+check oob-then-text "$PARITY" Parity "$ALL" -- \
+  0020000a00000000 $(printf '0 %.0s' {1..13}) 000000017ffffff0 \
+  0000001a0000006d $(printf '0 %.0s' {1..27}) 0000000000006261
+full=0
+
+# A double-far landing pad only has to be a far pointer.
+check_framed pad-with-double-bit "$PARITY" Parity "text json binary" -- \
+  0000000100000001 3 0000000100000006 0000000100000016 0000000100000014 2a
+check_framed tag-with-offset "$PARITY" Parity "text json binary" -- \
+  0000000100000001 3 0000000100000006 0000000100000012 0000000100000014 2a
+check_framed pad-not-far "$PARITY" Parity "text json binary" -- \
+  0000000100000001 3 0000000100000006 0000000100000010 0000000100000014 2a
+
+# Bit 31 of a composite list tag word is ignored, as C++ masks to 29 bits.
+check composite-tag-bit31 "$PARITY" Parity "text json binary canonical" -- \
+  $(parity_ptr 18 0000000f00000035 0000000180000004 0)
+
+# A null root reads as an empty struct, and so does any other non-struct
+# root after a recoverable error.
+check null-root "$PARITY" Parity "$ALL" -- 0
+# isCanonical accepts a lone null root word, ignores bytes past the last
+# whole word, and rejects an empty segment or a null root with more after.
+in_fmt=canonical
+full=1
+for spec in 0000000000000000 000000000000000000 00000000000000000000000000000000 \
+  0000000000000000fcffffff00000000 ""; do
+  python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.argv[1]))' \
+    "$spec" >"$TMP/in.bin"
+  compare "canonical-null-root-${#spec}" "$PARITY" Parity "text flat canonical"
+  extra=(--quiet)
+  compare "canonical-null-root-quiet-${#spec}" "$PARITY" Parity "text flat"
+  extra=()
+done
+in_fmt=binary
+full=0
+# A root union discriminant of 0xffff names no member, so C++ prints
+# the non-union fields and no union.
+check union-ffff "$PARITY" Parity "$ALL" -- \
+  0020000a00000000 0 0 0 0 0 0 0 0 0000ffff00000000 $(printf '0 %.0s' {1..33})
+check list-root "$PARITY" Parity "$ALL" -- \
+  0000000100000001 0000000000000005
+# JsonCodec copies a `Json.Value` whole before it prints it, so a corrupt
+# pointer its active member never reads still fails the JSON run.
+for extra in "" "--short"; do
+  extra=($extra)
+  check json-value-unread-oob "$PARITY" Parity "$ALL" -- \
+    $(parity_ptr 27 0001000200000010 2 3ff0000000000000 000000017ffffff0)
+  check json-value-nested-unread-oob "$PARITY" Parity "$ALL" -- \
+    $(parity_ptr 27 0001000200000010 4 0 0000001f00000001 \
+      0001000200000004 2 0 000000017ffffff0)
+done
+extra=()
+full=0
+
+# Binary output is a copy into C++'s MallocMessageBuilder: fixed-size
+# segments under --segment-size, growing ones from 1024 words otherwise.
+SMALL='(vText = "hello", lI32 = [1,2,3], vStruct = (x = 1, y = 2), lText = ["a","bb"], lBool = [true, false, true])'
+for ss in 1 2 3 5 8 16 64; do
+  extra=("--segment-size=$ss")
+  check_text "segment-size-$ss" "$PARITY" Parity "binary packed" "$SMALL"
+done
+extra=()
+BIG="(vData = 0x\"$(printf 'ab%.0s' $(seq 5000))\", lU16 = [$(seq -s, 1 3000)], lText = [\"x\", \"y\"])"
+check_text big-message "$PARITY" Parity "binary packed" "$BIG"
+# MallocMessageBuilder has no segment count limit: 603 segments here.
+MANY="(lText = [$(seq -s, -f '"s%g"' 0 599)])"
+extra=("--segment-size=1")
+check_text many-segments "$PARITY" Parity "binary packed" "$MANY"
+extra=()
+
+# JSON base64 and hex strings decode as kj does with its error flag
+# ignored: stray characters and padding skipped, bad hex digits read as 0.
+in_fmt=json
+i=0
+for v in '"QU"' '"Q"' '"QU=JD"' '"QU!JD"' '"=QUJD"' '"QUJDRA="' '"-_"'; do
+  printf '{"b64Data": %s}' "$v" >"$TMP/in.bin"
+  compare "json-base64-$((i++))" "$PARITY" Parity "text binary"
+done
+for v in '"0aF"' '"zz41"' '"4g"' '"g1"'; do
+  printf '{"hexData": %s}' "$v" >"$TMP/in.bin"
+  compare "json-hex-$((i++))" "$PARITY" Parity "text binary"
+done
+# JsonCodec reads any JSON value as Void.
+for v in '{"vVoid": {}}' '{"vVoid": 0}' '{"vVoid": "x"}' '{"vVoid": [1]}' \
+  '{"lVoid": [true, {}, null, "y"]}' '{"uQuiet": 5}' '{"vVoid": false}'; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "json-void-$((i++))" "$PARITY" Parity "text binary"
+done
+
+# JsonCodec recovers from a number out of range, a bad numeric string
+# and a non-array list: it writes what kj substitutes, prints the
+# message and fails the run. Enum numbers are cast without a check, and
+# a number with an empty exponent reads as 0.
+# Casting a double outside the target type is up to the CPU (x86 wraps,
+# s390x saturates), so these compare against C++ built for the same host.
+full=1
+for v in '{"vU8": 300}' '{"vI8": -129}' '{"vI32": 1.5}' '{"vI32": "x"}' \
+  '{"vI16": "70000"}' '{"vI64": 9223372036854775808}' '{"vI64": -1e19}' \
+  '{"vU64": 18446744073709551616}' '{"vU64": "-1"}' '{"vU32": -0.5}' \
+  '{"vF32": ""}' '{"vF64": " 1"}' '{"vF64": "1 "}' '{"lI32": 5}' \
+  '{"lStruct": null}' '{"lI32": [1.5, 3e10, "x"]}' '{"lF64": ["x", null]}' \
+  '{"vEnum": -1}' '{"vEnum": 70000}' '{"vEnum": 1e10}' '{"vEnum": 1.5}' \
+  '{"vI64": 9223372036854775807}' '{"vU64": 18446744073709551615}' \
+  '{"lI64": [9223372036854775808, -1e19, 7]}' \
+  '{"lU64": [18446744073709551616, 3e19, 7]}' \
+  '{"vEnum": 4294967296}' '{"vEnum": 2147483648}' '{"vEnum": -2147483649}' \
+  '{"lEnum": [-1, 4294967296, 1e10, 1]}' \
+  '{"vU8": 300, "vI8": 3}' '{"vI32": "x"}{"vI32": 7}' '{"lU8": [256]}' \
+  '{"vI32": true}' '{"vText": 5}' '{"vStruct": 5}' '{"lData": [[1.5]]}' \
+  '{"vI16": -1e, "vI8": 3}' '{"vF64": 1e+}' '{"lF64": [1e, 2E-, 1.]}'; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "json-recover-$((i++))" "$PARITY" Parity "text binary json"
+done
+
+# Integer fields take a JSON number as a double that passed the range
+# check, and C++ casts it. 2^63 and 2^64 pass and cannot be cast, so the
+# result is the CPU's. Infinities, huge values, -0.0 and numeric strings
+# that read as NaN or 0 go through the same path.
+for f in vU64 vI64 vU32 vI32; do
+  for n in 18446744073709551616 3e19 -1 9223372036854775808 1e300 -0.0 \
+    1e999 -1e999 4294967296 2147483648 -2147483649 18446744073709551615 \
+    9223372036854775807 -9223372036854775808 -9223372036854775809 0.5 -0.5 \
+    '"NaN"' '"nan"' '"-nan"' '"inf"' '"1e300"' null; do
+    printf '{"%s": %s}' "$f" "$n" >"$TMP/in.bin"
+    compare "json-int-cast-$((i++))" "$PARITY" Parity "text json"
+  done
+done
+for f in lU64 lI64 lU32 lI32 lEnum; do
+  printf '{"%s": [18446744073709551616, 3e19, -1, 9223372036854775808, 1e300, -0.0, 1e999, -1e999, 4294967296, 2147483648, -2147483649, 18446744073709551615, 9223372036854775807, -9223372036854775808, -9223372036854775809, 0.5, -0.5, 7]}' \
+    "$f" >"$TMP/in.bin"
+  compare "json-int-cast-list-$((i++))" "$PARITY" Parity "text binary json"
+done
+# Enum numbers are cast to uint16 without a range check.
+for n in 0 1 2.5 -1 -1.5 -0.5 65535 65535.5 65536 70000 2147483647.5 \
+  2147483648 -2147483648.5 -2147483649 4294967295.5 4294967296 1e10 -1e10 \
+  1e300 -1e300 1e999 -1e999 -0.0; do
+  printf '{"vEnum": %s}' "$n" >"$TMP/in.bin"
+  compare "json-enum-cast-$((i++))" "$PARITY" Parity "text json"
+done
+
+# The text parser recovers from a bad list item, and ValueTranslator
+# from a bad value: both drop it, print the message and fail the run.
+# Lexer errors, extra tokens and external names fail at once.
+in_fmt=text
+while IFS= read -r v; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-recover-$((i++))" "$PARITY" Parity "text binary json"
+done <<'EOF'
+(vU8 = 300, vI8 = -129, vU64 = -1, vI64 = -9223372036854775809)
+(vI32 = 1.5, vI16 = "x", vF64 = "x", vText = 5, vData = "AB", vI8 = 2)
+(vI32 = kColor)
+(vEnum = void)
+(vEnum = nope)
+(vStruct = (x = 1.5, y = 2), noSuch = nope, vI8 = 3)
+(boxedText = "hi", flatGroup = 5)
+(lI32 = [1, "a", 3], lU8 = [1, 256], lText = ["a", 1], lEnum = [red, 5])
+(lStruct = [(x = 1), 5, "a"], lNested = [[(x = 1)], 5])
+(vU8 = 300)(vI8 = 3)
+(vStruct = (5, y = 2))
+(5)
+(vI8 = 1).foo
+(,)
+(vI8 = 1,,)
+(vI8 = , vI16 = 2)
+(vI8 = 1 2, vI16 = 2)
+(vI8 = 1, vInt8List = [1,,2])
+(= 1)
+(vI8 == 1)
+(vI8 = -, vStruct = (x = 1, @))
+(vI8 = 1, vStruct = (@))
+(vI8 = foo(1))
+(vI8 = .foo)
+(vI8 = import "x")
+(vI8 = 1 (2))
+(nope = foo(1), vI8 = 1)
+(vI8 = 1) x
+(vI8 = 1; vI16 = 2)
+(vI8 = 0x"")
+(vI8 = 10x)
+(vI8 = 08, vI16 = 1e)
+(vI32 = 1.5.3)
+(vData = 0x"0a 1b", vI8 = 0x"0a"x)
+(vF64 = 1e)
+(vF64 = -1e, vF32 = 1e+)
+(vF32 = -1E-, vI8 = 3)
+(vF64 = 1.e)
+(vF64 = 0e)
+(vF64 = -0e, vI32 = 1e, vU8 = -1e)
+(lF64 = [1e, -1e, 2E-, 1.5], lF32 = [1e+, -1e, 3])
+EOF
+# A float with an empty exponent reads as 0 in a Json.Value too.
+JSONV="$INC/capnp/compat/json.capnp"
+for v in '(number = 1e)' '(number = -1e)' \
+  '(array = [(number = 1E-), (number = -0e), (number = 2)])' \
+  '(object = [(name = "a", value = (number = -1.e))])'; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-json-value-$((i++))" "$JSONV" Value "text binary json"
+done
+# A `#` in a string still ends the chunk scan, so this is one
+# application and reads as an empty root.
+printf '(vText = "a#b")\n(vI8 = 2)' >"$TMP/in.bin"
+compare text-recover-chunk "$PARITY" Parity "text binary json"
+
+# Stream input takes at most 511 segments.
+in_fmt=binary
+full=1
+for n in 511 512; do
+  python3 -c 'import struct, sys
+n = int(sys.argv[1])
+hdr = struct.pack("<I", n - 1) + struct.pack("<I", 4) + struct.pack("<I", 1) * (n - 1)
+hdr += b"\0" * (len(hdr) % 8)
+body = struct.pack("<QQQQ", 0x0002000100000000, 7, 0, 0) + b"\0" * 8 * (n - 1)
+open(sys.argv[2], "wb").write(hdr + body)' "$n" "$TMP/in.bin"
+  compare "segments-$n" "$NODE" Node "text binary"
+done
+
+# Streams read as kj reads them: a short read zero-fills, a packed stream
+# that ends inside a word fails at once, and later segments are read only
+# when a pointer reaches them.
+i=0
+for spec in binary:000000000400000000000000010000002a00000000000000 \
+  binary:0000000002000000000000000100000007000000000000000000000003000000 \
+  binary:01000000010000000000000000000000020000000100000000000000 \
+  binary:0100000001000000020000000000000002000000010000000000000001000000 \
+  binary:0100000002000000000000200000000000000000010000000700000000000000 \
+  packed:1001100101 packed:10011001 packed:10011001012a10011001 \
+  flat-packed:1001100101 flat-packed:10011001012a01 \
+  flat-packed:10011001012a00 flat-packed:10011001012a; do
+  in_fmt=${spec%%:*}
+  python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.argv[1]))' \
+    "${spec#*:}" >"$TMP/in.bin"
+  compare "stream-$((i++))" "$PARITY" Parity "text binary"
+done
+full=0
+in_fmt=binary
+
+# The C++ lexer joins adjacent operator characters into one token, so `=-5`
+# is a parse error while `= -5` and `= - 5` are fine.
+in_fmt=text
+i=0
+for v in '(vI32 =-5)' '(vI32 =- 5)' '(vF64 =-inf)' '(vF64 =.5)' '(vI32 =+5)' \
+  '(vF64 = -.5)' '(vI32 = - 5)' '(vI32=#c
+-5)' '(lI32=[1, - 2])' '(vF64 = -inf)'; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-operator-$((i++))" "$PARITY" Parity "text binary"
+done
+
+# The capnp lexer has no single-quoted strings, so the run stops there.
+full=1
+for v in "(vText = 'a')" "(vText = \"a\" 'b')" "(lText = ['x'])" \
+  "(vText = \"it's\") # it's"; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-quote-$((i++))" "$PARITY" Parity "text binary"
+done
+full=0
+
+# kj parses integer literals modulo 2^64.
+for v in '(vU64 = 99999999999999999999)' '(vU64 = 18446744073709551616)' \
+  '(vU64 = 0x1ffffffffffffffff)' '(vU64 = 02777777777777777777777)' \
+  '(vI64 = -99999999999999999999)' "(vU8 = 1$(printf '0%.0s' {1..200}))"; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-integer-$((i++))" "$PARITY" Parity "text binary"
+done
+
+# kj lexes `0x` hex, `0` octal, then decimal integers before floats, and
+# only a lowercase `x` starts hex. `08` is the two tokens `0` and `8`.
+for v in '(vI32 = 08)' '(vF64 = 08.5)' '(vF64 = 09e1)' '(vI32 = 0X1F)' \
+  '(vData = 0X"01")' '(vI32 = 007)' '(vF64 = 00.5)' '(vF64 = 0e5)' \
+  '(vF64 = 1.)' '(vF64 = 1e)' '(vI32 = 0x1F)' '(vI32 = 0x1g)'; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-number-$((i++))" "$PARITY" Parity "text binary"
+done
+
+# Float literals have no length limit in either codec.
+Z=$(printf '0%.0s' {1..130})
+for v in "(vF64 = ${Z}1.5)" "(vF64 = 1.${Z}5)" "(vF32 = 1${Z}e-130)"; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "text-long-float-$((i++))" "$PARITY" Parity "text binary"
+done
+in_fmt=json
+for v in "{\"vF64\": 1.${Z}5}" "{\"vF64\": 1${Z}}" \
+  "{\"vF64\": -0.${Z}${Z}1e300}"; do
+  printf '%s' "$v" >"$TMP/in.bin"
+  compare "json-long-float-$((i++))" "$PARITY" Parity "text binary"
+done
+in_fmt=binary
+
+# `capnp convert` lifts the nesting and traversal limits. A chain of 200
+# structs and nine reads of one 1M-word list both pass the defaults.
+python3 - "$TMP/in.bin" <<'EOF'
+import struct, sys
+d = 200
+w = [0x0002000100000000]
+for i in range(d + 1):
+    w += [7 if i == d else 0, 0x0002000100000004 if i < d else 0, 0]
+out = open(sys.argv[1], "wb")
+out.write(struct.pack("<II", 0, len(w)) + b"".join(struct.pack("<Q", x) for x in w))
+EOF
+compare deep-chain "$NODE" Node "text json binary canonical"
+python3 - "$TMP/in.bin" <<'EOF'
+import struct, sys
+n, count = 9, 1 << 20
+w = [0x0002000100000000]
+shared = 1 + 3 * n
+for i in range(n):
+    base = 1 + 3 * i
+    off = shared - (base + 2) - 1
+    nxt = 0x0002000100000004 if i < n - 1 else 0
+    w += [0, nxt, ((count << 3 | 5) << 32) | ((off << 2) | 1)]
+w += [0] * count
+out = open(sys.argv[1], "wb")
+out.write(struct.pack("<II", 0, len(w)) + b"".join(struct.pack("<Q", x) for x in w))
+EOF
+compare amplified-reads "$NODE" Node "binary"
+
+# A pointer cycle overflows the stack in both. kj reports the signal and
+# exits with status 1, keeping the output of earlier messages.
+python3 - "$TMP/in.bin" <<'EOF'
+import struct, sys
+ok = [0x0002000100000000, 7, 0, 0]
+cycle = [0x0002000100000000, 7, 0x00020001fffffff8, 0]
+out = open(sys.argv[1], "wb")
+for w in (ok, cycle):
+    out.write(struct.pack("<II", 0, len(w)) + b"".join(struct.pack("<Q", x) for x in w))
+EOF
+full=1
+compare pointer-cycle "$NODE" Node "text json binary packed canonical"
+full=0
+
+# Without --quiet, `capnp` refuses empty input and input whose first
+# bytes cannot be in the format; implausible input only warns.
+full=1
+: >"$TMP/in.bin"
+for in_fmt in binary packed flat flat-packed canonical text json; do
+  extra=()
+  compare "empty-$in_fmt" "$PARITY" Parity "text binary"
+  extra=(--quiet)
+  compare "empty-quiet-$in_fmt" "$PARITY" Parity "text binary"
+done
+extra=()
+i=0
+for spec in binary:0000010001000000 binary:0000000001000000fffffffe00000000 \
+  binary:0000000001000000ffffffff00000000 packed:0100 packed:1f010203040500 \
+  flat:0300000000000000 flat:0100000000000000 flat-packed:0300 \
+  canonical:0200000001000000 text:20410a28 text:0a2328612c0a2900 \
+  text:280128 json:7b0122 json:41 json:2f2f0a41 json:7b7d text:2829 \
+  flat:ffffff7f00000000; do
+  in_fmt=${spec%%:*}
+  python3 -c 'import sys; sys.stdout.buffer.write(bytes.fromhex(sys.argv[1]))' \
+    "${spec#*:}" >"$TMP/in.bin"
+  compare "plausible-$((i++))" "$PARITY" Parity "text"
+done
+full=0
+in_fmt=binary
+
+# readOneText and readOneJson never enter their quote states, so brackets
+# and comment starts inside strings split the input. Input with no tokens
+# fails at once.
+full=1
+i=0
+for spec in 'text: ' 'text:
+' 'json:  ' 'text:(vText = "a)(b")' 'json:{"vText": "a}{b"}' \
+  'json:{"vText": "a#b"}
+{"vI8": 1}' 'json:{"vText": "a//b"}
+{"vI8": 1}' 'text:# only a comment
+' 'text:  (vI8 = 1)  ' 'json: {"vI8": 1}
+ {"vI8": 2} '; do
+  in_fmt=${spec%%:*}
+  printf '%s' "${spec#*:}" >"$TMP/in.bin"
+  for extra in "" --quiet; do
+    extra=($extra)
+    compare "chunk-$i" "$PARITY" Parity "text"
+  done
+  i=$((i + 1))
+done
+extra=()
+full=0
+in_fmt=binary
+
+if [[ $fails -ne 0 ]]; then
+  echo "convert parity: $fails failure(s)" >&2
+  exit 1
+fi
+echo "ok convert parity"

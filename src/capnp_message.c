@@ -1,3 +1,5 @@
+#include "capnp_internal.h"
+
 #include <capnp-janet/capnp_message.h>
 #include <capnp-janet/capnp_pointer.h>
 
@@ -41,7 +43,7 @@ static int attach_segments(capnp_message_t *m, const capnp_segment_t *segs,
                            uint32_t nsegs) {
   capnp_segment_t *copy;
   uint32_t i;
-  if (nsegs == 0 || nsegs > CAPNP_MAX_SEGMENTS)
+  if (nsegs == 0)
     return CAPNP_ERR_FRAMING;
   for (i = 0; i < nsegs; i++) {
     if (!segs || !segs[i].data || (segs[i].words == 0 && i == 0) ||
@@ -83,7 +85,7 @@ static int parse_flat(capnp_message_t *m, const uint8_t *data, size_t len,
   if (len < 8)
     return CAPNP_ERR_FRAMING;
   nsegs = capnp_load_le32(data) + 1u;
-  if (nsegs == 0 || nsegs > CAPNP_MAX_SEGMENTS)
+  if (nsegs == 0)
     return CAPNP_ERR_FRAMING;
   /* A 32-bit size_t cannot hold a segment table past SIZE_MAX/4.
    * On a wider size_t the comparison is out of range for nsegs. */
@@ -179,6 +181,13 @@ static int bounds_word(const capnp_message_t *m, uint32_t seg, size_t word) {
   return CAPNP_OK;
 }
 
+/* capnp-eval clears the data of a segment that a stream reader would
+ * read lazily and could not. ReaderArena::tryGetSegment fails there,
+ * before any bounds check, and so does following a far pointer here. */
+static int seg_unread(const capnp_message_t *m, uint32_t seg) {
+  return seg < m->nsegs && m->segs[seg].data == NULL;
+}
+
 static uint64_t read_word(const capnp_message_t *m, uint32_t seg, size_t word) {
   return capnp_load_le64(m->segs[seg].data + word * CAPNP_WORD_BYTES);
 }
@@ -268,6 +277,10 @@ static int land_struct(capnp_message_t *m, uint32_t seg, size_t body,
                        uint16_t dwords, uint16_t pwords, int depth,
                        capnp_ptr_t *out) {
   size_t nwords = (size_t)dwords + (size_t)pwords;
+  /* `depth` is what the struct may still follow: C++ readStructPointer
+   * needs the reader's nestingLimit above zero. */
+  if (depth < 0)
+    return CAPNP_ERR_DEPTH;
   if (seg >= m->nsegs)
     return CAPNP_ERR_SEGMENT;
   /* checkOffset clamps an out-of-range target to the segment end.
@@ -291,6 +304,8 @@ static int land_struct(capnp_message_t *m, uint32_t seg, size_t body,
 
 static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
                      uint32_t count, int depth, capnp_ptr_t *out) {
+  if (depth < 0)
+    return CAPNP_ERR_DEPTH;
   if (seg >= m->nsegs)
     return CAPNP_ERR_SEGMENT;
   /* Same clamp as SegmentReader::checkOffset. A zero-word list whose
@@ -305,7 +320,7 @@ static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
   out->count = count;
   if (esize == CAPNP_SZ_COMPOSITE) {
     uint64_t tag, need;
-    int32_t elems;
+    uint32_t elems;
     uint16_t dw, pw;
     uint32_t step;
     if (bounds_word(m, seg, start))
@@ -315,15 +330,13 @@ static int land_list(capnp_message_t *m, uint32_t seg, size_t start, int esize,
     tag = read_word(m, seg, start);
     if (capnp_wp_kind(tag) != CAPNP_WK_STRUCT)
       return CAPNP_ERR_KIND;
-    elems = capnp_wp_offset(tag);
-    if (elems < 0)
-      return CAPNP_ERR_BOUNDS;
+    elems = ((uint32_t)tag >> 2) & 0x1fffffffu;
     dw = capnp_wp_struct_dwords(tag);
     pw = capnp_wp_struct_pwords(tag);
     step = (uint32_t)dw + (uint32_t)pw;
     if ((uint64_t)elems * (uint64_t)step > (uint64_t)count)
       return CAPNP_ERR_BOUNDS;
-    out->count = (uint32_t)elems;
+    out->count = elems;
     out->dwords = dw;
     out->pwords = pw;
     out->step_words = step;
@@ -418,8 +431,8 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
   if (kind == CAPNP_WK_FAR) {
     uint32_t tseg = capnp_wp_far_seg(w);
     uint32_t toff = capnp_wp_far_off(w);
-    if (depth <= 0)
-      return CAPNP_ERR_DEPTH;
+    if (seg_unread(m, tseg))
+      return CAPNP_ERR_IO;
     if (capnp_wp_far_two(w)) {
       uint64_t pad, tag;
       uint32_t cseg, coff;
@@ -433,12 +446,13 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
         return CAPNP_ERR_TRAVERSAL;
       pad = read_word(m, tseg, toff);
       tag = read_word(m, tseg, (size_t)toff + 1u);
-      if (capnp_wp_kind(pad) != CAPNP_WK_FAR || capnp_wp_far_two(pad))
-        return CAPNP_ERR_KIND;
-      if (capnp_wp_offset(tag) != 0)
-        return CAPNP_ERR_KIND;
       cseg = capnp_wp_far_seg(pad);
       coff = capnp_wp_far_off(pad);
+      if (seg_unread(m, cseg))
+        return CAPNP_ERR_IO;
+      /* C++ ignores the pad's own double-far bit and the tag's offset. */
+      if (capnp_wp_kind(pad) != CAPNP_WK_FAR)
+        return CAPNP_ERR_KIND;
       if (capnp_wp_kind(tag) == CAPNP_WK_STRUCT)
         return land_struct(m, cseg, coff, capnp_wp_struct_dwords(tag),
                            capnp_wp_struct_pwords(tag), depth, out);
@@ -493,23 +507,30 @@ static int resolve_word(capnp_message_t *m, uint32_t seg, size_t word,
 static int resolve_ptr(capnp_message_t *m, uint32_t seg, size_t word, int depth,
                        capnp_ptr_t *out) {
   uint64_t w;
-  if (depth <= 0)
-    return CAPNP_ERR_DEPTH;
   if (bounds_word(m, seg, word))
     return CAPNP_ERR_BOUNDS;
-  if (charge(m, 1))
-    return CAPNP_ERR_TRAVERSAL;
   w = read_word(m, seg, word);
   return resolve_word(m, seg, word, w, depth - 1, out);
 }
 
+/* The pointer word inside its parent is charged with the parent. C++
+ * charges the root pointer twice: in getRootInternal and in getRoot. */
 int capnp_root(capnp_message_t *m, capnp_ptr_t *out) {
   if (!m || !out || m->nsegs == 0)
     return CAPNP_ERR_ARG;
+  if (bounds_word(m, 0, 0))
+    return CAPNP_ERR_BOUNDS;
+  if (charge(m, 2))
+    return CAPNP_ERR_TRAVERSAL;
   return resolve_ptr(m, 0, 0, m->depth_limit, out);
 }
 
+capnp_message_t capnp_poison_msg;
+_Thread_local int capnp_poison_read;
+
 int capnp_getp(const capnp_ptr_t *s, uint16_t ptr_index, capnp_ptr_t *out) {
+  if (s && s->msg == &capnp_poison_msg)
+    capnp_poison_read = 1;
   if (!s || !out || s->kind != CAPNP_PK_STRUCT)
     return CAPNP_ERR_KIND;
   if (ptr_index >= s->pwords) {
@@ -535,6 +556,8 @@ static const uint8_t *data_bytes(const capnp_ptr_t *s) {
 static int data_has_bytes(const capnp_ptr_t *s, uint32_t byte_offset,
                           uint32_t width) {
   size_t logical, abs, seg_bytes;
+  if (s && s->msg == &capnp_poison_msg)
+    capnp_poison_read = 1;
   if (!s || !s->msg || s->kind != CAPNP_PK_STRUCT || s->seg >= s->msg->nsegs)
     return 0;
   if (width == 0)
@@ -604,6 +627,8 @@ double capnp_get_f64(const capnp_ptr_t *s, uint32_t byte_offset, double dflt) {
 int capnp_get_bool(const capnp_ptr_t *s, uint32_t bit_offset, int dflt) {
   uint32_t byte_offset;
   uint8_t bit;
+  if (s && s->msg == &capnp_poison_msg)
+    capnp_poison_read = 1;
   if (!s || s->kind != CAPNP_PK_STRUCT)
     return dflt;
   if (bit_offset >= data_bit_count(s))
@@ -637,10 +662,23 @@ static int text_from_bytes(const capnp_ptr_t *list, const char **out,
   return CAPNP_OK;
 }
 
+/* C++ reads Text and Data with no nesting check, so a blob stays readable
+ * from a struct that may follow no further pointers. */
+static int getp_blob(const capnp_ptr_t *s, uint16_t ptr_index,
+                     capnp_ptr_t *out) {
+  capnp_ptr_t holder;
+  if (!s)
+    return CAPNP_ERR_KIND;
+  holder = *s;
+  if (holder.depth_left < 1)
+    holder.depth_left = 1;
+  return capnp_getp(&holder, ptr_index, out);
+}
+
 int capnp_get_text(const capnp_ptr_t *s, uint16_t ptr_index, const char **out,
                    size_t *len) {
   capnp_ptr_t list;
-  int rc = capnp_getp(s, ptr_index, &list);
+  int rc = getp_blob(s, ptr_index, &list);
   if (rc)
     return rc;
   if (list.kind == CAPNP_PK_NULL) {
@@ -706,7 +744,10 @@ int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
 
   /* C=6 pointer list: resolve element pointer to the Text blob. */
   if (list->esize == CAPNP_SZ_PTR) {
-    rc = capnp_list_getp(list, index, &elem);
+    capnp_ptr_t holder = *list;
+    if (holder.depth_left < 1)
+      holder.depth_left = 1;
+    rc = capnp_list_getp(&holder, index, &elem);
     if (rc)
       return rc;
     if (elem.kind == CAPNP_PK_NULL) {
@@ -739,7 +780,7 @@ int capnp_list_get_text(const capnp_ptr_t *list, uint32_t index,
 int capnp_get_data(const capnp_ptr_t *s, uint16_t ptr_index, const uint8_t **out,
                    size_t *len) {
   capnp_ptr_t list;
-  int rc = capnp_getp(s, ptr_index, &list);
+  int rc = getp_blob(s, ptr_index, &list);
   if (rc)
     return rc;
   if (list.kind == CAPNP_PK_NULL) {
@@ -771,90 +812,75 @@ static const uint8_t *composite_elem_data(const capnp_ptr_t *list,
          (list->word + (size_t)index * list->step_words) * CAPNP_WORD_BYTES;
 }
 
+/* Element `index` of a data list whose elements are at least `want`
+ * bytes wide, or NULL. A wider element is read from its low bytes, as
+ * C++ `readListPointer` allows. */
+static const uint8_t *data_elem(const capnp_ptr_t *list, uint32_t index,
+                                size_t want) {
+  static const size_t width[] = {0, 0, 1, 2, 4, 8};
+  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
+    return NULL;
+  if (list->esize == CAPNP_SZ_COMPOSITE)
+    return list->dwords >= 1 ? composite_elem_data(list, index) : NULL;
+  if (list->esize < CAPNP_SZ_BYTE || list->esize > CAPNP_SZ_EIGHT ||
+      width[list->esize] < want)
+    return NULL;
+  return list_elem_bytes(list, index, width[list->esize]);
+}
+
 uint8_t capnp_list_get_u8(const capnp_ptr_t *list, uint32_t index,
                           uint8_t dflt) {
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
-    return dflt;
-  if (list->esize == CAPNP_SZ_BYTE)
-    return *list_elem_bytes(list, index, 1);
-  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
-    return *composite_elem_data(list, index);
-  return dflt;
+  const uint8_t *p = data_elem(list, index, 1);
+  return p ? *p : dflt;
 }
 
 uint16_t capnp_list_get_u16(const capnp_ptr_t *list, uint32_t index,
                             uint16_t dflt) {
-  const uint8_t *p;
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
-    return dflt;
-  if (list->esize == CAPNP_SZ_TWO) {
-    p = list_elem_bytes(list, index, 2);
-    return (uint16_t)(p[0] | (p[1] << 8));
-  }
-  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1) {
-    p = composite_elem_data(list, index);
-    return (uint16_t)(p[0] | (p[1] << 8));
-  }
-  return dflt;
+  const uint8_t *p = data_elem(list, index, 2);
+  return p ? (uint16_t)(p[0] | (p[1] << 8)) : dflt;
 }
 
 uint32_t capnp_list_get_u32(const capnp_ptr_t *list, uint32_t index,
                             uint32_t dflt) {
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
-    return dflt;
-  if (list->esize == CAPNP_SZ_FOUR)
-    return capnp_load_le32(list_elem_bytes(list, index, 4));
-  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
-    return capnp_load_le32(composite_elem_data(list, index));
-  return dflt;
+  const uint8_t *p = data_elem(list, index, 4);
+  return p ? capnp_load_le32(p) : dflt;
 }
 
 uint64_t capnp_list_get_u64(const capnp_ptr_t *list, uint32_t index,
                             uint64_t dflt) {
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
-    return dflt;
-  if (list->esize == CAPNP_SZ_EIGHT)
-    return capnp_load_le64(list_elem_bytes(list, index, 8));
-  if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
-    return capnp_load_le64(composite_elem_data(list, index));
-  return dflt;
+  const uint8_t *p = data_elem(list, index, 8);
+  return p ? capnp_load_le64(p) : dflt;
 }
 
 float capnp_list_get_f32(const capnp_ptr_t *list, uint32_t index, float dflt) {
+  const uint8_t *p = data_elem(list, index, 4);
   uint32_t bits;
   float value;
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
+  if (!p)
     return dflt;
-  if (list->esize == CAPNP_SZ_FOUR)
-    bits = capnp_load_le32(list_elem_bytes(list, index, 4));
-  else if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
-    bits = capnp_load_le32(composite_elem_data(list, index));
-  else
-    return dflt;
+  bits = capnp_load_le32(p);
   memcpy(&value, &bits, sizeof(value));
   return value;
 }
 
 double capnp_list_get_f64(const capnp_ptr_t *list, uint32_t index, double dflt) {
+  const uint8_t *p = data_elem(list, index, 8);
   uint64_t bits;
   double v;
-  if (!list || list->kind != CAPNP_PK_LIST || index >= list->count)
+  if (!p)
     return dflt;
-  if (list->esize == CAPNP_SZ_EIGHT)
-    bits = capnp_load_le64(list_elem_bytes(list, index, 8));
-  else if (list->esize == CAPNP_SZ_COMPOSITE && list->dwords >= 1)
-    bits = capnp_load_le64(composite_elem_data(list, index));
-  else
-    return dflt;
+  bits = capnp_load_le64(p);
   memcpy(&v, &bits, sizeof(v));
   return v;
 }
 
+/* C++ reads bit `index` from the start of any non-pointer data list,
+ * whatever the element width. */
 int capnp_list_get_bool(const capnp_ptr_t *list, uint32_t index, int dflt) {
   const uint8_t *base;
   uint8_t bit;
-  if (!list || list->kind != CAPNP_PK_LIST || list->esize != CAPNP_SZ_BIT ||
-      index >= list->count)
+  if (!list || list->kind != CAPNP_PK_LIST || list->esize < CAPNP_SZ_BIT ||
+      list->esize > CAPNP_SZ_EIGHT || index >= list->count)
     return dflt;
   base = list->msg->segs[list->seg].data + list->word * CAPNP_WORD_BYTES;
   bit = (uint8_t)(1u << (index % 8u));
@@ -908,8 +934,13 @@ int capnp_list_get_struct(const capnp_ptr_t *list, uint32_t index,
     out->pwords = 1;
     return CAPNP_OK;
 
+  case CAPNP_SZ_VOID:
+    fill_obj(out, list->msg, list->seg, list->word, CAPNP_PK_STRUCT,
+             list->depth_left);
+    return CAPNP_OK;
+
   default:
-    /* VOID and BIT cannot upgrade (encoding.html list-upgrade rules). */
+    /* BIT cannot upgrade (encoding.html list-upgrade rules). */
     return CAPNP_ERR_KIND;
   }
 

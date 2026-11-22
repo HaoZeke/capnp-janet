@@ -2,6 +2,8 @@
 #include <capnp-janet/capnp_builder.h>
 #include <capnp-janet/capnp_pointer.h>
 
+#include "capnp_internal.h"
+
 #include <ctype.h>
 #include <errno.h>
 #include <float.h>
@@ -50,7 +52,13 @@ enum {
 #define JSON_FIELD_TYPE_ID 0xe31026e735d69ddfull
 #define JSON_CALL_TYPE_ID 0xa0d9f6eca1c93d48ull
 
-#define MAX_DEPTH 64
+#define TYPE_MAX_DEPTH 64
+/* JsonCodec's default maxNestingDepth. */
+#define JSON_MAX_DEPTH 64
+/* Nesting allowed while encoding a value or parsing and building one from
+ * text; set from `dyn_max_depth` on entry to each public call. */
+static _Thread_local int value_depth = CAPNP_DEFAULT_DEPTH_LIMIT;
+static int dyn_max_depth = CAPNP_DEFAULT_DEPTH_LIMIT;
 
 typedef struct {
   char *data;
@@ -721,6 +729,10 @@ const char *capnp_dyn_error(const capnp_dyn_t *d) {
   return d->err;
 }
 
+void capnp_dyn_set_max_depth(int depth) {
+  dyn_max_depth = depth < 1 ? 1 : depth;
+}
+
 void capnp_dyn_free(capnp_dyn_t *d) {
   uint32_t i;
   if (!d)
@@ -823,7 +835,7 @@ static int resolve_type_proto(const capnp_dyn_t *d, const capnp_ptr_t *typ,
                               const brand_env_t *env, rtype_t *out, int depth) {
   uint16_t w;
   memset(out, 0, sizeof(*out));
-  if (depth > MAX_DEPTH || !typ || typ->kind != CAPNP_PK_STRUCT)
+  if (depth > TYPE_MAX_DEPTH || !typ || typ->kind != CAPNP_PK_STRUCT)
     return -1;
   w = capnp_get_u16(typ, 0, 0xffff);
   if (w == TY_LIST) {
@@ -894,7 +906,7 @@ static int parse_type_expr(const capnp_dyn_t *d, const char **pp, rtype_t *out,
   char name[160];
   size_t k = 0;
   memset(out, 0, sizeof(*out));
-  if (depth > MAX_DEPTH)
+  if (depth > TYPE_MAX_DEPTH)
     return -1;
   skip_spaces(pp);
   if (**pp == '.')
@@ -1190,7 +1202,7 @@ int capnp_dyn_which(const capnp_dyn_t *d, const capnp_ptr_t *s,
     return CAPNP_ERR_KIND;
   struct_which(s, st, &active);
   for (i = 0; i < st->nfields; i++) {
-    if (st->fields[i].disc == active) {
+    if (st->fields[i].disc != 0xffff && st->fields[i].disc == active) {
       *out = st->fields[i].name;
       return CAPNP_OK;
     }
@@ -1306,6 +1318,50 @@ int capnp_dyn_get_f64(const capnp_dyn_t *d, const capnp_ptr_t *s,
   return rc;
 }
 
+/* C++ readTextPointer and readDataPointer do not check the nesting limit,
+ * so a Text or Data field reads even where a struct could not. */
+static int getp_blob(const capnp_ptr_t *s, uint16_t idx, capnp_ptr_t *out) {
+  capnp_ptr_t holder = *s;
+  if (holder.depth_left < 1)
+    holder.depth_left = 1;
+  return capnp_getp(&holder, idx, out);
+}
+
+static int list_fits(const capnp_ptr_t *l, int want);
+static int elem_esize(const rtype_t *elem);
+
+/* The kind checks DynamicStruct::Reader::get makes through the layout
+ * readers before it returns a pointer field. */
+static int ptr_fits_type(const capnp_ptr_t *p, const rtype_t *ft) {
+  rtype_t elem;
+  if (p->kind == CAPNP_PK_NULL)
+    return 1;
+  if (ft->list_depth > 0) {
+    elem = *ft;
+    elem.list_depth--;
+    return p->kind == CAPNP_PK_LIST && list_fits(p, elem_esize(&elem));
+  }
+  switch (ft->which) {
+  case TY_TEXT:
+  case TY_DATA:
+    return p->kind == CAPNP_PK_LIST && p->esize == CAPNP_SZ_BYTE;
+  case TY_STRUCT:
+    return p->kind == CAPNP_PK_STRUCT;
+  case TY_IFACE:
+    return p->kind == CAPNP_PK_CAP;
+  case TY_ANY:
+    if (ft->any_kind == 1)
+      return p->kind == CAPNP_PK_STRUCT;
+    if (ft->any_kind == 2)
+      return p->kind == CAPNP_PK_LIST;
+    if (ft->any_kind == 3)
+      return p->kind == CAPNP_PK_CAP;
+    return 1;
+  default:
+    return 1;
+  }
+}
+
 int capnp_dyn_get_text(const capnp_dyn_t *d, const capnp_ptr_t *s,
                        const char *type_name, const char *field,
                        const char **out, size_t *len) {
@@ -1324,10 +1380,11 @@ int capnp_dyn_get_text(const capnp_dyn_t *d, const capnp_ptr_t *s,
     return CAPNP_ERR_KIND;
   }
   free_rtype(&ft);
-  if (capnp_getp(s, (uint16_t)f->offset, &p) == CAPNP_OK &&
-      p.kind != CAPNP_PK_NULL) {
+  rc = getp_blob(s, (uint16_t)f->offset, &p);
+  if (rc)
+    return rc;
+  if (p.kind != CAPNP_PK_NULL)
     return capnp_get_text(s, (uint16_t)f->offset, out, len);
-  }
   if (f->has_def_val && capnp_get_u16(&f->def_val, 0, 0xffff) == TY_TEXT) {
     if (capnp_getp(&f->def_val, 0, &p) == CAPNP_OK && p.kind != CAPNP_PK_NULL)
       return capnp_get_text(&f->def_val, 0, out, len);
@@ -1360,8 +1417,13 @@ int capnp_dyn_get_ptr(const capnp_dyn_t *d, const capnp_ptr_t *s,
     free_rtype(&ft);
     return CAPNP_ERR_KIND;
   }
+  if (ft.list_depth == 0 && (ft.which == TY_TEXT || ft.which == TY_DATA))
+    rc = getp_blob(s, (uint16_t)f->offset, &p);
+  else
+    rc = capnp_getp(s, (uint16_t)f->offset, &p);
+  if (rc == CAPNP_OK && !ptr_fits_type(&p, &ft))
+    rc = CAPNP_ERR_KIND;
   free_rtype(&ft);
-  rc = capnp_getp(s, (uint16_t)f->offset, &p);
   if (rc != CAPNP_OK)
     return rc;
   if (p.kind == CAPNP_PK_NULL && f->has_def_val) {
@@ -1723,6 +1785,302 @@ static int delimit_text(buf_t *b, const piece_list_t *pl, int indent, int mode,
   return buf_ch(b, ' ');
 }
 
+/* First reader error met while encoding. A corrupt pointer reads as
+ * null so the walk can go on, and the public encoder then fails with
+ * this code, as `capnp convert` fails after printing defaults. */
+static _Thread_local int encode_wire_err;
+/* Set when the walk met a segment that is not there to read, which
+ * `capnp convert` cannot recover from. */
+static _Thread_local int encode_io_err;
+/* Set by capnp_dyn_encode_recover. `capnp` has no capability context, so
+ * reading any capability fails there and ends the conversion. */
+static _Thread_local int encode_no_caps;
+static _Thread_local int encode_cap_err;
+
+static void note_wire(int rc) {
+  if (rc == CAPNP_ERR_IO)
+    encode_io_err = 1;
+  if (rc != CAPNP_OK && encode_wire_err == CAPNP_OK)
+    encode_wire_err = rc;
+}
+
+static void null_ptr(capnp_ptr_t *p) {
+  memset(p, 0, sizeof(*p));
+  p->kind = CAPNP_PK_NULL;
+}
+
+static void enc_getp(const capnp_ptr_t *s, uint16_t idx, capnp_ptr_t *out) {
+  int rc;
+  null_ptr(out);
+  if (!s || s->kind != CAPNP_PK_STRUCT)
+    return;
+  rc = capnp_getp(s, idx, out);
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    null_ptr(out);
+  }
+}
+
+static void enc_expect_struct(capnp_ptr_t *p) {
+  if (p->kind != CAPNP_PK_NULL && p->kind != CAPNP_PK_STRUCT) {
+    note_wire(CAPNP_ERR_KIND);
+    null_ptr(p);
+  }
+}
+
+static int elem_esize(const rtype_t *elem) {
+  if (elem->list_depth > 0)
+    return CAPNP_SZ_PTR;
+  switch (elem->which) {
+  case TY_VOID:
+    return CAPNP_SZ_VOID;
+  case TY_BOOL:
+    return CAPNP_SZ_BIT;
+  case TY_I8:
+  case TY_U8:
+    return CAPNP_SZ_BYTE;
+  case TY_I16:
+  case TY_U16:
+  case TY_ENUM:
+    return CAPNP_SZ_TWO;
+  case TY_I32:
+  case TY_U32:
+  case TY_F32:
+    return CAPNP_SZ_FOUR;
+  case TY_I64:
+  case TY_U64:
+  case TY_F64:
+    return CAPNP_SZ_EIGHT;
+  case TY_STRUCT:
+    return CAPNP_SZ_COMPOSITE;
+  default:
+    return CAPNP_SZ_PTR;
+  }
+}
+
+static uint32_t esize_data_bits(int es) {
+  static const uint32_t bits[] = {0, 1, 8, 16, 32, 64, 0, 0};
+  return bits[es & 7];
+}
+
+/* readListPointer's element checks: a wider element reads as its low
+ * bytes, a narrower one or a bit list read as anything else fails. */
+static int list_fits(const capnp_ptr_t *l, int want) {
+  if (l->esize == CAPNP_SZ_COMPOSITE) {
+    if (want == CAPNP_SZ_BIT)
+      return 0;
+    if (want == CAPNP_SZ_PTR)
+      return l->pwords > 0;
+    if (want != CAPNP_SZ_VOID && want != CAPNP_SZ_COMPOSITE)
+      return l->dwords > 0;
+    return 1;
+  }
+  if (l->esize == CAPNP_SZ_BIT && want != CAPNP_SZ_BIT)
+    return 0;
+  if (want == CAPNP_SZ_COMPOSITE)
+    return 1;
+  if (esize_data_bits(want) > esize_data_bits(l->esize))
+    return 0;
+  return want != CAPNP_SZ_PTR || l->esize == CAPNP_SZ_PTR;
+}
+
+static void enc_expect_cap(capnp_ptr_t *p) {
+  if (encode_no_caps)
+    encode_cap_err = 1;
+  if (p->kind != CAPNP_PK_NULL && p->kind != CAPNP_PK_CAP) {
+    note_wire(CAPNP_ERR_KIND);
+    null_ptr(p);
+  }
+}
+
+static void enc_expect_list(capnp_ptr_t *p, const rtype_t *elem) {
+  if (p->kind == CAPNP_PK_NULL)
+    return;
+  if (p->kind != CAPNP_PK_LIST || !list_fits(p, elem_esize(elem))) {
+    note_wire(CAPNP_ERR_KIND);
+    null_ptr(p);
+  }
+}
+
+static void enc_expect_struct_list(capnp_ptr_t *p) {
+  if (p->kind == CAPNP_PK_NULL)
+    return;
+  if (p->kind != CAPNP_PK_LIST || !list_fits(p, CAPNP_SZ_COMPOSITE)) {
+    note_wire(CAPNP_ERR_KIND);
+    null_ptr(p);
+  }
+}
+
+static void enc_get_text(const capnp_ptr_t *s, uint16_t idx, const char **t,
+                         size_t *tn) {
+  int rc;
+  *t = "";
+  *tn = 0;
+  if (!s || s->kind != CAPNP_PK_STRUCT)
+    return;
+  rc = capnp_get_text(s, idx, t, tn);
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    *t = "";
+    *tn = 0;
+  }
+}
+
+/* Pointer element of a list. A struct list reads its first pointer. */
+static void enc_list_ptr(const capnp_ptr_t *list, uint32_t i,
+                         capnp_ptr_t *out) {
+  capnp_ptr_t el;
+  int rc;
+  null_ptr(out);
+  if (list->esize == CAPNP_SZ_COMPOSITE) {
+    rc = capnp_list_get_struct(list, i, &el);
+    if (rc == CAPNP_OK)
+      rc = capnp_getp(&el, 0, out);
+  } else {
+    rc = capnp_list_getp(list, i, out);
+  }
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    null_ptr(out);
+  }
+}
+
+static void enc_list_struct(const capnp_ptr_t *list, uint32_t i,
+                            capnp_ptr_t *out) {
+  int rc = capnp_list_get_struct(list, i, out);
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    null_ptr(out);
+  }
+}
+
+static void enc_list_text(const capnp_ptr_t *list, uint32_t i, const char **t,
+                          size_t *tn) {
+  int rc = capnp_list_get_text(list, i, t, tn);
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    *t = "";
+    *tn = 0;
+  }
+}
+
+static void enc_list_data(const capnp_ptr_t *list, uint32_t i,
+                          const uint8_t **p, size_t *pn) {
+  capnp_ptr_t el;
+  int rc = capnp_list_get_struct(list, i, &el);
+  *p = NULL;
+  *pn = 0;
+  if (rc == CAPNP_OK)
+    rc = capnp_get_data(&el, 0, p, pn);
+  if (rc != CAPNP_OK) {
+    note_wire(rc);
+    *p = NULL;
+    *pn = 0;
+  }
+}
+
+/* A Text or Data field. readTextPointer and readDataPointer fall back
+ * to the default for a null pointer and for one they cannot read. */
+static void enc_field_blob(const capnp_ptr_t *s, const dyn_field_t *f,
+                           uint16_t which, const void **p, size_t *n) {
+  capnp_ptr_t q;
+  enc_getp(s, (uint16_t)f->offset, &q);
+  if (q.kind != CAPNP_PK_NULL) {
+    int rc = which == TY_TEXT
+                 ? capnp_get_text(s, (uint16_t)f->offset, (const char **)p, n)
+                 : capnp_get_data(s, (uint16_t)f->offset,
+                                  (const uint8_t **)p, n);
+    if (rc == CAPNP_OK)
+      return;
+    note_wire(rc);
+  }
+  *p = which == TY_TEXT ? (const void *)"" : NULL;
+  *n = 0;
+  if (f->has_def_val && capnp_get_u16(&f->def_val, 0, 0xffff) == which) {
+    if (which == TY_TEXT)
+      capnp_get_text(&f->def_val, 0, (const char **)p, n);
+    else
+      capnp_get_data(&f->def_val, 0, (const uint8_t **)p, n);
+  }
+}
+
+static int far_segment_ok(const capnp_message_t *m, uint32_t seg) {
+  if (seg < m->nsegs && !m->segs[seg].data) {
+    note_wire(CAPNP_ERR_IO);
+    return 0;
+  }
+  /* tryGetSegment knows no segment of zero words. */
+  if (seg >= m->nsegs || m->segs[seg].words == 0) {
+    note_wire(CAPNP_ERR_SEGMENT);
+    return 0;
+  }
+  return 1;
+}
+
+/* DynamicStruct::Reader::has for a pointer field: PointerReader::isNull,
+ * which follows far pointers but not the object. A pointer it cannot
+ * follow is absent after a recoverable error; one to a corrupt object is
+ * present and then reads as its default. */
+static int pointer_present(const capnp_ptr_t *s, uint32_t idx) {
+  const capnp_message_t *m = s->msg;
+  uint64_t w;
+  if (idx >= s->pwords)
+    return 0;
+  w = capnp_load_le64(m->segs[s->seg].data +
+                      (s->word + (size_t)s->dwords + idx) * CAPNP_WORD_BYTES);
+  if (w == 0)
+    return 0;
+  if (capnp_wp_kind(w) == CAPNP_WK_FAR) {
+    uint32_t seg = capnp_wp_far_seg(w);
+    size_t pos = capnp_wp_far_off(w);
+    int two = capnp_wp_far_two(w);
+    uint64_t pad;
+    if (!far_segment_ok(m, seg))
+      return 0;
+    if (pos + (two ? 2u : 1u) > m->segs[seg].words) {
+      note_wire(CAPNP_ERR_BOUNDS);
+      return 0;
+    }
+    pad = capnp_load_le64(m->segs[seg].data + pos * CAPNP_WORD_BYTES);
+    if (two) {
+      if (!far_segment_ok(m, capnp_wp_far_seg(pad)))
+        return 0;
+      if (capnp_wp_kind(pad) != CAPNP_WK_FAR) {
+        note_wire(CAPNP_ERR_KIND);
+        return 0;
+      }
+      w = capnp_load_le64(m->segs[seg].data + (pos + 1u) * CAPNP_WORD_BYTES);
+    } else {
+      w = pad;
+    }
+    if (capnp_wp_kind(w) == CAPNP_WK_FAR) {
+      note_wire(CAPNP_ERR_KIND);
+      return 0;
+    }
+  }
+  if (capnp_wp_kind(w) == CAPNP_WK_CAP && (uint32_t)w != CAPNP_WK_CAP) {
+    note_wire(CAPNP_ERR_KIND);
+    return 0;
+  }
+  return 1;
+}
+
+/* A struct pointer that is null or could not be read gives C++ an empty
+ * StructReader, whose fields all read as their defaults. */
+static const capnp_ptr_t *as_struct(const capnp_ptr_t *s, capnp_ptr_t *tmp) {
+  if (s && s->kind != CAPNP_PK_NULL)
+    return s;
+  memset(tmp, 0, sizeof(*tmp));
+  if (s)
+    *tmp = *s;
+  tmp->kind = CAPNP_PK_STRUCT;
+  tmp->dwords = 0;
+  tmp->pwords = 0;
+  tmp->data_bits = 0;
+  tmp->body_byte = 0;
+  return tmp;
+}
+
 static int field_has_wire(capnp_dyn_t *d, const capnp_ptr_t *s,
                           const dyn_field_t *f, const brand_env_t *env,
                           int non_null) {
@@ -1734,11 +2092,8 @@ static int field_has_wire(capnp_dyn_t *d, const capnp_ptr_t *s,
   if (resolve_field_type(d, f, env, &ft))
     return 0;
   if (ft.list_depth > 0 || is_ptr_type(ft.which)) {
-    capnp_ptr_t p;
     free_rtype(&ft);
-    if (capnp_getp(s, (uint16_t)f->offset, &p) != CAPNP_OK)
-      return 0;
-    return p.kind != CAPNP_PK_NULL;
+    return pointer_present(s, f->offset);
   }
   if (non_null) {
     free_rtype(&ft);
@@ -1802,7 +2157,7 @@ static int encode_text_list(buf_t *b, capnp_dyn_t *d,
   piece_list_t pl;
   uint32_t i, n;
   int next_ind = indent ? indent + 1 : 0;
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   if (buf_ch(b, '['))
     return -1;
@@ -1817,8 +2172,9 @@ static int encode_text_list(buf_t *b, capnp_dyn_t *d,
       capnp_ptr_t sub;
       rtype_t inner = *elem_rt;
       inner.list_depth--;
-      if (capnp_list_getp(list, i, &sub) != CAPNP_OK ||
-          encode_text_list(&eb, d, &inner, &sub, next_ind, TMODE_BARE,
+      enc_list_ptr(list, i, &sub);
+      enc_expect_list(&sub, &inner);
+      if (encode_text_list(&eb, d, &inner, &sub, next_ind, TMODE_BARE,
                            depth + 1)) {
         free(eb.data);
         free_pieces(&pl);
@@ -1927,8 +2283,8 @@ static int encode_text_list(buf_t *b, capnp_dyn_t *d,
       case TY_TEXT: {
         const char *t = "";
         size_t tn = 0;
-        if (capnp_list_get_text(list, i, &t, &tn) != CAPNP_OK ||
-            quote_text_capnp(&eb, (const uint8_t *)t, tn, 0)) {
+        enc_list_text(list, i, &t, &tn);
+        if (quote_text_capnp(&eb, (const uint8_t *)t, tn, 0)) {
           free(eb.data);
           free_pieces(&pl);
           return -1;
@@ -1936,12 +2292,10 @@ static int encode_text_list(buf_t *b, capnp_dyn_t *d,
         break;
       }
       case TY_DATA: {
-        capnp_ptr_t el;
         const uint8_t *p = NULL;
         size_t pn = 0;
-        if (capnp_list_get_struct(list, i, &el) != CAPNP_OK ||
-            capnp_get_data(&el, 0, &p, &pn) != CAPNP_OK ||
-            quote_text_capnp(&eb, p, pn, 1)) {
+        enc_list_data(list, i, &p, &pn);
+        if (quote_text_capnp(&eb, p, pn, 1)) {
           free(eb.data);
           free_pieces(&pl);
           return -1;
@@ -1951,22 +2305,27 @@ static int encode_text_list(buf_t *b, capnp_dyn_t *d,
       case TY_STRUCT: {
         capnp_ptr_t el;
         dyn_struct_t *es = find_struct_id(d, elem_rt->type_id);
-        if (!es || capnp_list_get_struct(list, i, &el) != CAPNP_OK ||
-            encode_text_struct(&eb, d, es, &elem_rt->brand, &el, next_ind,
-                               TMODE_BARE, depth + 1)) {
+        if (es)
+          enc_list_struct(list, i, &el);
+        if (!es || encode_text_struct(&eb, d, es, &elem_rt->brand, &el,
+                                      next_ind, TMODE_BARE, depth + 1)) {
           free(eb.data);
           free_pieces(&pl);
           return -1;
         }
         break;
       }
-      case TY_IFACE:
+      case TY_IFACE: {
+        capnp_ptr_t c;
+        enc_list_ptr(list, i, &c);
+        enc_expect_cap(&c);
         if (buf_str(&eb, "<external capability>")) {
           free(eb.data);
           free_pieces(&pl);
           return -1;
         }
         break;
+      }
       case TY_ANY:
         if (buf_str(&eb, "<opaque pointer>")) {
           free(eb.data);
@@ -2016,9 +2375,8 @@ static int encode_text_field_value(buf_t *b, capnp_dyn_t *d,
     capnp_ptr_t list;
     rtype_t elem = ft;
     elem.list_depth--;
-    memset(&list, 0, sizeof(list));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &list);
+    enc_getp(s, (uint16_t)f->offset, &list);
+    enc_expect_list(&list, &elem);
     if (list.kind == CAPNP_PK_NULL && f->has_def_val)
       capnp_getp(&f->def_val, 0, &list);
     rc = encode_text_list(b, d, &elem, &list, indent, TMODE_PREFIXED,
@@ -2085,38 +2443,14 @@ static int encode_text_field_value(buf_t *b, capnp_dyn_t *d,
   case TY_TEXT: {
     const char *t = "";
     size_t tn = 0;
-    capnp_ptr_t p;
-    memset(&p, 0, sizeof(p));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &p);
-    if (p.kind != CAPNP_PK_NULL) {
-      if (capnp_get_text(s, (uint16_t)f->offset, &t, &tn) != CAPNP_OK) {
-        free_rtype(&ft);
-        return -1;
-      }
-    } else if (f->has_def_val &&
-               capnp_get_u16(&f->def_val, 0, 0xffff) == TY_TEXT) {
-      capnp_get_text(&f->def_val, 0, &t, &tn);
-    }
+    enc_field_blob(s, f, TY_TEXT, (const void **)&t, &tn);
     rc = quote_text_capnp(b, (const uint8_t *)t, tn, 0);
     break;
   }
   case TY_DATA: {
     const uint8_t *p = NULL;
     size_t pn = 0;
-    capnp_ptr_t q;
-    memset(&q, 0, sizeof(q));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &q);
-    if (q.kind != CAPNP_PK_NULL) {
-      if (capnp_get_data(s, (uint16_t)f->offset, &p, &pn) != CAPNP_OK) {
-        free_rtype(&ft);
-        return -1;
-      }
-    } else if (f->has_def_val &&
-               capnp_get_u16(&f->def_val, 0, 0xffff) == TY_DATA) {
-      capnp_get_data(&f->def_val, 0, &p, &pn);
-    }
+    enc_field_blob(s, f, TY_DATA, (const void **)&p, &pn);
     rc = quote_text_capnp(b, p, pn, 1);
     break;
   }
@@ -2128,17 +2462,21 @@ static int encode_text_field_value(buf_t *b, capnp_dyn_t *d,
       free_rtype(&ft);
       return -1;
     }
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &child);
+    enc_getp(s, (uint16_t)f->offset, &child);
+    enc_expect_struct(&child);
     if (child.kind == CAPNP_PK_NULL && f->has_def_val)
       capnp_getp(&f->def_val, 0, &child);
     rc = encode_text_struct(b, d, cs, &ft.brand, &child, indent,
                             TMODE_PREFIXED, depth + 1);
     break;
   }
-  case TY_IFACE:
+  case TY_IFACE: {
+    capnp_ptr_t c;
+    enc_getp(s, (uint16_t)f->offset, &c);
+    enc_expect_cap(&c);
     rc = buf_str(b, "<external capability>");
     break;
+  }
   case TY_ANY:
     rc = buf_str(b, "<opaque pointer>");
     break;
@@ -2158,8 +2496,10 @@ static int encode_text_struct(buf_t *b, capnp_dyn_t *d,
   uint32_t i;
   uint16_t which = 0xffff;
   int next_ind = indent ? indent + 1 : 0;
-  if (depth > MAX_DEPTH)
+  capnp_ptr_t empty;
+  if (depth > value_depth)
     return -1;
+  s = as_struct(s, &empty);
   if (buf_ch(b, '('))
     return -1;
   memset(&pl, 0, sizeof(pl));
@@ -2167,13 +2507,14 @@ static int encode_text_struct(buf_t *b, capnp_dyn_t *d,
   for (i = 0; i < st->nfields; i++) {
     const dyn_field_t *f = &st->fields[i];
     buf_t fb;
-    int has = field_has_wire(d, s, f, env, 1);
+    /* stringify.c++ asks `has` only of non-union fields and of an active
+     * member with discriminant 0. */
     if (f->disc != 0xffff && st->disc_count) {
       if (f->disc != which)
         continue;
-      if (f->disc == 0 && !has)
+      if (f->disc == 0 && !field_has_wire(d, s, f, env, 1))
         continue;
-    } else if (!has) {
+    } else if (!field_has_wire(d, s, f, env, 1)) {
       continue;
     }
     memset(&fb, 0, sizeof(fb));
@@ -2370,9 +2711,11 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
   uint16_t which = 0xffff;
   disc_opts_t dopts;
   const char *tag_name = NULL;
+  capnp_ptr_t empty;
 
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
+  s = as_struct(s, &empty);
   memset(&dopts, 0, sizeof(dopts));
   if (disc_override && disc_override->present)
     dopts = *disc_override;
@@ -2409,9 +2752,8 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
         if (resolve_field_type(d, f, env, &ft))
           return -1;
         cs = find_struct_id(d, ft.type_id);
-        memset(&child, 0, sizeof(child));
-        if (s && s->kind == CAPNP_PK_STRUCT)
-          capnp_getp(s, (uint16_t)f->offset, &child);
+        enc_getp(s, (uint16_t)f->offset, &child);
+        enc_expect_struct(&child);
         if (!cs ||
             gather_json_fields(d, cs, &ft.brand, &child, NULL, NULL,
                                next_prefix, out, depth + 1)) {
@@ -2440,7 +2782,7 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
     const dyn_field_t *uf = NULL;
     struct_which(s, st, &which);
     for (i = 0; i < st->nfields; i++) {
-      if (st->fields[i].disc == which) {
+      if (st->fields[i].disc != 0xffff && st->fields[i].disc == which) {
         uf = &st->fields[i];
         break;
       }
@@ -2474,9 +2816,8 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
           if (resolve_field_type(d, uf, env, &ft))
             return -1;
           cs = find_struct_id(d, ft.type_id);
-          memset(&child, 0, sizeof(child));
-          if (s && s->kind == CAPNP_PK_STRUCT)
-            capnp_getp(s, (uint16_t)uf->offset, &child);
+          enc_getp(s, (uint16_t)uf->offset, &child);
+          enc_expect_struct(&child);
           if (!cs ||
               gather_json_fields(d, cs, &ft.brand, &child, NULL, NULL,
                                  next_prefix, out, depth + 1)) {
@@ -2570,12 +2911,64 @@ static int encode_json_data_bytes(buf_t *b, const uint8_t *data, size_t len,
   return buf_ch(b, ']');
 }
 
+/* Follow every pointer under @p the way WireHelpers::copyPointer does,
+ * noting the first one that cannot be read. */
+static void check_copy_ptr(const capnp_ptr_t *p, int depth) {
+  capnp_ptr_t c;
+  uint32_t i;
+  int rc;
+  if (depth > value_depth)
+    return;
+  if (p->kind == CAPNP_PK_STRUCT) {
+    for (i = 0; i < p->pwords; i++) {
+      rc = capnp_getp(p, (uint16_t)i, &c);
+      if (rc != CAPNP_OK)
+        note_wire(rc);
+      else
+        check_copy_ptr(&c, depth + 1);
+    }
+  } else if (p->kind == CAPNP_PK_LIST &&
+             (p->esize == CAPNP_SZ_PTR || p->esize == CAPNP_SZ_COMPOSITE)) {
+    for (i = 0; i < p->count; i++) {
+      rc = capnp_list_getp(p, i, &c);
+      if (rc != CAPNP_OK)
+        note_wire(rc);
+      else
+        check_copy_ptr(&c, depth + 1);
+    }
+  } else if (p->kind == CAPNP_PK_CAP && encode_no_caps) {
+    note_wire(CAPNP_ERR_KIND);
+  }
+}
+
+static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
+                                    int *multiline, int has_prefix, int pretty,
+                                    int depth);
+
+/* JsonValueHandler::encode copies the first pointer of a `Json.Value`
+ * before printing it, and that copy reads its whole tree. */
+static int encode_json_value_top(buf_t *b, const capnp_ptr_t *s, int indent,
+                                 int *multiline, int has_prefix, int pretty,
+                                 int depth) {
+  capnp_ptr_t c;
+  int rc;
+  if (s && s->kind == CAPNP_PK_STRUCT && s->pwords > 0) {
+    rc = capnp_getp(s, 0, &c);
+    if (rc != CAPNP_OK)
+      note_wire(rc);
+    else
+      check_copy_ptr(&c, depth + 1);
+  }
+  return encode_json_value_struct(b, s, indent, multiline, has_prefix, pretty,
+                                  depth);
+}
+
 /* Encode a capnp/compat/json.capnp:Value struct directly as raw JSON */
 static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
                                     int *multiline, int has_prefix, int pretty,
                                     int depth) {
   uint16_t which;
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   which = (s && s->kind == CAPNP_PK_STRUCT) ? capnp_get_u16(s, 0, 0) : 0;
   switch (which) {
@@ -2592,8 +2985,7 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
   case 3: { /* string */
     const char *t = "";
     size_t tn = 0;
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_get_text(s, 0, &t, &tn);
+    enc_get_text(s, 0, &t, &tn);
     return quote_json_string(b, t, tn);
   }
   case 4: { /* array @0 :List(Value) */
@@ -2603,9 +2995,8 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
     int sub_indent;
     if (buf_ch(b, '['))
       return -1;
-    memset(&arr, 0, sizeof(arr));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, 0, &arr);
+    enc_getp(s, 0, &arr);
+    enc_expect_struct_list(&arr);
     if (arr.kind == CAPNP_PK_LIST)
       n = capnp_list_len(&arr);
     sub_indent = indent + (n > 1 ? 1 : 0);
@@ -2615,8 +3006,8 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
       buf_t eb;
       int cm = 0;
       memset(&eb, 0, sizeof(eb));
-      if (capnp_list_get_struct(&arr, i, &el) != CAPNP_OK ||
-          encode_json_value_struct(&eb, &el, sub_indent, &cm, 0, pretty,
+      enc_list_struct(&arr, i, &el);
+      if (encode_json_value_struct(&eb, &el, sub_indent, &cm, 0, pretty,
                                    depth + 1) ||
           add_json_item(&jl, eb.data, eb.n, cm)) {
         free(eb.data);
@@ -2638,9 +3029,8 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
     int sub_indent;
     if (buf_ch(b, '{'))
       return -1;
-    memset(&obj, 0, sizeof(obj));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, 0, &obj);
+    enc_getp(s, 0, &obj);
+    enc_expect_struct_list(&obj);
     if (obj.kind == CAPNP_PK_LIST)
       n = capnp_list_len(&obj);
     sub_indent = indent + (n > 1 ? 1 : 0);
@@ -2652,13 +3042,10 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
       buf_t eb;
       int cm = 0;
       memset(&eb, 0, sizeof(eb));
-      memset(&fval, 0, sizeof(fval));
-      if (capnp_list_get_struct(&obj, i, &fld) != CAPNP_OK) {
-        free_json_list(&jl);
-        return -1;
-      }
-      capnp_get_text(&fld, 0, &fn, &fn_len);
-      capnp_getp(&fld, 1, &fval);
+      enc_list_struct(&obj, i, &fld);
+      enc_get_text(&fld, 0, &fn, &fn_len);
+      enc_getp(&fld, 1, &fval);
+      enc_expect_struct(&fval);
       if (quote_json_string(&eb, fn, fn_len) ||
           buf_str(&eb, pretty ? ": " : ":") ||
           encode_json_value_struct(&eb, &fval, sub_indent, &cm, 1, pretty,
@@ -2683,14 +3070,11 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
     json_list_t jl;
     uint32_t i, n = 0;
     int sub_indent;
-    memset(&call, 0, sizeof(call));
-    memset(&params, 0, sizeof(params));
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, 0, &call);
-    if (call.kind == CAPNP_PK_STRUCT) {
-      capnp_get_text(&call, 0, &fn, &fn_len);
-      capnp_getp(&call, 1, &params);
-    }
+    enc_getp(s, 0, &call);
+    enc_expect_struct(&call);
+    enc_get_text(&call, 0, &fn, &fn_len);
+    enc_getp(&call, 1, &params);
+    enc_expect_struct_list(&params);
     if (buf_add(b, fn, fn_len) || buf_ch(b, '('))
       return -1;
     if (params.kind == CAPNP_PK_LIST)
@@ -2702,8 +3086,8 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
       buf_t eb;
       int cm = 0;
       memset(&eb, 0, sizeof(eb));
-      if (capnp_list_get_struct(&params, i, &el) != CAPNP_OK ||
-          encode_json_value_struct(&eb, &el, sub_indent, &cm, 1, pretty,
+      enc_list_struct(&params, i, &el);
+      if (encode_json_value_struct(&eb, &el, sub_indent, &cm, 1, pretty,
                                    depth + 1) ||
           add_json_item(&jl, eb.data, eb.n, cm)) {
         free(eb.data);
@@ -2721,8 +3105,7 @@ static int encode_json_value_struct(buf_t *b, const capnp_ptr_t *s, int indent,
   case 7: { /* raw @0 :Text */
     const char *t = "";
     size_t tn = 0;
-    if (s && s->kind == CAPNP_PK_STRUCT)
-      capnp_get_text(s, 0, &t, &tn);
+    enc_get_text(s, 0, &t, &tn);
     return buf_add(b, t, tn);
   }
   default:
@@ -2737,7 +3120,7 @@ static int encode_json_list(buf_t *b, capnp_dyn_t *d,
   json_list_t jl;
   uint32_t i, n;
   int sub_indent;
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   if (buf_ch(b, '['))
     return -1;
@@ -2755,8 +3138,9 @@ static int encode_json_list(buf_t *b, capnp_dyn_t *d,
       capnp_ptr_t sub;
       rtype_t inner = *elem_rt;
       inner.list_depth--;
-      if (capnp_list_getp(list, i, &sub) != CAPNP_OK ||
-          encode_json_list(&eb, d, &inner, &sub, sub_indent, &cm, 0, pretty,
+      enc_list_ptr(list, i, &sub);
+      enc_expect_list(&sub, &inner);
+      if (encode_json_list(&eb, d, &inner, &sub, sub_indent, &cm, 0, pretty,
                            depth + 1)) {
         free(eb.data);
         free_json_list(&jl);
@@ -2810,32 +3194,27 @@ static int encode_json_list(buf_t *b, capnp_dyn_t *d,
       case TY_TEXT: {
         const char *t = "";
         size_t tn = 0;
-        if (capnp_list_get_text(list, i, &t, &tn) != CAPNP_OK)
-          rc = -1;
-        else
-          rc = quote_json_string(&eb, t, tn);
+        enc_list_text(list, i, &t, &tn);
+        rc = quote_json_string(&eb, t, tn);
         break;
       }
       case TY_DATA: {
-        capnp_ptr_t el;
         const uint8_t *p = NULL;
         size_t pn = 0;
-        if (capnp_list_get_struct(list, i, &el) != CAPNP_OK ||
-            capnp_get_data(&el, 0, &p, &pn) != CAPNP_OK)
-          rc = -1;
-        else
-          rc = encode_json_data_bytes(&eb, p, pn, 0, sub_indent, &cm, 0,
-                                      pretty);
+        enc_list_data(list, i, &p, &pn);
+        rc = encode_json_data_bytes(&eb, p, pn, 0, sub_indent, &cm, 0, pretty);
         break;
       }
       case TY_STRUCT: {
         capnp_ptr_t el;
         dyn_struct_t *es = find_struct_id(d, elem_rt->type_id);
-        if (!es || capnp_list_get_struct(list, i, &el) != CAPNP_OK)
+        if (es)
+          enc_list_struct(list, i, &el);
+        if (!es)
           rc = -1;
         else if (es->id == JSON_VALUE_TYPE_ID)
-          rc = encode_json_value_struct(&eb, &el, sub_indent, &cm, 0, pretty,
-                                        depth + 1);
+          rc = encode_json_value_top(&eb, &el, sub_indent, &cm, 0, pretty,
+                                     depth + 1);
         else
           rc = encode_json_struct(&eb, d, es, &elem_rt->brand, &el, NULL, NULL,
                                   sub_indent, &cm, 0, pretty, depth + 1);
@@ -2891,9 +3270,8 @@ static int encode_json_field_item(buf_t *b, capnp_dyn_t *d,
     capnp_ptr_t list;
     rtype_t elem = ft;
     elem.list_depth--;
-    memset(&list, 0, sizeof(list));
-    if (s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &list);
+    enc_getp(s, (uint16_t)f->offset, &list);
+    enc_expect_list(&list, &elem);
     if (list.kind == CAPNP_PK_NULL && f->has_def_val)
       capnp_getp(&f->def_val, 0, &list);
     rc = encode_json_list(b, d, &elem, &list, indent, multiline, 1, pretty,
@@ -2966,38 +3344,14 @@ static int encode_json_field_item(buf_t *b, capnp_dyn_t *d,
   case TY_TEXT: {
     const char *t = "";
     size_t tn = 0;
-    capnp_ptr_t p;
-    memset(&p, 0, sizeof(p));
-    if (s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &p);
-    if (p.kind != CAPNP_PK_NULL) {
-      if (capnp_get_text(s, (uint16_t)f->offset, &t, &tn) != CAPNP_OK) {
-        free_rtype(&ft);
-        return -1;
-      }
-    } else if (f->has_def_val &&
-               capnp_get_u16(&f->def_val, 0, 0xffff) == TY_TEXT) {
-      capnp_get_text(&f->def_val, 0, &t, &tn);
-    }
+    enc_field_blob(s, f, TY_TEXT, (const void **)&t, &tn);
     rc = quote_json_string(b, t, tn);
     break;
   }
   case TY_DATA: {
     const uint8_t *p = NULL;
     size_t pn = 0;
-    capnp_ptr_t q;
-    memset(&q, 0, sizeof(q));
-    if (s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &q);
-    if (q.kind != CAPNP_PK_NULL) {
-      if (capnp_get_data(s, (uint16_t)f->offset, &p, &pn) != CAPNP_OK) {
-        free_rtype(&ft);
-        return -1;
-      }
-    } else if (f->has_def_val &&
-               capnp_get_u16(&f->def_val, 0, 0xffff) == TY_DATA) {
-      capnp_get_data(&f->def_val, 0, &p, &pn);
-    }
+    enc_field_blob(s, f, TY_DATA, (const void **)&p, &pn);
     rc = encode_json_data_bytes(b, p, pn, f->json_data_mode, indent, multiline,
                                 1, pretty);
     break;
@@ -3010,13 +3364,13 @@ static int encode_json_field_item(buf_t *b, capnp_dyn_t *d,
       free_rtype(&ft);
       return -1;
     }
-    if (s->kind == CAPNP_PK_STRUCT)
-      capnp_getp(s, (uint16_t)f->offset, &child);
+    enc_getp(s, (uint16_t)f->offset, &child);
+    enc_expect_struct(&child);
     if (child.kind == CAPNP_PK_NULL && f->has_def_val)
       capnp_getp(&f->def_val, 0, &child);
     if (cs->id == JSON_VALUE_TYPE_ID)
-      rc = encode_json_value_struct(b, &child, indent, multiline, 1, pretty,
-                                    depth + 1);
+      rc = encode_json_value_top(b, &child, indent, multiline, 1, pretty,
+                                 depth + 1);
     else
       rc = encode_json_struct(b, d, cs, &ft.brand, &child, NULL, NULL, indent,
                               multiline, 1, pretty, depth + 1);
@@ -3041,12 +3395,14 @@ static int encode_json_struct(buf_t *b, capnp_dyn_t *d,
   json_list_t jl;
   uint32_t i;
   int sub_indent;
+  capnp_ptr_t empty;
 
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   if (st->id == JSON_VALUE_TYPE_ID)
-    return encode_json_value_struct(b, s, indent, multiline, has_prefix, pretty,
-                                    depth);
+    return encode_json_value_top(b, s, indent, multiline, has_prefix, pretty,
+                                 depth);
+  s = as_struct(s, &empty);
   memset(&fl, 0, sizeof(fl));
   if (gather_json_fields(d, st, env, s, disc_override, union_decl_name, "", &fl,
                          depth)) {
@@ -3082,18 +3438,39 @@ static int encode_json_struct(buf_t *b, capnp_dyn_t *d,
   free_json_list(&jl);
   return buf_ch(b, '}');
 }
+/* With @wire_err set, a walk that met reader errors keeps its output and
+ * reports the first error there. */
 static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
                             const capnp_ptr_t *s, int json, int pretty,
-                            char **out, size_t *len) {
+                            char **out, size_t *len, int *wire_err) {
   rtype_t rt;
   dyn_struct_t *st = NULL;
+  capnp_ptr_t empty;
   buf_t b;
   int rc;
   if (!d || !s || !out || !len)
     return CAPNP_ERR_ARG;
+  if (s->kind == CAPNP_PK_NULL) {
+    empty = *s;
+    empty.kind = CAPNP_PK_STRUCT;
+    empty.dwords = 0;
+    empty.pwords = 0;
+    empty.data_bits = 0;
+    empty.body_byte = 0;
+    s = &empty;
+  }
   *out = NULL;
   *len = 0;
   encode_oom = 0;
+  encode_wire_err = CAPNP_OK;
+  encode_io_err = 0;
+  encode_cap_err = 0;
+  encode_no_caps = wire_err != NULL;
+  if (wire_err)
+    *wire_err = CAPNP_OK;
+  value_depth = dyn_max_depth;
+  if (s->kind != CAPNP_PK_STRUCT && s->kind != CAPNP_PK_NULL)
+    return CAPNP_ERR_KIND;
   if (resolve_root_type_name(d, type_name, &rt, &st) != CAPNP_OK)
     return CAPNP_ERR_KIND;
   memset(&b, 0, sizeof(b));
@@ -3106,12 +3483,21 @@ static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
                             0);
   }
   free_rtype(&rt);
-  if (rc || !b.data) {
+  encode_no_caps = 0;
+  if (encode_io_err || encode_cap_err) {
+    free(b.data);
+    return encode_io_err ? CAPNP_ERR_IO : CAPNP_ERR_KIND;
+  }
+  if (rc || !b.data || (encode_wire_err && !wire_err)) {
     free(b.data);
     if (encode_oom)
       return CAPNP_ERR_ALLOC;
+    if (encode_wire_err)
+      return encode_wire_err;
     return CAPNP_ERR_KIND;
   }
+  if (wire_err)
+    *wire_err = encode_wire_err;
   *out = b.data;
   *len = b.n;
   return CAPNP_OK;
@@ -3119,22 +3505,30 @@ static int encode_root_impl(capnp_dyn_t *d, const char *type_name,
 
 int capnp_dyn_encode_text(capnp_dyn_t *d, const char *type_name,
                           const capnp_ptr_t *s, char **out, size_t *len) {
-  return encode_root_impl(d, type_name, s, 0, 1, out, len);
+  return encode_root_impl(d, type_name, s, 0, 1, out, len, NULL);
 }
 
 int capnp_dyn_encode_text_short(capnp_dyn_t *d, const char *type_name,
                                 const capnp_ptr_t *s, char **out, size_t *len) {
-  return encode_root_impl(d, type_name, s, 0, 0, out, len);
+  return encode_root_impl(d, type_name, s, 0, 0, out, len, NULL);
 }
 
 int capnp_dyn_encode_json(capnp_dyn_t *d, const char *type_name,
                           const capnp_ptr_t *s, char **out, size_t *len) {
-  return encode_root_impl(d, type_name, s, 1, 1, out, len);
+  return encode_root_impl(d, type_name, s, 1, 1, out, len, NULL);
 }
 
 int capnp_dyn_encode_json_short(capnp_dyn_t *d, const char *type_name,
                                 const capnp_ptr_t *s, char **out, size_t *len) {
-  return encode_root_impl(d, type_name, s, 1, 0, out, len);
+  return encode_root_impl(d, type_name, s, 1, 0, out, len, NULL);
+}
+
+int capnp_dyn_encode_recover(capnp_dyn_t *d, const char *type_name,
+                             const capnp_ptr_t *s, int json, int pretty,
+                             char **out, size_t *len, int *wire_err) {
+  int ignored;
+  return encode_root_impl(d, type_name, s, json, pretty, out, len,
+                          wire_err ? wire_err : &ignored);
 }
 /* --- JSON and Text AST parser & builder --- */
 
@@ -3149,7 +3543,13 @@ enum {
   VK_BYTES = 7,
   VK_IDENT = 8,
   VK_LIST = 9,
-  VK_OBJ = 10
+  VK_OBJ = 10,
+  /* Text: a list item the parser could not read, after a recoverable
+   * error. */
+  VK_UNKNOWN = 11,
+  /* Text: a member access, application, absolute name, import or embed,
+   * which only the resolver could evaluate. */
+  VK_EXTERN = 12
 };
 
 typedef struct vnode vnode_t;
@@ -3169,6 +3569,12 @@ struct vnode {
   /* JSON source span, including quotes for strings. Not owned. */
   const char *src;
   size_t src_n;
+  /* Text: written as a bare name (void, true, false, inf, nan), which
+   * ValueTranslator resolves as an enumerant first. */
+  int ident;
+  /* Text: a negative integer beyond INT64_MIN, which ValueTranslator
+   * drops with "Integer is too big to be negative". */
+  int neg_big;
 };
 
 static void free_vnode(vnode_t *v) {
@@ -3209,8 +3615,8 @@ typedef struct {
   size_t n;
   size_t i;
   int depth;
-  /* Set when a \u escape is a surrogate that does not form a pair. */
-  const char *err;
+  /* Text: an error the C++ parser does not recover from. */
+  int fatal;
 } scan_t;
 
 static int hex_nibble(unsigned char c) {
@@ -3342,23 +3748,18 @@ static int parse_json_str_raw(scan_t *sc, char **out, size_t *len) {
         }
         sc->i += 4;
         cp = (uint32_t)((d0 << 12) | (d1 << 8) | (d2 << 4) | d3);
-        if (cp >= 0xd800 && cp <= 0xdbff && sc->i + 6 <= sc->n &&
-            sc->s[sc->i] == '\\' && sc->s[sc->i + 1] == 'u') {
-          int l0 = hex_nibble((unsigned char)sc->s[sc->i + 2]);
-          int l1 = hex_nibble((unsigned char)sc->s[sc->i + 3]);
-          int l2 = hex_nibble((unsigned char)sc->s[sc->i + 4]);
-          int l3 = hex_nibble((unsigned char)sc->s[sc->i + 5]);
-          if (l0 >= 0 && l1 >= 0 && l2 >= 0 && l3 >= 0) {
-            uint32_t low = (uint32_t)((l0 << 12) | (l1 << 8) | (l2 << 4) | l3);
-            if (low >= 0xdc00 && low <= 0xdfff) {
-              sc->i += 6;
-              cp = 0x10000u + (((cp - 0xd800u) << 10) | (low - 0xdc00u));
-            }
+        /* JsonCodec decodes each escape alone with kj::decodeUtf16, so a
+         * surrogate becomes its own three-byte sequence (CESU-8). */
+        if (cp >= 0xd800 && cp <= 0xdfff) {
+          char sur[3];
+          sur[0] = (char)(0xe0 | (cp >> 12));
+          sur[1] = (char)(0x80 | ((cp >> 6) & 0x3f));
+          sur[2] = (char)(0x80 | (cp & 0x3f));
+          if (buf_add(&b, sur, 3)) {
+            free(b.data);
+            return -1;
           }
-        }
-        if (buf_add_utf8(&b, cp)) {
-          if (cp >= 0xd800 && cp <= 0xdfff)
-            sc->err = "lone surrogate";
+        } else if (buf_add_utf8(&b, cp)) {
           free(b.data);
           return -1;
         }
@@ -3391,11 +3792,32 @@ static int parse_json_str_raw(scan_t *sc, char **out, size_t *len) {
 
 static vnode_t *parse_json_val(scan_t *sc);
 
+/* strtod over exactly `len` bytes, which must all be consumed. Literals
+ * have no length limit, as in kj. */
+static int strtod_n(const char *s, size_t len, double *out) {
+  char small[128];
+  char *buf = small, *endp = NULL;
+  int rc = 0;
+  if (len >= sizeof(small)) {
+    buf = (char *)malloc(len + 1);
+    if (!buf)
+      return -1;
+  }
+  memcpy(buf, s, len);
+  buf[len] = 0;
+  *out = strtod(buf, &endp);
+  if (!endp || *endp != 0)
+    rc = -1;
+  if (buf != small)
+    free(buf);
+  return rc;
+}
+
+static int soft_error(void);
+
 static vnode_t *parse_json_num(scan_t *sc) {
   size_t start = sc->i;
-  char tmp[128];
   size_t len;
-  char *endp = NULL;
   double dv;
   vnode_t *v;
 
@@ -3424,13 +3846,13 @@ static vnode_t *parse_json_num(scan_t *sc) {
       sc->i++;
   }
   len = sc->i - start;
-  if (len == 0 || len >= sizeof(tmp))
-    return NULL;
-  memcpy(tmp, sc->s + start, len);
-  tmp[len] = 0;
-  dv = strtod(tmp, &endp);
-  if (!endp || *endp != 0)
-    return NULL;
+  /* kj lexes an exponent without digits; `parseAs<double>` then
+   * recovers with 0. */
+  if (strtod_n(sc->s + start, len, &dv)) {
+    if (soft_error())
+      return NULL;
+    dv = 0;
+  }
   v = new_vnode(VK_FLOAT);
   if (!v)
     return NULL;
@@ -3442,7 +3864,7 @@ static vnode_t *parse_json_arr(scan_t *sc) {
   vnode_t *arr;
   int expect_comma = 0;
   sc->i++; /* consume '[' */
-  if (++sc->depth > MAX_DEPTH)
+  if (++sc->depth > JSON_MAX_DEPTH)
     return NULL;
   arr = new_vnode(VK_LIST);
   if (!arr)
@@ -3481,7 +3903,7 @@ static vnode_t *parse_json_obj(scan_t *sc) {
   vnode_t *obj;
   int expect_comma = 0;
   sc->i++; /* consume '{' */
-  if (++sc->depth > MAX_DEPTH)
+  if (++sc->depth > JSON_MAX_DEPTH)
     return NULL;
   obj = new_vnode(VK_OBJ);
   if (!obj)
@@ -3636,10 +4058,17 @@ static int tpeek(scan_t *sc) {
   return (unsigned char)sc->s[sc->i];
 }
 
+/* The C++ lexer reads a run of operator characters as one token, so `=-5`
+ * contains the operator `=-` and is a parse error. */
+static int op_ends(const scan_t *sc) {
+  return sc->i >= sc->n || sc->s[sc->i] == '\0' ||
+         strchr("!$%&*+-./:<=>?@^|~", sc->s[sc->i]) == NULL;
+}
+
 static int parse_text_quoted_one(scan_t *sc, buf_t *b) {
   char q;
   tskip(sc);
-  if (sc->i >= sc->n || (sc->s[sc->i] != '"' && sc->s[sc->i] != '\''))
+  if (sc->i >= sc->n || sc->s[sc->i] != '"')
     return -1;
   q = sc->s[sc->i++];
   while (sc->i < sc->n && sc->s[sc->i] != q) {
@@ -3781,210 +4210,362 @@ static int parse_text_ident(scan_t *sc, char *out, size_t n) {
 
 static vnode_t *parse_text_expr(scan_t *sc);
 
-static vnode_t *parse_text_tuple(scan_t *sc) {
-  vnode_t *obj;
-  sc->i++; /* consume '(' */
-  if (++sc->depth > MAX_DEPTH)
-    return NULL;
-  if (tpeek(sc) == ')') {
-    sc->i++;
-    sc->depth--;
-    return new_vnode(VK_OBJ);
-  }
-  /* Check if first element is `ident = expr` or unnamed `expr` */
-  {
-    size_t save = sc->i;
-    char id[128];
-    int is_named = 0;
-    if (parse_text_ident(sc, id, sizeof(id)) == 0 && tpeek(sc) == '=') {
-      is_named = 1;
-    }
-    sc->i = save;
-    if (!is_named) {
-      /* Single unnamed value in parentheses, e.g. `(99)` */
-      vnode_t *inner = parse_text_expr(sc);
-      if (!inner)
-        return NULL;
-      if (tpeek(sc) != ')') {
-        free_vnode(inner);
-        return NULL;
-      }
-      sc->i++;
-      sc->depth--;
-      return inner;
-    }
-  }
-  obj = new_vnode(VK_OBJ);
-  if (!obj)
-    return NULL;
-  while (tpeek(sc) != ')') {
-    char id[128];
-    vnode_t *val;
-    if (parse_text_ident(sc, id, sizeof(id)) != 0 || tpeek(sc) != '=') {
-      free_vnode(obj);
-      return NULL;
-    }
-    sc->i++; /* consume '=' */
-    val = parse_text_expr(sc);
-    if (!val) {
-      free_vnode(obj);
-      return NULL;
-    }
-    val->key = (char *)malloc(strlen(id) + 1);
-    if (!val->key) {
-      free_vnode(val);
-      free_vnode(obj);
-      return NULL;
-    }
-    memcpy(val->key, id, strlen(id) + 1);
-    if (push_vnode(obj, val)) {
-      free_vnode(val);
-      free_vnode(obj);
-      return NULL;
-    }
-    if (tpeek(sc) == ',') {
-      sc->i++;
-      if (tpeek(sc) == ')')
-        break; /* trailing comma allowed */
-      if (tpeek(sc) == ',') {
-        free_vnode(obj);
-        return NULL; /* empty item not allowed */
-      }
-    } else if (tpeek(sc) != ')') {
-      free_vnode(obj);
-      return NULL;
-    }
-  }
-  if (tpeek(sc) != ')') {
-    free_vnode(obj);
-    return NULL;
-  }
-  sc->i++;
-  sc->depth--;
-  return obj;
+#define TEXT_OPS "!$%&*+-./:<=>?@^|~"
+
+static char *dup_cstr(const char *src) {
+  size_t n = strlen(src) + 1;
+  char *out = (char *)malloc(n);
+  if (out)
+    memcpy(out, src, n);
+  return out;
 }
 
-static vnode_t *parse_text_list(scan_t *sc) {
-  vnode_t *arr;
-  sc->i++; /* consume '[' */
-  if (++sc->depth > MAX_DEPTH)
-    return NULL;
-  arr = new_vnode(VK_LIST);
+/* Offset of the ',' or closing bracket that ends the list item at
+ * sc->i, or sc->n. The input has lexed, so brackets balance and strings
+ * end. */
+static size_t text_item_end(const scan_t *sc) {
+  scan_t t = *sc;
+  int depth = 0;
+  for (;;) {
+    int c;
+    tskip(&t);
+    if (t.i >= t.n)
+      return t.n;
+    c = (unsigned char)t.s[t.i];
+    if (c == '"') {
+      buf_t b;
+      int r;
+      memset(&b, 0, sizeof(b));
+      r = parse_text_quoted_one(&t, &b);
+      free(b.data);
+      if (r)
+        return t.n;
+      continue;
+    }
+    if (c == '(' || c == '[') {
+      depth++;
+    } else if (c == ')' || c == ']') {
+      if (depth == 0)
+        return t.i;
+      depth--;
+    } else if (c == ',' && depth == 0) {
+      return t.i;
+    }
+    t.i++;
+  }
+}
+
+/* The items of a parenthesized or bracketed list, each parsed alone as
+ * ParseListItems does (compiler/parser.c++). An item that does not
+ * parse, or is empty, becomes an unnamed VK_UNKNOWN after a recoverable
+ * error. The lexer drops one trailing empty item. */
+static vnode_t *parse_text_items(scan_t *sc, int tuple) {
+  vnode_t *arr = new_vnode(tuple ? VK_OBJ : VK_LIST);
+  int commas = 0;
   if (!arr)
     return NULL;
-  while (tpeek(sc) != ']') {
-    vnode_t *el;
-    if (tpeek(sc) == 0 || tpeek(sc) == ',') {
-      free_vnode(arr);
-      return NULL;
-    }
-    el = parse_text_expr(sc);
-    if (!el || push_vnode(arr, el)) {
-      free_vnode(el);
-      free_vnode(arr);
-      return NULL;
-    }
-    if (tpeek(sc) == ',') {
-      sc->i++;
-      if (tpeek(sc) == ']')
-        break; /* trailing comma allowed */
-      if (tpeek(sc) == ',') {
-        free_vnode(arr);
-        return NULL;
-      }
-    } else if (tpeek(sc) != ']') {
-      free_vnode(arr);
-      return NULL;
-    }
-  }
-  if (tpeek(sc) != ']') {
+  sc->i++; /* consume '(' or '[' */
+  if (++sc->depth > value_depth) {
+    sc->fatal = 1;
     free_vnode(arr);
     return NULL;
   }
-  sc->i++;
+  for (;;) {
+    size_t end = text_item_end(sc);
+    scan_t sub = *sc;
+    vnode_t *val = NULL;
+    char *key = NULL;
+    int last, bad = 0;
+    if (end >= sc->n) {
+      sc->fatal = 1;
+      free_vnode(arr);
+      return NULL;
+    }
+    sub.n = end;
+    last = sc->s[end] != ',';
+    if (last && tpeek(&sub) == 0 && (commas > 0 || arr->count == 0)) {
+      sc->i = end + 1;
+      break;
+    }
+    if (tuple) {
+      size_t save = sub.i;
+      char id[128];
+      if (parse_text_ident(&sub, id, sizeof(id)) == 0 && tpeek(&sub) == '=') {
+        sub.i++;
+        if (!op_ends(&sub))
+          bad = 1;
+        else if (!(key = dup_cstr(id))) {
+          free_vnode(arr);
+          return NULL;
+        }
+      } else {
+        sub.i = save;
+      }
+    }
+    if (!bad)
+      val = parse_text_expr(&sub);
+    if (sub.fatal) {
+      sc->fatal = 1;
+      free(key);
+      free_vnode(val);
+      free_vnode(arr);
+      return NULL;
+    }
+    if (!val || tpeek(&sub) != 0) {
+      free_vnode(val);
+      free(key);
+      key = NULL;
+      if (soft_error() || !(val = new_vnode(VK_UNKNOWN))) {
+        free_vnode(arr);
+        return NULL;
+      }
+    }
+    val->key = key;
+    if (push_vnode(arr, val)) {
+      free_vnode(val);
+      free_vnode(arr);
+      return NULL;
+    }
+    sc->i = end + 1;
+    sc->depth = sub.depth;
+    if (last)
+      break;
+    commas++;
+  }
   sc->depth--;
   return arr;
 }
 
+/* A tuple of one unnamed value is that value. */
+static vnode_t *parse_text_tuple(scan_t *sc) {
+  vnode_t *t = parse_text_items(sc, 1);
+  if (t && t->count == 1 && !t->kids[0]->key) {
+    vnode_t *v = t->kids[0];
+    t->count = 0;
+    free_vnode(t);
+    return v;
+  }
+  return t;
+}
+
+static vnode_t *parse_text_list(scan_t *sc) {
+  return parse_text_items(sc, 0);
+}
+
+static int text_num_end_ok(const scan_t *sc, size_t i) {
+  return i >= sc->n || !(isalpha((unsigned char)sc->s[i]) ||
+                         sc->s[i] == '_' || sc->s[i] == '.');
+}
+
+/* Lexes a token that starts with a digit as kj::parse does: a hex
+ * binary, then `integer`, then `number`. Both numbers may not run into a
+ * letter, `_` or `.`. */
+static int text_lex_number(scan_t *sc) {
+  const char *s = sc->s;
+  size_t n = sc->n, i = sc->i, j;
+  if (i + 2 < n && s[i] == '0' && s[i + 1] == 'x' && s[i + 2] == '"') {
+    scan_t t = *sc;
+    vnode_t *v = parse_text_hex_binary(&t);
+    if (v) {
+      free_vnode(v);
+      sc->i = t.i;
+      return 0;
+    }
+  }
+  j = i;
+  if (s[i] == '0' && i + 2 < n && s[i + 1] == 'x' &&
+      hex_nibble((unsigned char)s[i + 2]) >= 0) {
+    j = i + 2;
+    while (j < n && hex_nibble((unsigned char)s[j]) >= 0)
+      j++;
+  } else if (s[i] == '0') {
+    j = i + 1;
+    while (j < n && oct_digit((unsigned char)s[j]) >= 0)
+      j++;
+  } else {
+    while (j < n && isdigit((unsigned char)s[j]))
+      j++;
+  }
+  if (text_num_end_ok(sc, j)) {
+    sc->i = j;
+    return 0;
+  }
+  j = i;
+  while (j < n && isdigit((unsigned char)s[j]))
+    j++;
+  if (j < n && s[j] == '.') {
+    j++;
+    while (j < n && isdigit((unsigned char)s[j]))
+      j++;
+  }
+  if (j < n && (s[j] == 'e' || s[j] == 'E')) {
+    j++;
+    if (j < n && (s[j] == '+' || s[j] == '-'))
+      j++;
+    while (j < n && isdigit((unsigned char)s[j]))
+      j++;
+  }
+  if (text_num_end_ok(sc, j)) {
+    sc->i = j;
+    return 0;
+  }
+  return -1;
+}
+
+/* Whether the C++ lexer reads @s as one token sequence. When it does
+ * not, it returns no tokens and `capnp` fails the message outright.
+ * Splits it makes differently, such as `0x""` into `0`, `x` and `""`,
+ * still lex; their parse errors are recoverable. */
+static int text_lexes(const char *s, size_t n) {
+  scan_t sc;
+  char *stack = NULL;
+  size_t depth = 0, cap = 0;
+  int ok = 0;
+  memset(&sc, 0, sizeof(sc));
+  sc.s = s;
+  sc.n = n;
+  for (;;) {
+    int c;
+    tskip(&sc);
+    if (sc.i >= n) {
+      ok = depth == 0;
+      break;
+    }
+    c = (unsigned char)s[sc.i];
+    if (c == '"') {
+      buf_t b;
+      int r;
+      memset(&b, 0, sizeof(b));
+      r = parse_text_quoted_one(&sc, &b);
+      free(b.data);
+      if (r)
+        break;
+      continue;
+    }
+    if (c == '(' || c == '[') {
+      if (depth == cap) {
+        size_t ncap = cap ? cap * 2 : 16;
+        char *ns = (char *)realloc(stack, ncap);
+        if (!ns)
+          break;
+        stack = ns;
+        cap = ncap;
+      }
+      stack[depth++] = (char)c;
+    } else if (c == ')' || c == ']') {
+      if (depth == 0 || stack[depth - 1] != (c == ')' ? '(' : '['))
+        break;
+      depth--;
+    } else if (c == ',') {
+      if (depth == 0)
+        break;
+    } else if (isdigit(c)) {
+      if (text_lex_number(&sc))
+        break;
+      continue;
+    } else if (isalpha(c) || c == '_') {
+      while (sc.i < n && (isalnum((unsigned char)s[sc.i]) || s[sc.i] == '_'))
+        sc.i++;
+      continue;
+    } else if (!(isalnum(c) || c == '_' || (c != 0 && strchr(TEXT_OPS, c)))) {
+      break;
+    }
+    sc.i++;
+  }
+  free(stack);
+  return ok;
+}
+
+/* A number token may not run into a letter, `_` or `.`. */
+static int number_ends(const scan_t *sc, size_t q) {
+  int c;
+  if (q >= sc->n)
+    return 1;
+  c = (unsigned char)sc->s[q];
+  return !(isalpha(c) || c == '_' || c == '.');
+}
+
 static vnode_t *parse_text_number(scan_t *sc, int neg) {
-  size_t start = sc->i;
+  size_t start = sc->i, q;
   int is_flt = 0;
   int base = 10;
-  char tmp[128];
   size_t len;
   vnode_t *v;
 
-  if (sc->i + 2 <= sc->n && sc->s[sc->i] == '0' &&
-      (sc->s[sc->i + 1] == 'x' || sc->s[sc->i + 1] == 'X')) {
-    sc->i += 2;
+  /* kj tries an integer first: `0x` hex, `0` octal, or decimal. A leading
+   * zero stops at the first non-octal digit, so `08` is two tokens. */
+  if (start + 2 < sc->n && sc->s[start] == '0' && sc->s[start + 1] == 'x' &&
+      isxdigit((unsigned char)sc->s[start + 2])) {
     base = 16;
-    if (sc->i >= sc->n || !isxdigit((unsigned char)sc->s[sc->i]))
-      return NULL;
-    while (sc->i < sc->n && isxdigit((unsigned char)sc->s[sc->i]))
-      sc->i++;
+    q = start + 2;
+    while (q < sc->n && isxdigit((unsigned char)sc->s[q]))
+      q++;
+  } else if (start < sc->n && sc->s[start] == '0') {
+    base = 8;
+    q = start + 1;
+    while (q < sc->n && sc->s[q] >= '0' && sc->s[q] <= '7')
+      q++;
   } else {
-    if (sc->i >= sc->n || !isdigit((unsigned char)sc->s[sc->i]))
-      return NULL;
-    if (sc->s[sc->i] == '0')
-      base = 8;
-    while (sc->i < sc->n && isdigit((unsigned char)sc->s[sc->i])) {
-      if (sc->s[sc->i] >= '8')
-        base = 10;
-      sc->i++;
-    }
-    if (sc->i < sc->n && sc->s[sc->i] == '.') {
-      is_flt = 1;
-      sc->i++;
-      while (sc->i < sc->n && isdigit((unsigned char)sc->s[sc->i]))
-        sc->i++;
-    }
-    if (sc->i < sc->n && (sc->s[sc->i] == 'e' || sc->s[sc->i] == 'E')) {
-      is_flt = 1;
-      sc->i++;
-      if (sc->i < sc->n && (sc->s[sc->i] == '+' || sc->s[sc->i] == '-'))
-        sc->i++;
-      if (sc->i >= sc->n || !isdigit((unsigned char)sc->s[sc->i]))
-        return NULL;
-      while (sc->i < sc->n && isdigit((unsigned char)sc->s[sc->i]))
-        sc->i++;
-    }
+    q = start;
+    while (q < sc->n && isdigit((unsigned char)sc->s[q]))
+      q++;
   }
-  if (sc->i < sc->n &&
-      (isalpha((unsigned char)sc->s[sc->i]) || sc->s[sc->i] == '_' ||
-       sc->s[sc->i] == '.'))
-    return NULL;
+  if (!number_ends(sc, q)) {
+    is_flt = 1;
+    q = start;
+    while (q < sc->n && isdigit((unsigned char)sc->s[q]))
+      q++;
+    if (q < sc->n && sc->s[q] == '.') {
+      q++;
+      while (q < sc->n && isdigit((unsigned char)sc->s[q]))
+        q++;
+    }
+    if (q < sc->n && (sc->s[q] == 'e' || sc->s[q] == 'E')) {
+      q++;
+      if (q < sc->n && (sc->s[q] == '+' || sc->s[q] == '-'))
+        q++;
+      while (q < sc->n && isdigit((unsigned char)sc->s[q]))
+        q++;
+    }
+    if (!number_ends(sc, q))
+      return NULL;
+  }
+  sc->i = q;
   len = sc->i - start;
-  if (len == 0 || len >= sizeof(tmp))
+  if (len == 0)
     return NULL;
-  memcpy(tmp, sc->s + start, len);
-  tmp[len] = 0;
 
   if (is_flt) {
-    char *endp = NULL;
     double dv;
-    errno = 0;
-    dv = strtod(tmp, &endp);
-    if (!endp || *endp != 0)
-      return NULL;
+    /* kj lexes an exponent without digits; `parseAs<double>` then
+     * recovers with 0, which a unary minus negates. */
+    if (strtod_n(sc->s + start, len, &dv)) {
+      if (soft_error())
+        return NULL;
+      dv = 0;
+    }
     v = new_vnode(VK_FLOAT);
     if (!v)
       return NULL;
     v->fval = neg ? -dv : dv;
     return v;
   } else {
-    char *endp = NULL;
-    uint64_t uv;
-    errno = 0;
-    uv = strtoull(base == 16 ? tmp + 2 : tmp, &endp, base);
-    if (!endp || *endp != 0 || errno == ERANGE)
-      return NULL;
+    /* kj's ParseInteger wraps modulo 2^64 without complaint. */
+    uint64_t uv = 0;
+    size_t k;
+    for (k = start + (base == 16 ? 2u : 0u); k < sc->i; k++) {
+      int c = (unsigned char)sc->s[k];
+      uv = uv * (uint64_t)base +
+           (uint64_t)(isdigit(c) ? c - '0' : tolower(c) - 'a' + 10);
+    }
     if (neg) {
-      if (uv > (uint64_t)INT64_MAX + 1ull)
-        return NULL;
       v = new_vnode(VK_INT);
       if (!v)
         return NULL;
-      v->ival = (uv == (uint64_t)INT64_MAX + 1ull) ? INT64_MIN : -(int64_t)uv;
+      if (uv > (uint64_t)INT64_MAX + 1ull)
+        v->neg_big = 1;
+      else
+        v->ival = (uv == (uint64_t)INT64_MAX + 1ull) ? INT64_MIN : -(int64_t)uv;
       return v;
     } else {
       v = new_vnode(VK_UINT);
@@ -3996,24 +4577,64 @@ static vnode_t *parse_text_number(scan_t *sc, int neg) {
   }
 }
 
+/* A standalone `.` operator token, not part of a longer run. */
+static int text_dot(const scan_t *sc) {
+  return sc->i < sc->n && sc->s[sc->i] == '.' &&
+         (sc->i + 1 >= sc->n || sc->s[sc->i + 1] == '\0' ||
+          strchr(TEXT_OPS, sc->s[sc->i + 1]) == NULL);
+}
+
+static vnode_t *parse_text_base(scan_t *sc);
+
+/* An expression with its suffixes. A member access or application can
+ * only be resolved as an external constant, so it is VK_EXTERN. */
 static vnode_t *parse_text_expr(scan_t *sc) {
+  vnode_t *v = parse_text_base(sc);
+  while (v) {
+    int c = tpeek(sc);
+    if (c == '.' && text_dot(sc)) {
+      char id[128];
+      sc->i++;
+      free_vnode(v);
+      v = NULL;
+      if (parse_text_ident(sc, id, sizeof(id)) == 0)
+        v = new_vnode(VK_EXTERN);
+    } else if (c == '(') {
+      vnode_t *params = parse_text_tuple(sc);
+      free_vnode(v);
+      v = params ? new_vnode(VK_EXTERN) : NULL;
+      free_vnode(params);
+    } else {
+      break;
+    }
+  }
+  return v;
+}
+
+static vnode_t *parse_text_base(scan_t *sc) {
   int c = tpeek(sc);
   if (c == 0)
     return NULL;
+  if (c == '.' && text_dot(sc)) {
+    char id[128];
+    sc->i++;
+    if (parse_text_ident(sc, id, sizeof(id)))
+      return NULL;
+    return new_vnode(VK_EXTERN);
+  }
   if (c == '(')
     return parse_text_tuple(sc);
   if (c == '[')
     return parse_text_list(sc);
-  if (c == '0' && sc->i + 3 <= sc->n &&
-      (sc->s[sc->i + 1] == 'x' || sc->s[sc->i + 1] == 'X') &&
+  if (c == '0' && sc->i + 3 <= sc->n && sc->s[sc->i + 1] == 'x' &&
       sc->s[sc->i + 2] == '"') {
     return parse_text_hex_binary(sc);
   }
-  if (c == '"' || c == '\'') {
+  if (c == '"') {
     buf_t b;
     vnode_t *v;
     memset(&b, 0, sizeof(b));
-    while (tpeek(sc) == '"' || tpeek(sc) == '\'') {
+    while (tpeek(sc) == '"') {
       if (parse_text_quoted_one(sc, &b)) {
         free(b.data);
         return NULL;
@@ -4034,6 +4655,8 @@ static vnode_t *parse_text_expr(scan_t *sc) {
   }
   if (c == '-') {
     sc->i++;
+    if (!op_ends(sc))
+      return NULL;
     tskip(sc);
     if (sc->i + 3 <= sc->n && memcmp(sc->s + sc->i, "inf", 3) == 0 &&
         (sc->i + 3 == sc->n ||
@@ -4054,30 +4677,35 @@ static vnode_t *parse_text_expr(scan_t *sc) {
     vnode_t *v;
     if (parse_text_ident(sc, id, sizeof(id)))
       return NULL;
-    if (strcmp(id, "void") == 0)
-      return new_vnode(VK_VOID);
-    if (strcmp(id, "true") == 0) {
+    if ((strcmp(id, "import") == 0 || strcmp(id, "embed") == 0) &&
+        tpeek(sc) == '"') {
+      buf_t b;
+      int r;
+      memset(&b, 0, sizeof(b));
+      r = parse_text_quoted_one(sc, &b);
+      free(b.data);
+      return r ? NULL : new_vnode(VK_EXTERN);
+    }
+    if (strcmp(id, "void") == 0) {
+      v = new_vnode(VK_VOID);
+      if (v)
+        v->ident = 1;
+      return v;
+    }
+    if (strcmp(id, "true") == 0 || strcmp(id, "false") == 0) {
       v = new_vnode(VK_BOOL);
-      if (v)
-        v->bval = 1;
+      if (v) {
+        v->bval = id[0] == 't';
+        v->ident = 1;
+      }
       return v;
     }
-    if (strcmp(id, "false") == 0) {
-      v = new_vnode(VK_BOOL);
-      if (v)
-        v->bval = 0;
-      return v;
-    }
-    if (strcmp(id, "inf") == 0) {
+    if (strcmp(id, "inf") == 0 || strcmp(id, "nan") == 0) {
       v = new_vnode(VK_FLOAT);
-      if (v)
-        v->fval = INFINITY;
-      return v;
-    }
-    if (strcmp(id, "nan") == 0) {
-      v = new_vnode(VK_FLOAT);
-      if (v)
-        v->fval = NAN;
+      if (v) {
+        v->fval = id[0] == 'i' ? INFINITY : NAN;
+        v->ident = 1;
+      }
       return v;
     }
     v = new_vnode(VK_IDENT);
@@ -4095,6 +4723,20 @@ static vnode_t *parse_text_expr(scan_t *sc) {
   return NULL;
 }
 /* --- Builder from AST (vnode_t) --- */
+
+/* `capnp convert` goes on after a recoverable kj error in a text or
+ * JSON value, using what kj substitutes or dropping the value, and fails
+ * the run at the end. With dec_recover unset such an error fails the
+ * decode. */
+static _Thread_local int dec_recover;
+static _Thread_local int dec_soft;
+
+static int soft_error(void) {
+  if (!dec_recover)
+    return -1;
+  dec_soft = 1;
+  return 0;
+}
 
 static int parse_str_i64(const char *s, size_t n, int64_t min_v, int64_t max_v,
                          int64_t *out) {
@@ -4137,7 +4779,7 @@ static int parse_str_u64(const char *s, size_t n, uint64_t max_v,
 static int parse_str_f64(const char *s, size_t n, double *out) {
   char *endp = NULL;
   double v;
-  if (!s || n == 0 || memchr(s, 0, n) != NULL || isspace((unsigned char)s[0]))
+  if (!s || n == 0 || memchr(s, 0, n) != NULL)
     return -1;
   errno = 0;
   v = strtod(s, &endp);
@@ -4145,6 +4787,52 @@ static int parse_str_f64(const char *s, size_t n, double *out) {
     return -1;
   *out = v;
   return 0;
+}
+
+/* JsonCodec reaches an integer field with a double that passed its
+ * range check, then casts it. 2^63 and 2^64 pass that check and are
+ * outside int64 and uint64, so the C++ cast has no defined result and the
+ * output follows the CPU: x86-64 gives INT64_MIN and 0, s390x and other
+ * saturating CPUs give INT64_MAX and UINT64_MAX. These helpers return
+ * the same values without casting a double out of range. */
+#if defined(__x86_64__) || defined(_M_X64)
+#define DYN_F2I_SATURATES 0
+#else
+#define DYN_F2I_SATURATES 1
+#endif
+
+/* d is in [-2^63, 2^63]. */
+static int64_t f2i64_host(double d) {
+  if (d >= 9223372036854775808.0)
+    return DYN_F2I_SATURATES ? INT64_MAX : INT64_MIN;
+  return (int64_t)d;
+}
+
+/* d is in [0, 2^64]. */
+static uint64_t f2u64_host(double d) {
+  if (d >= 18446744073709551616.0)
+    return DYN_F2I_SATURATES ? UINT64_MAX : 0;
+  if (d >= 9223372036854775808.0)
+    return (uint64_t)(d - 9223372036854775808.0) + ((uint64_t)1 << 63);
+  return (uint64_t)d;
+}
+
+/* static_cast<uint16_t>(double), for any double. x86-64 truncates to a
+ * 32-bit integer, which reads as INT32_MIN when out of range. Saturating
+ * CPUs clamp to the unsigned 32-bit range, with NaN as 0. Both keep the
+ * low 16 bits. */
+static uint16_t f2u16_host(double d) {
+#if DYN_F2I_SATURATES
+  if (!(d >= 0.0))
+    return 0;
+  if (d >= 4294967296.0)
+    return UINT16_MAX;
+  return (uint16_t)(uint32_t)d;
+#else
+  if (!(d > -2147483649.0 && d < 2147483648.0))
+    return 0;
+  return (uint16_t)(uint32_t)(int32_t)d;
+#endif
 }
 
 static int vnode_to_int(const vnode_t *v, uint16_t which, int json,
@@ -4185,74 +4873,90 @@ static int vnode_to_int(const vnode_t *v, uint16_t which, int json,
   default:
     return -1;
   }
-  if (v->kind == VK_INT) {
-    if (is_signed) {
-      if (v->ival < smin || v->ival > smax)
-        return -1;
-      *out_bits = (uint64_t)v->ival;
-      return 0;
+  /* ValueTranslator::matchesType clamps an integer out of range to the
+   * type's bound and reports it. */
+  if (v->kind == VK_INT && v->ival < 0) {
+    if (!is_signed) {
+      *out_bits = 0;
+      return soft_error();
     }
-    if (v->ival < 0 || (uint64_t)v->ival > umax)
-      return -1;
+    if (v->ival < smin) {
+      *out_bits = (uint64_t)smin;
+      return soft_error();
+    }
     *out_bits = (uint64_t)v->ival;
     return 0;
   }
-  if (v->kind == VK_UINT) {
-    if (is_signed) {
-      if (v->uval > (uint64_t)smax)
-        return -1;
-      *out_bits = v->uval;
-      return 0;
-    }
-    if (v->uval > umax)
-      return -1;
-    *out_bits = v->uval;
-    return 0;
+  if (v->kind == VK_INT || v->kind == VK_UINT) {
+    uint64_t u = v->kind == VK_INT ? (uint64_t)v->ival : v->uval;
+    uint64_t max = is_signed ? (uint64_t)smax : umax;
+    *out_bits = u > max ? max : u;
+    return u > max ? soft_error() : 0;
   }
+  /* JSON numbers are doubles, converted by checkRoundTripFromFloat:
+   * clamped to the range, then truncated, then checked for a round trip. */
   if (json && v->kind == VK_FLOAT) {
     double d = v->fval;
-    if (!isfinite(d))
-      return -1;
     if (is_signed) {
       int64_t iv;
-      if (d < (double)smin || d > (double)smax)
-        return -1;
-      if (which == TY_I64 && d >= 9223372036854775808.0)
-        return -1;
-      iv = (int64_t)d;
-      if ((double)iv != d)
-        return -1;
+      if (!(d >= (double)smin)) {
+        *out_bits = (uint64_t)smin;
+        return soft_error();
+      }
+      if (!(d <= (double)smax)) {
+        *out_bits = (uint64_t)smax;
+        return soft_error();
+      }
+      iv = f2i64_host(d);
       *out_bits = (uint64_t)iv;
-      return 0;
+      return (double)iv == d ? 0 : soft_error();
     } else {
       uint64_t uv;
-      if (d < 0.0 || d > (double)umax)
-        return -1;
-      if (which == TY_U64 && d >= 18446744073709551616.0)
-        return -1;
-      uv = (uint64_t)d;
-      if ((double)uv != d)
-        return -1;
+      if (!(d >= 0.0)) {
+        *out_bits = 0;
+        return soft_error();
+      }
+      if (!(d <= (double)umax)) {
+        *out_bits = umax;
+        return soft_error();
+      }
+      uv = f2u64_host(d);
       *out_bits = uv;
-      return 0;
+      return (double)uv == d ? 0 : soft_error();
     }
   }
+  /* Strings go through kj parseAs<int64_t> or parseAs<uint64_t>, which
+   * read a bad number as 0, and then wrap to the field's width. */
   if (json && v->kind == VK_STR) {
     if (is_signed) {
       int64_t iv = 0;
-      if (parse_str_i64(v->str, v->slen, smin, smax, &iv))
-        return -1;
+      if (parse_str_i64(v->str, v->slen, INT64_MIN, INT64_MAX, &iv)) {
+        *out_bits = 0;
+        return soft_error();
+      }
       *out_bits = (uint64_t)iv;
-      return 0;
+      return iv < smin || iv > smax ? soft_error() : 0;
     } else {
       uint64_t uv = 0;
-      if (parse_str_u64(v->str, v->slen, umax, &uv))
-        return -1;
+      if (parse_str_u64(v->str, v->slen, UINT64_MAX, &uv)) {
+        *out_bits = 0;
+        return soft_error();
+      }
       *out_bits = uv;
-      return 0;
+      return uv > umax ? soft_error() : 0;
     }
   }
   return -1;
+}
+
+/* An element of a JSON byte array, which JsonCodec checks with
+ * KJ_REQUIRE(byte(x) == x) and cannot recover from. */
+static int json_byte(const vnode_t *v, uint64_t *out) {
+  if (v->kind != VK_FLOAT || !(v->fval >= 0.0 && v->fval <= 255.0) ||
+      v->fval != (double)(int)v->fval)
+    return -1;
+  *out = (uint64_t)v->fval;
+  return 0;
 }
 
 static int vnode_to_float(const vnode_t *v, uint16_t which, int json,
@@ -4267,8 +4971,11 @@ static int vnode_to_float(const vnode_t *v, uint16_t which, int json,
   } else if (json && v->kind == VK_NULL) {
     dv = NAN;
   } else if (json && v->kind == VK_STR) {
-    if (parse_str_f64(v->str, v->slen, &dv))
-      return -1;
+    if (parse_str_f64(v->str, v->slen, &dv)) {
+      dv = 0.0;
+      if (soft_error())
+        return -1;
+    }
   } else {
     return -1;
   }
@@ -4291,14 +4998,8 @@ static int vnode_to_enum(capnp_dyn_t *d, uint64_t enum_id,
     return -1;
   if (json) {
     if (v->kind == VK_FLOAT) {
-      double dv = v->fval;
-      uint16_t ord;
-      if (!isfinite(dv) || dv < 0.0 || dv > 65535.0)
-        return -1;
-      ord = (uint16_t)dv;
-      if ((double)ord != dv)
-        return -1;
-      *out_ord = ord;
+      /* static_cast<uint16_t> of the double. */
+      *out_ord = f2u16_host(v->fval);
       return 0;
     }
     if (v->kind == VK_STR) {
@@ -4324,80 +5025,42 @@ static int vnode_to_enum(capnp_dyn_t *d, uint64_t enum_id,
   return -1;
 }
 
+static int base64_sextet(unsigned char c) {
+  if (c >= 'A' && c <= 'Z')
+    return c - 'A';
+  if (c >= 'a' && c <= 'z')
+    return c - 'a' + 26;
+  if (c >= '0' && c <= '9')
+    return c - '0' + 52;
+  if (c == '+')
+    return 62;
+  if (c == '/')
+    return 63;
+  return -1;
+}
+
+/* `capnp convert` decodes with kj::decodeBase64 and drops its error flag:
+ * characters outside the alphabet are skipped, padding included, and a
+ * trailing partial byte is lost. */
 static int decode_base64_str(const char *s, size_t n, uint8_t **out,
                              size_t *out_len) {
   uint8_t *buf;
-  size_t w = 0, i = 0;
-  int vals[4];
-  int k = 0, pad = 0;
-  buf = (uint8_t *)malloc((n / 4 + 1) * 3 + 1);
+  size_t i, w = 0;
+  uint32_t acc = 0;
+  unsigned nbits = 0;
+  buf = (uint8_t *)malloc(n / 4 * 3 + 3);
   if (!buf)
     return -1;
   for (i = 0; i < n; i++) {
-    unsigned char c = (unsigned char)s[i];
-    int v = -1;
-    if (c == ' ' || c == '\t' || c == '\r' || c == '\n' || c == '\f')
+    int v = base64_sextet((unsigned char)s[i]);
+    if (v < 0)
       continue;
-    if (c == '=') {
-      pad++;
-      v = 0;
-    } else if (pad > 0) {
-      free(buf);
-      return -1;
-    } else if (c >= 'A' && c <= 'Z') {
-      v = c - 'A';
-    } else if (c >= 'a' && c <= 'z') {
-      v = c - 'a' + 26;
-    } else if (c >= '0' && c <= '9') {
-      v = c - '0' + 52;
-    } else if (c == '+') {
-      v = 62;
-    } else if (c == '/') {
-      v = 63;
-    } else {
-      free(buf);
-      return -1;
-    }
-    vals[k++] = v;
-    if (k == 4) {
-      uint32_t triple = ((uint32_t)vals[0] << 18) | ((uint32_t)vals[1] << 12) |
-                        ((uint32_t)vals[2] << 6) | (uint32_t)vals[3];
-      if (pad > 2) {
-        free(buf);
-        return -1;
-      }
-      buf[w++] = (uint8_t)((triple >> 16) & 0xff);
-      if (pad < 2)
-        buf[w++] = (uint8_t)((triple >> 8) & 0xff);
-      if (pad < 1)
-        buf[w++] = (uint8_t)(triple & 0xff);
-      k = 0;
-      if (pad > 0) {
-        while (i + 1 < n) {
-          unsigned char rem = (unsigned char)s[++i];
-          if (rem != ' ' && rem != '\t' && rem != '\r' && rem != '\n' &&
-              rem != '\f') {
-            free(buf);
-            return -1;
-          }
-        }
-        break;
-      }
-    }
-  }
-  if (k != 0) {
-    if (pad > 0 || k == 1) {
-      free(buf);
-      return -1;
-    }
-    if (k == 2) {
-      uint32_t triple = ((uint32_t)vals[0] << 18) | ((uint32_t)vals[1] << 12);
-      buf[w++] = (uint8_t)((triple >> 16) & 0xff);
-    } else if (k == 3) {
-      uint32_t triple = ((uint32_t)vals[0] << 18) | ((uint32_t)vals[1] << 12) |
-                        ((uint32_t)vals[2] << 6);
-      buf[w++] = (uint8_t)((triple >> 16) & 0xff);
-      buf[w++] = (uint8_t)((triple >> 8) & 0xff);
+    acc = (acc << 6) | (uint32_t)v;
+    nbits += 6;
+    if (nbits >= 8) {
+      nbits -= 8;
+      buf[w++] = (uint8_t)(acc >> nbits);
+      acc &= (1u << nbits) - 1u;
     }
   }
   *out = buf;
@@ -4405,23 +5068,19 @@ static int decode_base64_str(const char *s, size_t n, uint8_t **out,
   return 0;
 }
 
+/* kj::decodeHex with its error flag dropped: a bad digit reads as zero and
+ * an odd final character is ignored. */
 static int decode_hex_str(const char *s, size_t n, uint8_t **out,
                           size_t *out_len) {
   uint8_t *buf;
   size_t i;
-  if (n % 2 != 0)
-    return -1;
   buf = (uint8_t *)malloc(n / 2 + 1);
   if (!buf)
     return -1;
   for (i = 0; i < n / 2; i++) {
     int hi = hex_nibble((unsigned char)s[2 * i]);
     int lo = hex_nibble((unsigned char)s[2 * i + 1]);
-    if (hi < 0 || lo < 0) {
-      free(buf);
-      return -1;
-    }
-    buf[i] = (uint8_t)((hi << 4) | lo);
+    buf[i] = (uint8_t)(((hi < 0 ? 0 : hi) << 4) | (lo < 0 ? 0 : lo));
   }
   *out = buf;
   *out_len = n / 2;
@@ -4476,7 +5135,7 @@ static void clear_group_wire(capnp_dyn_t *d, const dyn_struct_t *g,
                              const brand_env_t *env, const capnp_bptr_t *body,
                              int depth) {
   uint32_t i;
-  if (!g || depth > MAX_DEPTH)
+  if (!g || depth > value_depth)
     return;
   if (g->disc_count) {
     if (write_disc(body, g, 0))
@@ -4498,7 +5157,7 @@ static void clear_field_wire(capnp_dyn_t *d, const dyn_struct_t *st,
                              const dyn_field_t *f, const brand_env_t *env,
                              const capnp_bptr_t *body, int depth) {
   rtype_t ft;
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return;
   if (f->is_group) {
     dyn_struct_t *g = find_struct_id(d, f->group_id);
@@ -4602,7 +5261,7 @@ static void dyn_finish_json_field(capnp_dyn_t *d, const dyn_field_t *f,
 static int build_json_value_struct(const vnode_t *v, const capnp_bptr_t *body,
                                    int depth) {
   uint32_t i;
-  if (depth > MAX_DEPTH || !v)
+  if (depth > value_depth || !v)
     return -1;
   switch (v->kind) {
   case VK_NULL:
@@ -4667,14 +5326,122 @@ static int build_struct_from_vnode(capnp_dyn_t *d,
                                    const capnp_bptr_t *body, int json,
                                    int depth);
 
+/* What ValueTranslator::compileValue does with a text value, decided
+ * before anything is written (compiler/node-translator.c++). TV_OK
+ * compiles it, TV_SKIP drops it with a recoverable error, and TV_FATAL
+ * is a name the resolver must look up, which `capnp` cannot do. */
+enum { TV_OK = 0, TV_SKIP = 1, TV_FATAL = 2 };
+enum { TR_VOID, TR_BOOL, TR_INT, TR_FLOAT, TR_TEXT, TR_DATA };
+
+static int text_matches(int r, uint16_t which, uint16_t list_depth) {
+  if (list_depth > 0)
+    return 0;
+  switch (r) {
+  case TR_VOID:
+    return which == TY_VOID;
+  case TR_BOOL:
+    return which == TY_BOOL;
+  case TR_INT:
+    return (which >= TY_I8 && which <= TY_U64) || which == TY_F32 ||
+           which == TY_F64;
+  case TR_FLOAT:
+    return which == TY_F32 || which == TY_F64;
+  case TR_TEXT:
+    return which == TY_TEXT;
+  case TR_DATA:
+    return which == TY_DATA;
+  default:
+    return 0;
+  }
+}
+
+static int text_verdict(capnp_dyn_t *d, uint16_t which, uint16_t list_depth,
+                        uint64_t type_id, const brand_env_t *env,
+                        const vnode_t *v) {
+  int is_enum = list_depth == 0 && which == TY_ENUM;
+  int is_data = list_depth == 0 && which == TY_DATA;
+  int is_struct = list_depth == 0 && which == TY_STRUCT;
+  int r;
+  switch (v->kind) {
+  case VK_IDENT: {
+    uint16_t ord;
+    if (is_enum && vnode_to_enum(d, type_id, v, 0, &ord) == 0)
+      return TV_OK;
+    return TV_FATAL;
+  }
+  case VK_VOID:
+  case VK_BOOL:
+  case VK_FLOAT:
+    if (v->ident && is_enum)
+      return TV_FATAL;
+    r = v->kind == VK_VOID ? TR_VOID : v->kind == VK_BOOL ? TR_BOOL : TR_FLOAT;
+    break;
+  case VK_INT:
+    if (v->neg_big)
+      return TV_SKIP;
+    r = TR_INT;
+    break;
+  case VK_UINT:
+    r = TR_INT;
+    break;
+  case VK_STR:
+    r = is_data ? TR_DATA : TR_TEXT;
+    break;
+  case VK_EXTERN:
+    return TV_FATAL;
+  case VK_BYTES:
+    return is_data ? TV_OK : TV_SKIP;
+  case VK_LIST:
+    return list_depth > 0 ? TV_OK : TV_SKIP;
+  case VK_OBJ:
+    return is_struct ? TV_OK : TV_SKIP;
+  default:
+    return TV_SKIP;
+  }
+  if (text_matches(r, which, list_depth))
+    return TV_OK;
+  /* A struct takes a value that matches its first field. */
+  if (is_struct) {
+    dyn_struct_t *st = find_struct_id(d, type_id);
+    rtype_t f0;
+    int ok = 0;
+    if (st && st->nfields > 0 && !st->fields[0].is_group &&
+        resolve_field_type(d, &st->fields[0], env, &f0) == 0) {
+      ok = text_matches(r, f0.which, f0.list_depth);
+      free_rtype(&f0);
+    }
+    if (ok)
+      return TV_OK;
+  }
+  return TV_SKIP;
+}
+
+/* For a text list element: 1 to fill it, 0 to leave it default after a
+ * recoverable error, -1 to fail. JSON elements are always filled. */
+static int text_elem(capnp_dyn_t *d, const rtype_t *rt, const vnode_t *kv,
+                     int json) {
+  int tv;
+  if (json)
+    return 1;
+  tv = text_verdict(d, rt->which, rt->list_depth, rt->type_id, &rt->brand, kv);
+  if (tv == TV_FATAL)
+    return -1;
+  if (tv == TV_SKIP)
+    return soft_error() ? -1 : 0;
+  return 1;
+}
+
 static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
                                  const vnode_t *v, const capnp_bptr_t *body,
                                  uint16_t dwords, uint16_t index, int json,
                                  int depth) {
   uint32_t n, i;
-  if (depth > MAX_DEPTH || !v || v->kind != VK_LIST)
+  if (depth > value_depth || !v)
     return -1;
-  n = v->count;
+  /* JsonCodec reads a non-array as an empty list, recoverably. */
+  if (v->kind != VK_LIST && (!json || soft_error()))
+    return -1;
+  n = v->kind == VK_LIST ? v->count : 0;
   if (elem_rt->list_depth > 0) {
     capnp_bptr_t first;
     rtype_t inner = *elem_rt;
@@ -4683,7 +5450,11 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
       return -1;
     for (i = 0; i < n; i++) {
       capnp_bptr_t el = capnp_bptr_add(first, i);
-      if (build_list_from_vnode(d, &inner, v->kids[i], &el, 0, 0, json,
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0)
+        return -1;
+      if (use &&
+          build_list_from_vnode(d, &inner, v->kids[i], &el, 0, 0, json,
                                 depth + 1))
         return -1;
     }
@@ -4692,10 +5463,8 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
   switch (elem_rt->which) {
   case TY_VOID:
     for (i = 0; i < n; i++) {
-      if (json ? (v->kids[i]->kind != VK_NULL) : (v->kids[i]->kind != VK_VOID)) {
-        dyn_note_bad(d, v->kids[i]);
+      if (text_elem(d, elem_rt, v->kids[i], json) < 0)
         return -1;
-      }
     }
     return capnp_builder_set_list_void(body, dwords, index, n);
   case TY_BOOL: {
@@ -4704,12 +5473,13 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
     if (n && !items)
       return -1;
     for (i = 0; i < n; i++) {
-      if (v->kids[i]->kind != VK_BOOL) {
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0 || (use && v->kids[i]->kind != VK_BOOL)) {
         dyn_note_bad(d, v->kids[i]);
         free(items);
         return -1;
       }
-      items[i] = (uint8_t)(v->kids[i]->bval ? 1 : 0);
+      items[i] = (uint8_t)(use && v->kids[i]->bval ? 1 : 0);
     }
     rc = capnp_builder_set_list_bool(body, dwords, index, items, n);
     free(items);
@@ -4723,7 +5493,9 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
       return -1;
     for (i = 0; i < n; i++) {
       uint64_t bits = 0;
-      if (vnode_to_int(v->kids[i], elem_rt->which, json, &bits)) {
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0 ||
+          (use && vnode_to_int(v->kids[i], elem_rt->which, json, &bits))) {
         dyn_note_bad(d, v->kids[i]);
         free(items);
         return -1;
@@ -4742,6 +5514,14 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
     if (n && !items)
       return -1;
     for (i = 0; i < n; i++) {
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0) {
+        free(items);
+        return -1;
+      }
+      items[i] = 0;
+      if (!use)
+        continue;
       if (elem_rt->which == TY_ENUM) {
         if (vnode_to_enum(d, elem_rt->type_id, v->kids[i], json, &items[i])) {
           dyn_note_bad(d, v->kids[i]);
@@ -4771,7 +5551,10 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
       return -1;
     for (i = 0; i < n; i++) {
       uint64_t bits = 0;
-      int err = (elem_rt->which == TY_F32)
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      int err = use < 0 ? -1
+                : !use  ? 0
+                : (elem_rt->which == TY_F32)
                     ? vnode_to_float(v->kids[i], TY_F32, json, &bits)
                     : vnode_to_int(v->kids[i], elem_rt->which, json, &bits);
       if (err) {
@@ -4794,7 +5577,10 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
       return -1;
     for (i = 0; i < n; i++) {
       uint64_t bits = 0;
-      int err = (elem_rt->which == TY_F64)
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      int err = use < 0 ? -1
+                : !use  ? 0
+                : (elem_rt->which == TY_F64)
                     ? vnode_to_float(v->kids[i], TY_F64, json, &bits)
                     : vnode_to_int(v->kids[i], elem_rt->which, json, &bits);
       if (err) {
@@ -4812,23 +5598,37 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
     const char **texts =
         n ? (const char **)malloc((size_t)n * sizeof(const char *)) : NULL;
     size_t *lens = n ? (size_t *)malloc((size_t)n * sizeof(size_t)) : NULL;
-    int rc;
+    int rc, dropped = 0;
     if (n && (!texts || !lens)) {
       free(texts);
       free(lens);
       return -1;
     }
     for (i = 0; i < n; i++) {
-      if (v->kids[i]->kind != VK_STR) {
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0 || (use && v->kids[i]->kind != VK_STR)) {
         dyn_note_bad(d, v->kids[i]);
         free(texts);
         free(lens);
         return -1;
       }
-      texts[i] = v->kids[i]->str ? v->kids[i]->str : "";
-      lens[i] = v->kids[i]->slen;
+      texts[i] = use ? (v->kids[i]->str ? v->kids[i]->str : "") : NULL;
+      lens[i] = use ? v->kids[i]->slen : 0;
+      if (!use)
+        dropped = 1;
     }
-    rc = capnp_builder_set_list_text_n(body, dwords, index, texts, lens, n);
+    if (!dropped) {
+      rc = capnp_builder_set_list_text_n(body, dwords, index, texts, lens, n);
+    } else {
+      /* A dropped element stays null. */
+      capnp_bptr_t first;
+      rc = capnp_builder_init_ptr_list(body, dwords, index, n, &first);
+      for (i = 0; i < n && rc == 0; i++) {
+        capnp_bptr_t el = capnp_bptr_add(first, i);
+        if (texts[i])
+          rc = capnp_builder_set_text(&el, 0, 0, texts[i], lens[i]);
+      }
+    }
     free(texts);
     free(lens);
     return rc;
@@ -4840,6 +5640,11 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
     for (i = 0; i < n; i++) {
       capnp_bptr_t el = capnp_bptr_add(first, i);
       const vnode_t *kv = v->kids[i];
+      int use = text_elem(d, elem_rt, kv, json);
+      if (use < 0)
+        return -1;
+      if (!use)
+        continue;
       if (!json && (kv->kind == VK_STR || kv->kind == VK_BYTES)) {
         if (capnp_builder_set_data(&el, 0, 0,
                                    (const uint8_t *)(kv->str ? kv->str : ""),
@@ -4853,8 +5658,7 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
           return -1;
         for (j = 0; j < bn; j++) {
           uint64_t bval = 0;
-          if (kv->kids[j]->kind == VK_STR ||
-              vnode_to_int(kv->kids[j], TY_U8, 1, &bval)) {
+          if (json_byte(kv->kids[j], &bval)) {
             dyn_note_bad(d, kv->kids[j]);
             free(bytes);
             return -1;
@@ -4883,6 +5687,11 @@ static int build_list_from_vnode(capnp_dyn_t *d, const rtype_t *elem_rt,
     for (i = 0; i < n; i++) {
       capnp_bptr_t el =
           capnp_bptr_add(first, (size_t)i * (es->dwords + es->pwords));
+      int use = text_elem(d, elem_rt, v->kids[i], json);
+      if (use < 0)
+        return -1;
+      if (!use)
+        continue;
       if (es->id == JSON_VALUE_TYPE_ID && json) {
         if (build_json_value_struct(v->kids[i], &el, depth + 1))
           return -1;
@@ -5007,7 +5816,7 @@ static int copy_list_full(capnp_builder_t *b, uint32_t slot_seg, size_t slot_wor
 
 static int copy_ptr_full(capnp_builder_t *b, uint32_t slot_seg, size_t slot_word,
                          const capnp_ptr_t *src, int depth) {
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   if (!src || src->kind == CAPNP_PK_NULL) {
     capnp_store_le64(b->segs[slot_seg].data + slot_word * 8u, 0);
@@ -5126,13 +5935,13 @@ static int adopt_group_fields(capnp_dyn_t *d, const dyn_struct_t *g,
                               const capnp_bptr_t *dst, int depth) {
   uint32_t i;
   uint16_t which = 0xffff;
-  if (!g || depth > MAX_DEPTH)
+  if (!g || depth > value_depth)
     return -1;
   if (g->disc_count) {
     const dyn_field_t *af = NULL;
     struct_which(src, g, &which);
     for (i = 0; i < g->nfields; i++) {
-      if (g->fields[i].disc == which) {
+      if (g->fields[i].disc != 0xffff && g->fields[i].disc == which) {
         af = &g->fields[i];
         break;
       }
@@ -5207,7 +6016,7 @@ static int build_field_from_vnode(capnp_dyn_t *d, const dyn_struct_t *st,
   int rc = 0;
   int value_bad = 0;
 
-  if (depth > MAX_DEPTH || !v)
+  if (depth > value_depth || !v)
     return -1;
   if (f->disc != 0xffff && st->disc_count) {
     /* DynamicStruct::Builder::set calls setInUnion, which stores the
@@ -5252,7 +6061,8 @@ static int build_field_from_vnode(capnp_dyn_t *d, const dyn_struct_t *st,
   }
   switch (ft.which) {
   case TY_VOID:
-    if (json ? (v->kind != VK_NULL) : (v->kind != VK_VOID)) {
+    /* JsonCodec reads any JSON value as Void. */
+    if (!json && v->kind != VK_VOID) {
       rc = -1;
       value_bad = 1;
     }
@@ -5344,8 +6154,7 @@ static int build_field_from_vnode(capnp_dyn_t *d, const dyn_struct_t *st,
       }
       for (i = 0; i < bn && rc == 0; i++) {
         uint64_t bval = 0;
-        if (v->kids[i]->kind == VK_STR ||
-            vnode_to_int(v->kids[i], TY_U8, 1, &bval)) {
+        if (json_byte(v->kids[i], &bval)) {
           dyn_note_bad(d, v->kids[i]);
           rc = -1;
           value_bad = 1;
@@ -5378,25 +6187,6 @@ static int build_field_from_vnode(capnp_dyn_t *d, const dyn_struct_t *st,
       else
         rc = build_struct_from_vnode(d, cs, &ft.brand, v, &child, json,
                                      depth + 1);
-    }
-    break;
-  }
-  case TY_ANY: {
-    /* In text format, a struct or list literal may be assigned to AnyPointer */
-    if (!json && v->kind == VK_LIST &&
-        (ft.any_kind == 0 || ft.any_kind == 2) && v->count == 0) {
-      rc = capnp_builder_set_list_void(body, st->dwords, (uint16_t)f->offset,
-                                       0);
-    } else if (!json && v->kind == VK_OBJ &&
-               (ft.any_kind == 0 || ft.any_kind == 1) && v->count == 0) {
-      capnp_bptr_t slot, child;
-      if (capnp_builder_slot(body, st->dwords, (uint16_t)f->offset, &slot) ||
-          capnp_builder_struct(&slot, 0, 0, &child))
-        rc = -1;
-    } else {
-      rc = -1;
-      if (json)
-        value_bad = 1;
     }
     break;
   }
@@ -5461,7 +6251,7 @@ static int schema_claims_flat_key(capnp_dyn_t *d, const dyn_struct_t *st,
   disc_opts_t dopts;
   const char *tag_name = NULL;
 
-  if (!st || depth > MAX_DEPTH)
+  if (!st || depth > value_depth)
     return 0;
   memset(&dopts, 0, sizeof(dopts));
   if (disc_override && disc_override->present)
@@ -5580,7 +6370,7 @@ static int decode_json_field_entry(
   disc_opts_t dopts;
   const char *tag_name = NULL;
 
-  if (depth > MAX_DEPTH)
+  if (depth > value_depth)
     return -1;
   memset(&dopts, 0, sizeof(dopts));
   if (disc_override && disc_override->present)
@@ -5629,7 +6419,7 @@ static int decode_json_field_entry(
     if (read_disc(body, st->disc_byte, st->dwords, &active))
       return -1;
     for (i = 0; i < st->nfields; i++) {
-      if (st->fields[i].disc == active) {
+      if (st->fields[i].disc != 0xffff && st->fields[i].disc == active) {
         if (build_field_from_vnode(d, st, &st->fields[i], env, val, body, 1,
                                    depth + 1))
           return -1;
@@ -5734,7 +6524,7 @@ static int decode_json_field_entry(
       if (read_disc(body, st->disc_byte, st->dwords, &active))
         return -1;
       for (j = 0; j < st->nfields; j++) {
-        if (st->fields[j].disc == active) {
+        if (st->fields[j].disc != 0xffff && st->fields[j].disc == active) {
           af = &st->fields[j];
           break;
         }
@@ -5779,7 +6569,7 @@ static int build_struct_from_vnode(capnp_dyn_t *d,
                                    const capnp_bptr_t *body, int json,
                                    int depth) {
   uint32_t i;
-  if (depth > MAX_DEPTH || !v)
+  if (depth > value_depth || !v)
     return -1;
   if (st->id == JSON_VALUE_TYPE_ID && json)
     return build_json_value_struct(v, body, depth);
@@ -5787,7 +6577,12 @@ static int build_struct_from_vnode(capnp_dyn_t *d,
   if (v->kind != VK_OBJ) {
     /* In text format, C++ coerces a non-tuple value to the struct's first field
      * if it matches */
-    if (!json && st->nfields > 0) {
+    if (!json) {
+      int tv = text_verdict(d, TY_STRUCT, 0, st->id, env, v);
+      if (tv == TV_FATAL)
+        return -1;
+      if (tv == TV_SKIP)
+        return soft_error();
       return build_field_from_vnode(d, st, &st->fields[0], env, v, body, 0,
                                     depth + 1);
     }
@@ -5807,8 +6602,28 @@ static int build_struct_from_vnode(capnp_dyn_t *d,
       const dyn_field_t *f;
       f = find_field(st, key);
       if (!f) {
-        dyn_err_text(d, "unknown field", key, strlen(key));
-        return -1;
+        if (soft_error()) {
+          dyn_err_text(d, "unknown field", key, strlen(key));
+          return -1;
+        }
+        continue;
+      }
+      /* A value compileValue rejects is dropped before adopt, so a union
+       * member's discriminant is not written either. */
+      if (!f->is_group) {
+        rtype_t ft;
+        int tv;
+        if (resolve_field_type(d, f, env, &ft))
+          return -1;
+        tv = text_verdict(d, ft.which, ft.list_depth, ft.type_id, &ft.brand,
+                          kv);
+        free_rtype(&ft);
+        if (tv == TV_FATAL || (tv == TV_SKIP && soft_error())) {
+          dyn_err_text(d, "bad value", key, strlen(key));
+          return -1;
+        }
+        if (tv == TV_SKIP)
+          continue;
       }
       if (build_field_from_vnode(d, st, f, env, kv, body, 0, depth + 1)) {
         if (!d->err[0])
@@ -5859,10 +6674,6 @@ static int build_struct_from_vnode(capnp_dyn_t *d,
 static void dyn_err_scan(capnp_dyn_t *d, const char *what, const scan_t *sc) {
   const char *s;
   size_t n = 0;
-  if (sc && sc->err) {
-    dyn_set_err(d, sc->err);
-    return;
-  }
   if (!sc || sc->i >= sc->n) {
     dyn_set_err(d, what);
     return;
@@ -5898,6 +6709,7 @@ static int decode_root_impl(capnp_dyn_t *d, const char *type_name,
   dyn_set_err(d, "");
   d->bad_src = NULL;
   d->bad_n = 0;
+  value_depth = dyn_max_depth;
   if (resolve_root_type_name(d, type_name, &rt, &st) != CAPNP_OK) {
     dyn_set_err(d, "unknown type");
     return CAPNP_ERR_KIND;
@@ -5915,17 +6727,28 @@ static int decode_root_impl(capnp_dyn_t *d, const char *type_name,
       return CAPNP_ERR_KIND;
     }
   } else {
-    if (tpeek(&sc) != '(') {
+    if (!text_lexes(text, len) || tpeek(&sc) != '(') {
       dyn_err_scan(d, "text", &sc);
       free_rtype(&rt);
       return CAPNP_ERR_KIND;
     }
     root_v = parse_text_expr(&sc);
-    if (!root_v || tpeek(&sc) != 0 || root_v->kind != VK_OBJ) {
+    if (!root_v || sc.fatal || tpeek(&sc) != 0 ||
+        (root_v->kind != VK_OBJ && soft_error())) {
       dyn_err_scan(d, "text", &sc);
       free_vnode(root_v);
       free_rtype(&rt);
       return CAPNP_ERR_KIND;
+    }
+    /* TextCodec::decode recovers from "Input does not contain a struct"
+     * and leaves the root empty. */
+    if (root_v->kind != VK_OBJ) {
+      free_vnode(root_v);
+      root_v = new_vnode(VK_OBJ);
+      if (!root_v) {
+        free_rtype(&rt);
+        return CAPNP_ERR_ALLOC;
+      }
     }
   }
 
@@ -5962,6 +6785,32 @@ int capnp_dyn_decode_json(capnp_dyn_t *d, const char *type_name,
                           const char *text, size_t len, uint8_t **out,
                           size_t *out_len) {
   return decode_root_impl(d, type_name, text, len, 1, out, out_len);
+}
+
+int capnp_dyn_decode_json_recover(capnp_dyn_t *d, const char *type_name,
+                                  const char *text, size_t len, uint8_t **out,
+                                  size_t *out_len, int *soft) {
+  int rc;
+  dec_recover = 1;
+  dec_soft = 0;
+  rc = decode_root_impl(d, type_name, text, len, 1, out, out_len);
+  dec_recover = 0;
+  if (soft)
+    *soft = dec_soft;
+  return rc;
+}
+
+int capnp_dyn_decode_text_recover(capnp_dyn_t *d, const char *type_name,
+                                  const char *text, size_t len, uint8_t **out,
+                                  size_t *out_len, int *soft) {
+  int rc;
+  dec_recover = 1;
+  dec_soft = 0;
+  rc = decode_root_impl(d, type_name, text, len, 0, out, out_len);
+  dec_recover = 0;
+  if (soft)
+    *soft = dec_soft;
+  return rc;
 }
 /* --- capnp eval implementation --- */
 
@@ -6496,6 +7345,7 @@ int capnp_dyn_eval_ex(capnp_dyn_t *d, const char *expr, int json,
     return CAPNP_ERR_ARG;
   *out = NULL;
   *len = 0;
+  value_depth = dyn_max_depth;
   rc = resolve_eval_expr(d, expr, &ev);
   if (rc)
     return rc;

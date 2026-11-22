@@ -75,9 +75,9 @@ capnp_get_text(&root, 0, &s, &n);
 Zero the message, or call =capnp_message_init=, before parsing or
 freeing it. A second parse releases the previous buffer.
 
-JSON text is UTF-8. A =\u= surrogate pair is one scalar. A lone
-surrogate is an error (=lone surrogate=). C++ 1.4.0 stores each =\u=
-unit as CESU-8 and accepts a lone surrogate.
+JSON =\u= escapes decode one unit at a time, as in C++ 1.4.0: each
+surrogate, paired or lone, is stored as its own three-byte sequence
+(CESU-8).
 
 The [[file:tutorial.org][tutorial]] walks AddressBook encode and the
 embed register path.

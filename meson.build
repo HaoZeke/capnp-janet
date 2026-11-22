@@ -104,12 +104,33 @@ dump_request = executable(
   'app/dump_request.c',
 )
 
+# capnp-eval links the library objects so it can reach the hidden entry
+# points in src/capnp_internal.h, which the shared library does not export.
 capnp_eval = executable(
   'capnp-eval',
   'app/capnp_eval.c',
-  dependencies: capnp_janet_dep,
+  'app/kj_stream.c',
+  objects: capnp_janet_lib.extract_all_objects(recursive: true),
+  include_directories: [inc, include_directories('src')],
+  c_args: capnp_janet_consumer_args,
+  dependencies: threads,
   install: true,
 )
+
+# Tests that load capnp.so depend on it, so `meson test` builds the
+# module and they never skip for want of it.
+janet_dep = dependency('janet', required: get_option('janet'))
+janet_module = []
+if janet_dep.found()
+  janet_module = [shared_module(
+    'capnp',
+    capnp_janet_mod_src,
+    dependencies: [capnp_janet_dep, janet_dep],
+    name_prefix: '',
+    install: true,
+    install_dir: get_option('libdir') / 'janet',
+  )]
+endif
 
 test_inc = include_directories('test')
 
@@ -250,9 +271,10 @@ if bash.found()
     'codegen',
     bash,
     args: [meson.project_source_root() / 'test/test_codegen.sh'],
-    depends: [capnpc_janet],
+    depends: [capnpc_janet] + janet_module,
     workdir: meson.project_source_root(),
     env: {
+      'CAPNP_JANET_NEED_MODULE': janet_dep.found() ? '1' : '',
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
   )
@@ -282,6 +304,31 @@ if bash.found()
     args: [meson.project_source_root() / 'test/test_eval.sh'],
     depends: [capnp_eval],
     workdir: meson.project_source_root(),
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
+  test(
+    'convert_parity',
+    bash,
+    args: [meson.project_source_root() / 'test/test_convert_parity.sh'],
+    depends: [capnp_eval],
+    workdir: meson.project_source_root(),
+    # About 25 s, alone or in a parallel sanitizer run, against the
+    # 30 s default.
+    timeout: 90,
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+    },
+  )
+  test(
+    'random_parity',
+    bash,
+    args: [meson.project_source_root() / 'test/test_random_parity.sh'],
+    depends: [capnp_eval],
+    workdir: meson.project_source_root(),
+    # About 5 s, and 11 s under sanitizers.
+    timeout: 60,
     env: {
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
@@ -335,7 +382,7 @@ test_transport = executable(
   'test_transport',
   'test/test_transport.c',
   dependencies: [capnp_janet_dep, threads],
-  c_args: ['-D_POSIX_C_SOURCE=200809L'],
+  c_args: ['-D_POSIX_C_SOURCE=200809L'] + robust_c_args,
 )
 test('transport', test_transport)
 
@@ -352,11 +399,21 @@ test('abi_layout', test_abi_layout)
 # reference implementation will talk to us, so this bootstraps a real
 # EzRpcServer and calls it.
 cpp_ok = add_languages('cpp', required: false, native: false)
+if not cpp_ok
+  warning('no C++ compiler found: every interop test against capnp-C++ is skipped; set CXX (CC=gcc CXX=g++) to run them.')
+endif
 capnp_rpc_dep = dependency('capnp-rpc', required: false)
 capnp_tool = find_program('capnp', required: false)
 capnpc_cpp = find_program('capnpc-c++', required: false)
 
 if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found() and bash.found()
+  # `capnp compile` searches only /usr/include and /usr/local/include for
+  # `/capnp/c++.capnp`, so a prefixed install must be named.
+  capnp_include = capnp_rpc_dep.get_variable(
+    pkgconfig: 'includedir',
+    default_value: '/usr/include',
+  )
+
   adder_cpp = custom_target(
     'adder-capnp-cpp',
     input: 'schema' / 'adder.capnp',
@@ -364,6 +421,7 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
     command: [
       capnp_tool, 'compile',
       '--src-prefix=' + meson.current_source_dir() / 'schema',
+      '-I' + capnp_include,
       '-o' + capnpc_cpp.full_path() + ':@OUTDIR@',
       '@INPUT@',
     ],
@@ -443,9 +501,10 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
     'rpc_janet',
     bash,
     args: [meson.project_source_root() / 'test/test_rpc_janet.sh'],
-    depends: [rpc_peer_server],
+    depends: [rpc_peer_server] + janet_module,
     workdir: meson.project_source_root(),
     env: {
+      'CAPNP_JANET_NEED_MODULE': janet_dep.found() ? '1' : '',
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
   )
@@ -464,41 +523,55 @@ if cpp_ok and capnp_rpc_dep.found() and capnp_tool.found() and capnpc_cpp.found(
     'rpc_janet_host',
     bash,
     args: [meson.project_source_root() / 'test/test_rpc_janet_host.sh'],
-    depends: [rpc_peer_server, rpc_peer_client],
+    depends: [rpc_peer_server, rpc_peer_client] + janet_module,
     workdir: meson.project_source_root(),
     env: {
+      'CAPNP_JANET_NEED_MODULE': janet_dep.found() ? '1' : '',
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
     timeout: 60,
   )
 else
-  message('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')
+  warning('interop/rpc: skipped (needs a C++ toolchain, capnp-rpc, and the capnp tools).')
 endif
 
 if bash.found()
+  valgrind_bins = [
+    test_wire,
+    test_robust,
+    test_orphan,
+    test_list_text,
+    test_addressbook,
+    test_calculator,
+    test_packed,
+    test_lists,
+    test_list_evolution,
+    test_multiseg,
+    test_canonical,
+    test_copy,
+    test_rpc_join,
+    test_rpc_handoff,
+    test_rpc_client,
+    test_transport,
+    test_abi_layout,
+  ]
   test(
     'valgrind_c',
     bash,
     args: [meson.project_source_root() / 'test/test_valgrind.sh'],
-    depends: [
-      test_wire,
-      test_robust,
-      test_orphan,
-      test_list_text,
-      test_addressbook,
-      test_calculator,
-      test_packed,
-      test_lists,
-      test_list_evolution,
-      test_multiseg,
-      test_canonical,
-      test_copy,
-      test_rpc_join,
-      test_rpc_handoff,
-      test_rpc_client,
-      test_transport,
-      test_abi_layout,
-    ],
+    depends: valgrind_bins,
+    workdir: meson.project_source_root(),
+    timeout: 600,
+    env: {
+      'CAPNP_JANET_BUILD': meson.project_build_root(),
+      'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root(),
+    },
+  )
+  test(
+    'valgrind_guard',
+    bash,
+    args: [meson.project_source_root() / 'test/test_valgrind_guard.sh'],
+    depends: valgrind_bins,
     workdir: meson.project_source_root(),
     timeout: 600,
     env: {
@@ -512,18 +585,6 @@ if bash.found()
     args: [meson.project_source_root() / 'scripts/abi-diff.sh'],
     workdir: meson.project_source_root(),
     timeout: 600,
-  )
-endif
-
-janet_dep = dependency('janet', required: get_option('janet'))
-if janet_dep.found()
-  shared_module(
-    'capnp',
-    capnp_janet_mod_src,
-    dependencies: [capnp_janet_dep, janet_dep],
-    name_prefix: '',
-    install: true,
-    install_dir: get_option('libdir') / 'janet',
   )
 endif
 

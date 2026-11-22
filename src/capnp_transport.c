@@ -2,11 +2,16 @@
 #include <capnp-janet/capnp_pointer.h>
 #include <capnp-janet/capnp_transport.h>
 
+#include "capnp_internal.h"
+
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -156,15 +161,16 @@ static int read_full(int fd, uint8_t *p, size_t count) {
   return 0;
 }
 
-int capnp_read_frame(int fd, uint8_t *buf, size_t cap, size_t *out_len) {
+/* Reads the segment table into @buf, which has @cap bytes, and sums the
+ * segment sizes. */
+static int read_table(int fd, uint8_t *buf, size_t cap, uint32_t *table_out,
+                      uint32_t *words_out) {
   uint32_t nsegs, i, table_bytes, total_words = 0;
-  if (!buf || cap < 8 || !out_len)
-    return CAPNP_ERR_ARG;
   if (read_full(fd, buf, 4))
     return CAPNP_ERR_FRAMING;
   nsegs = capnp_load_le32(buf);
   nsegs += 1;
-  if (nsegs == 0 || nsegs > 512)
+  if (nsegs == 0 || nsegs > CAPNP_MAX_STREAM_SEGMENTS)
     return CAPNP_ERR_FRAMING;
   table_bytes = 4 + nsegs * 4;
   if (table_bytes % 8)
@@ -179,11 +185,51 @@ int capnp_read_frame(int fd, uint8_t *buf, size_t cap, size_t *out_len) {
       return CAPNP_ERR_BOUNDS;
     total_words += w;
   }
+  *table_out = table_bytes;
+  *words_out = total_words;
+  return CAPNP_OK;
+}
+
+int capnp_read_frame(int fd, uint8_t *buf, size_t cap, size_t *out_len) {
+  uint32_t table_bytes, total_words;
+  int rc;
+  if (!buf || cap < 8 || !out_len)
+    return CAPNP_ERR_ARG;
+  rc = read_table(fd, buf, cap, &table_bytes, &total_words);
+  if (rc)
+    return rc;
   if ((size_t)table_bytes + (size_t)total_words * 8 > cap)
     return CAPNP_ERR_BOUNDS;
   if (total_words &&
       read_full(fd, buf + table_bytes, (size_t)total_words * 8))
     return CAPNP_ERR_FRAMING;
+  *out_len = table_bytes + (size_t)total_words * 8;
+  return CAPNP_OK;
+}
+
+int capnp_read_frame_alloc(int fd, uint8_t **out, size_t *out_len) {
+  uint8_t table[4 + CAPNP_MAX_STREAM_SEGMENTS * 4 + 4];
+  uint32_t table_bytes, total_words;
+  uint8_t *buf;
+  int rc;
+  if (!out || !out_len)
+    return CAPNP_ERR_ARG;
+  *out = NULL;
+  rc = read_table(fd, table, sizeof(table), &table_bytes, &total_words);
+  if (rc)
+    return rc;
+  if ((uint64_t)table_bytes / 8 + total_words > CAPNP_DEFAULT_TRAVERSAL_WORDS)
+    return CAPNP_ERR_BOUNDS;
+  buf = (uint8_t *)malloc(table_bytes + (size_t)total_words * 8);
+  if (!buf)
+    return CAPNP_ERR_ALLOC;
+  memcpy(buf, table, table_bytes);
+  if (total_words &&
+      read_full(fd, buf + table_bytes, (size_t)total_words * 8)) {
+    free(buf);
+    return CAPNP_ERR_FRAMING;
+  }
+  *out = buf;
   *out_len = table_bytes + (size_t)total_words * 8;
   return CAPNP_OK;
 }
@@ -375,18 +421,167 @@ int capnp_link_accept(int listen_fd, capnp_link_t *link) {
   return link_from_fd_or_close(link, fd);
 }
 
-int capnp_link_recv(capnp_link_t *link) {
-  uint8_t buf[65536];
-  size_t n = 0;
+/* serialize.c++ expectedSizeInWordsFromPrefix over the `words` whole
+ * words at `p`. */
+static uint64_t expected_words(const uint8_t *p, size_t words) {
+  uint32_t nsegs, i;
+  uint64_t total;
+  if (words < 1)
+    return 1;
+  nsegs = capnp_load_le32(p) + 1u;
+  if (nsegs == 0)
+    return 1;
+  total = nsegs / 2u + 1u;
+  if ((uint64_t)nsegs > (uint64_t)words * 2u - 1u)
+    nsegs = (uint32_t)(words * 2u - 1u);
+  for (i = 0; i < nsegs; i++)
+    total += capnp_load_le32(p + 4 + (size_t)i * 4);
+  return total;
+}
+
+/* Reads into `p` until `min` bytes or end of stream, taking up to `max`.
+ * Returns the count read, or -1 on an error. */
+/* Reads at least `min` bytes unless the stream ends. Before a read that
+ * would wait, `c` is told it is idle; -2 when that sent an Abort. */
+static ssize_t read_some(capnp_rpc_conn_t *c, int fd, uint8_t *p, size_t min,
+                         size_t max) {
+  size_t got = 0;
+  while (got < min) {
+    struct pollfd pfd;
+    ssize_t n;
+    pfd.fd = fd;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    if (poll(&pfd, 1, 0) == 0 && capnp_rpc_idle(c) != CAPNP_OK)
+      return -2;
+    n = read(fd, p + got, max - got);
+    if (n < 0) {
+      if (errno == EINTR)
+        continue;
+      return -1;
+    }
+    if (n == 0)
+      break;
+    got += (size_t)n;
+  }
+  return (ssize_t)got;
+}
+
+#define PREMATURE_REASON "stream disconnected prematurely"
+#define RPC_TYPE_FAILED 0
+#define RPC_TYPE_DISCONNECTED 2
+
+/* FlatArrayMessageReader's checks, then the vat. */
+static int handle_words(capnp_rpc_conn_t *c, const uint8_t *p, size_t words) {
+  if (capnp_load_le32(p) == UINT32_MAX) {
+    capnp_rpc_abort_typed(c, RPC_TYPE_FAILED,
+                          "expected segmentCount != 0 [0 != 0]; Message "
+                          "segment count too large, caused overflow.");
+    return CAPNP_ERR_FRAMING;
+  }
+  return capnp_rpc_handle(c, p, words * 8) ? CAPNP_ERR_KIND : CAPNP_OK;
+}
+
+/* BufferedMessageStream::readEntireMessage. */
+static int read_entire(capnp_rpc_conn_t *c, int fd, const uint8_t *prefix,
+                       size_t plen, uint64_t expected) {
+  uint8_t *msg = NULL;
   int rc;
+  for (;;) {
+    uint8_t *grown;
+    uint64_t again;
+    ssize_t n;
+    if (expected > CAPNP_DEFAULT_TRAVERSAL_WORDS) {
+      char reason[160];
+      snprintf(reason, sizeof reason,
+               "expected expectedSizeInWords <= "
+               "options.traversalLimitInWords [%llu <= %llu]; incoming RPC "
+               "message exceeds size limit",
+               (unsigned long long)expected,
+               (unsigned long long)CAPNP_DEFAULT_TRAVERSAL_WORDS);
+      free(msg);
+      capnp_rpc_abort_typed(c, RPC_TYPE_FAILED, reason);
+      return CAPNP_ERR_BOUNDS;
+    }
+    grown = (uint8_t *)malloc((size_t)expected * 8);
+    if (grown == NULL) {
+      free(msg);
+      return CAPNP_ERR_ALLOC;
+    }
+    memcpy(grown, prefix, plen);
+    free(msg);
+    msg = grown;
+    n = read_some(c, fd, msg + plen, (size_t)expected * 8 - plen,
+                  (size_t)expected * 8 - plen);
+    if (n < 0 || (size_t)n < (size_t)expected * 8 - plen) {
+      free(msg);
+      if (n == -2)
+        return CAPNP_ERR_KIND;
+      if (n >= 0)
+        capnp_rpc_abort_typed(c, RPC_TYPE_DISCONNECTED, PREMATURE_REASON);
+      return CAPNP_ERR_FRAMING;
+    }
+    again = expected_words(msg, (size_t)expected);
+    if (again <= expected)
+      break;
+    prefix = msg;
+    plen = (size_t)expected * 8;
+    expected = again;
+  }
+  rc = handle_words(c, msg, (size_t)expected);
+  free(msg);
+  return rc;
+}
+
+int capnp_rpc_recv_fd(capnp_rpc_conn_t *c, int fd) {
+  capnp_rpc_inbuf_t *in;
+  const size_t cap = CAPNP_RPC_INBUF_WORDS * 8;
+  if (!c || fd < 0)
+    return CAPNP_ERR_ARG;
+  in = capnp_rpc_inbuf(c);
+  if (in == NULL)
+    return CAPNP_ERR_ALLOC;
+  capnp_rpc_defer_loopback(c);
+  for (;;) {
+    size_t avail = in->end - in->begin, words = avail / 8, need;
+    uint64_t expected = expected_words(in->data + in->begin, words);
+    ssize_t n;
+    if (expected <= words) {
+      const uint8_t *p = in->data + in->begin;
+      in->begin += (size_t)expected * 8;
+      if (in->begin == in->end)
+        in->begin = in->end = 0;
+      return handle_words(c, p, (size_t)expected);
+    }
+    if (expected > CAPNP_RPC_INBUF_WORDS / 2) {
+      size_t begin = in->begin;
+      in->begin = in->end = 0;
+      return read_entire(c, fd, in->data + begin, avail, expected);
+    }
+    need = (size_t)expected * 8 - avail;
+    if (cap - in->end < cap / 2) {
+      memmove(in->data, in->data + in->begin, avail);
+      in->begin = 0;
+      in->end = avail;
+    }
+    n = read_some(c, fd, in->data + in->end, need, cap - in->end);
+    if (n < 0)
+      return n == -2 ? CAPNP_ERR_KIND : CAPNP_ERR_IO;
+    in->end += (size_t)n;
+    if ((size_t)n < need) {
+      if (in->end > in->begin)
+        capnp_rpc_abort_typed(c, RPC_TYPE_DISCONNECTED, PREMATURE_REASON);
+      else
+        capnp_rpc_abort_typed(c, RPC_TYPE_DISCONNECTED, "Peer disconnected.");
+      return CAPNP_ERR_FRAMING;
+    }
+  }
+}
+
+int capnp_link_recv(capnp_link_t *link) {
   if (!link)
     return CAPNP_ERR_ARG;
-  rc = capnp_read_frame(link->fd, buf, sizeof(buf), &n);
-  if (rc)
-    return rc;
-  if (capnp_rpc_handle(&link->conn, buf, n))
-    return CAPNP_ERR_KIND;
-  return CAPNP_OK;
+  return capnp_rpc_recv_fd(&link->conn, link->fd);
 }
 
 void capnp_link_close(capnp_link_t *link) {
@@ -395,4 +590,5 @@ void capnp_link_close(capnp_link_t *link) {
   if (link->fd >= 0)
     close(link->fd);
   link->fd = -1;
+  capnp_rpc_free(&link->conn);
 }

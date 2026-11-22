@@ -512,7 +512,80 @@ static void emit_union_select(FILE *out, const char *struct_name,
             struct_name, struct_name, field_name);
 }
 
-/* Emit an interface's id and one entry per method.
+#define MAX_IFACE_WALK 64
+#define MAX_IFACE_METHODS 1024
+
+typedef struct {
+  uint64_t seen[MAX_IFACE_WALK];
+  int nseen;
+  const char *names[MAX_IFACE_METHODS];
+  int nnames;
+  int any;
+} method_walk_t;
+
+/* One entry per method of `node` and, depth first, of its superclasses,
+ * as capnpc-c++ gives `Derived::Client` every inherited method. Each
+ * entry names the interface that declares it, since a call must carry
+ * that id. A name already emitted, own methods first, is kept. With a
+ * NULL `out` this only counts. */
+static void emit_methods(FILE *out, const capnp_ptr_t *node,
+                         const capnp_ptr_t *nodes, method_walk_t *w) {
+  capnp_ptr_t methods, supers;
+  uint64_t id = capnp_get_u64(node, 0, 0);
+  uint32_t i, count;
+  int k;
+
+  if (capnp_get_u16(node, 12, 0xffff) != NODE_IFACE)
+    return;
+  for (k = 0; k < w->nseen; k++)
+    if (w->seen[k] == id)
+      return;
+  if (w->nseen == MAX_IFACE_WALK)
+    return;
+  w->seen[w->nseen++] = id;
+
+  /* interface.methods shares pointer slot 3 with struct.fields. */
+  count = capnp_getp(node, 3, &methods) == CAPNP_OK ? capnp_list_len(&methods) : 0;
+  for (i = 0; i < count; i++) {
+    capnp_ptr_t m;
+    const char *mname;
+    int pdw, ppw, rdw, rpw, dup = 0;
+    if (capnp_list_get_struct(&methods, i, &m) != CAPNP_OK)
+      continue;
+    mname = get_text(&m, 0);
+    if (!mname)
+      mname = "?";
+    for (k = 0; k < w->nnames; k++)
+      if (strcmp(w->names[k], mname) == 0)
+        dup = 1;
+    if (dup)
+      continue;
+    if (w->nnames < MAX_IFACE_METHODS)
+      w->names[w->nnames++] = mname;
+    struct_shape(nodes, capnp_get_u64(&m, 8, 0), &pdw, &ppw);
+    struct_shape(nodes, capnp_get_u64(&m, 16, 0), &rdw, &rpw);
+    w->any = 1;
+    if (!out)
+      continue;
+    fprintf(out,
+            "\n   :%s {:ordinal %u :params-dwords %d :params-pwords %d"
+            " :results-dwords %d :results-pwords %d"
+            " :interface-id (int/u64 \"0x%016llx\")}",
+            mname, i, pdw, ppw, rdw, rpw, (unsigned long long)id);
+  }
+
+  /* interface.superclasses is pointer slot 4; Superclass.id is word 0. */
+  count = capnp_getp(node, 4, &supers) == CAPNP_OK ? capnp_list_len(&supers) : 0;
+  for (i = 0; i < count; i++) {
+    capnp_ptr_t sc, base;
+    if (capnp_list_get_struct(&supers, i, &sc) == CAPNP_OK &&
+        node_by_id(nodes, capnp_get_u64(&sc, 0, 0), &base))
+      emit_methods(out, &base, nodes, w);
+  }
+}
+
+/* Emit an interface's id, its direct superclass ids, and one entry per
+ * method it can be called with.
  *
  * The caller needs three things the schema already carries: which
  * interface, which ordinal, and how big the parameter struct is. Emitting
@@ -520,8 +593,9 @@ static void emit_union_select(FILE *out, const char *struct_name,
 static void emit_interface(FILE *out, const capnp_ptr_t *node,
                            const capnp_ptr_t *nodes) {
   char iname[256];
-  capnp_ptr_t methods;
+  capnp_ptr_t supers;
   uint32_t i, count;
+  method_walk_t *w;
 
   if (capnp_get_u16(node, 12, 0xffff) != NODE_IFACE)
     return;
@@ -531,29 +605,29 @@ static void emit_interface(FILE *out, const capnp_ptr_t *node,
   fprintf(out, "(def %s-interface-id (int/u64 \"0x%016llx\"))\n", iname,
           (unsigned long long)capnp_get_u64(node, 0, 0));
 
-  /* interface.methods shares pointer slot 3 with struct.fields. */
-  if (capnp_getp(node, 3, &methods) != CAPNP_OK)
-    return;
-  count = capnp_list_len(&methods);
-  if (count == 0)
-    return;
-
-  fprintf(out, "(def %s-methods\n  {", iname);
-  for (i = 0; i < count; i++) {
-    capnp_ptr_t m;
-    const char *mname;
-    int pdw, ppw, rdw, rpw;
-    if (capnp_list_get_struct(&methods, i, &m) != CAPNP_OK)
-      continue;
-    mname = get_text(&m, 0);
-    struct_shape(nodes, capnp_get_u64(&m, 8, 0), &pdw, &ppw);
-    struct_shape(nodes, capnp_get_u64(&m, 16, 0), &rdw, &rpw);
-    fprintf(out,
-            "\n   :%s {:ordinal %u :params-dwords %d :params-pwords %d"
-            " :results-dwords %d :results-pwords %d}",
-            mname ? mname : "?", i, pdw, ppw, rdw, rpw);
+  count = capnp_getp(node, 4, &supers) == CAPNP_OK ? capnp_list_len(&supers) : 0;
+  if (count > 0) {
+    fprintf(out, "(def %s-superclasses\n  [", iname);
+    for (i = 0; i < count; i++) {
+      capnp_ptr_t sc;
+      if (capnp_list_get_struct(&supers, i, &sc) == CAPNP_OK)
+        fprintf(out, "%s(int/u64 \"0x%016llx\")", i ? " " : "",
+                (unsigned long long)capnp_get_u64(&sc, 0, 0));
+    }
+    fprintf(out, "])\n");
   }
-  fprintf(out, "})\n");
+
+  w = calloc(1, sizeof(*w));
+  if (!w)
+    return;
+  emit_methods(NULL, node, nodes, w);
+  if (w->any) {
+    memset(w, 0, sizeof(*w));
+    fprintf(out, "(def %s-methods\n  {", iname);
+    emit_methods(out, node, nodes, w);
+    fprintf(out, "})\n");
+  }
+  free(w);
 }
 
 static int type_is_parameter(const capnp_ptr_t *typ, uint64_t *scope,
@@ -882,25 +956,23 @@ static void emit_hex_string(FILE *out, const uint8_t *p, size_t n) {
   fputc('"', out);
 }
 
-/* 1 when a struct or list default was emitted, 0 when there is none, -1
- * on failure. The bytes are a framed canonical message whose root is the
- * default value. */
-static int emit_pointer_default(FILE *out, const char *sname, const char *fname,
-                                uint32_t offset, const capnp_ptr_t *field) {
-  capnp_ptr_t value, child;
+/* Framed canonical bytes of a message whose root is the struct or list in
+ * `value`, a schema Value. 1 on success, 0 when it holds no such pointer,
+ * -1 on failure. */
+static int pointer_value_bytes(const capnp_ptr_t *value, uint8_t **canon,
+                               size_t *clen) {
+  capnp_ptr_t child;
   capnp_builder_t b;
   capnp_bptr_t root;
   capnp_message_t msg = {0};
-  uint8_t *flat = NULL, *canon = NULL;
-  size_t flen = 0, clen = 0;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
   uint16_t which;
   int rc;
-  if (capnp_getp(field, 3, &value) != CAPNP_OK || value.kind != CAPNP_PK_STRUCT)
-    return 0;
-  which = capnp_get_u16(&value, 0, 0xffff);
+  which = capnp_get_u16(value, 0, 0xffff);
   if (which != TYPE_STRUCT && which != TYPE_LIST)
     return 0;
-  if (capnp_getp(&value, 0, &child) != CAPNP_OK || child.kind == CAPNP_PK_NULL)
+  if (capnp_getp(value, 0, &child) != CAPNP_OK || child.kind == CAPNP_PK_NULL)
     return 0;
   capnp_builder_init(&b);
   if (capnp_builder_root(&b, &root) || capnp_builder_copy_ptr(&root, &child)) {
@@ -918,23 +990,71 @@ static int emit_pointer_default(FILE *out, const char *sname, const char *fname,
     return -1;
   }
   free(flat);
-  rc = capnp_canonicalize_framed(&msg, &canon, &clen);
+  rc = capnp_canonicalize_framed(&msg, canon, clen);
   capnp_message_free(&msg);
   if (rc != CAPNP_OK) {
-    free(canon);
+    free(*canon);
+    *canon = NULL;
     return -1;
   }
+  return 1;
+}
+
+/* 1 when a struct or list default was emitted, 0 when there is none, -1
+ * on failure. The bytes are a framed canonical message whose root is the
+ * default value. */
+static int emit_pointer_default(FILE *out, const char *sname, const char *fname,
+                                uint32_t offset, const capnp_ptr_t *field) {
+  capnp_ptr_t value;
+  uint8_t *canon = NULL;
+  size_t clen = 0;
+  int rc;
+  if (capnp_getp(field, 3, &value) != CAPNP_OK || value.kind != CAPNP_PK_STRUCT)
+    return 0;
+  rc = pointer_value_bytes(&value, &canon, &clen);
+  if (rc <= 0)
+    return rc;
   fprintf(out, "(def %s-%s-default ", sname, fname);
   emit_hex_string(out, canon, clen);
   fprintf(out, ")\n");
   fprintf(out,
           "(defn %s-get-%s [ptr]\n"
           "  (def v (capnp/getp ptr %u))\n"
-          "  (if (= (v :kind) :null)\n"
-          "    (:root (capnp/message-from-buffer %s-%s-default))\n"
+          "  (if (= (capnp/kind v) :null)\n"
+          "    (:root (capnp/message-from-buffer (buffer %s-%s-default)))\n"
           "    v))\n",
           sname, fname, (unsigned)offset, sname, fname);
   free(canon);
+  return 1;
+}
+
+/* A Text or Data getter that returns the schema default for a null
+ * pointer, as C++ getters do. 0 when the field has no default. */
+static int emit_blob_default(FILE *out, const char *sname, const char *fname,
+                             uint32_t offset, const capnp_ptr_t *field,
+                             uint16_t tw) {
+  capnp_ptr_t value, child;
+  const char *text = NULL;
+  const uint8_t *data = NULL;
+  size_t n = 0;
+  if (capnp_getp(field, 3, &value) != CAPNP_OK || value.kind != CAPNP_PK_STRUCT ||
+      capnp_get_u16(&value, 0, 0xffff) != tw)
+    return 0;
+  if (capnp_getp(&value, 0, &child) != CAPNP_OK || child.kind == CAPNP_PK_NULL)
+    return 0;
+  if (tw == TYPE_TEXT ? capnp_get_text(&value, 0, &text, &n) != CAPNP_OK
+                      : capnp_get_data(&value, 0, &data, &n) != CAPNP_OK)
+    return 0;
+  fprintf(out,
+          "(defn %s-get-%s [ptr]\n"
+          "  (if (= (capnp/kind (capnp/getp ptr %u)) :null)\n    ",
+          sname, fname, (unsigned)offset);
+  if (tw == TYPE_TEXT)
+    janet_quote(out, text, n);
+  else
+    emit_hex_string(out, data, n);
+  fprintf(out, "\n    (capnp/get-%s ptr %u)))\n",
+          tw == TYPE_TEXT ? "text" : "data", (unsigned)offset);
   return 1;
 }
 
@@ -1307,14 +1427,16 @@ static void emit_struct(FILE *out, const capnp_ptr_t *node,
               sname, fname, (unsigned)(offset * 8), dflt);
       break;
     case TYPE_TEXT:
-      fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/get-text ptr %u))\n", sname,
-              fname, (unsigned)offset);
+      if (!emit_blob_default(out, sname, fname, offset, &f, tw))
+        fprintf(out,
+                "(defn %s-get-%s [ptr]\n  (capnp/get-text ptr %u))\n", sname,
+                fname, (unsigned)offset);
       break;
     case TYPE_DATA:
-      fprintf(out,
-              "(defn %s-get-%s [ptr]\n  (capnp/get-data ptr %u))\n", sname,
-              fname, (unsigned)offset);
+      if (!emit_blob_default(out, sname, fname, offset, &f, tw))
+        fprintf(out,
+                "(defn %s-get-%s [ptr]\n  (capnp/get-data ptr %u))\n", sname,
+                fname, (unsigned)offset);
       break;
     case TYPE_LIST: {
       capnp_ptr_t element_type;
@@ -1474,6 +1596,23 @@ static void emit_const(FILE *out, const capnp_ptr_t *node) {
       janet_quote(out, (const char *)data, n);
     break;
   }
+  case TYPE_STRUCT:
+  case TYPE_LIST: {
+    uint8_t *canon = NULL;
+    size_t clen = 0;
+    int rc = pointer_value_bytes(&value, &canon, &clen);
+    if (rc > 0) {
+      fputs("(:root (capnp/message-from-buffer (buffer ", out);
+      emit_hex_string(out, canon, clen);
+      fputs(")))", out);
+    } else if (rc == 0) {
+      fputs("nil", out);
+    } else {
+      fputs("(error \"unreadable Cap'n Proto pointer constant\")", out);
+    }
+    free(canon);
+    break;
+  }
   default:
     fputs("(error \"unsupported Cap'n Proto pointer constant\")", out);
     break;
@@ -1528,20 +1667,29 @@ static int write_module(const char *filename, const capnp_ptr_t *nodes,
   fprintf(out, "(def file-id (int/u64 \"0x%llx\"))\n",
           (unsigned long long)file_id);
 
+  /* Every node's display name starts with its file's name and a colon,
+   * including method parameter structs whose scopeId is 0. */
+  capnp_ptr_t file_node;
+  const char *file_name = NULL;
+  size_t file_name_len = 0;
+  if (node_by_id(nodes, file_id, &file_node)) {
+    file_name = get_text(&file_node, 0);
+    file_name_len = strlen(file_name);
+  }
+
   uint32_t nn = capnp_list_len(nodes);
   for (uint32_t i = 0; i < nn; i++) {
     capnp_ptr_t node;
+    const char *display;
     if (capnp_list_getp(nodes, i, &node) != CAPNP_OK)
       continue;
-    uint64_t scope = capnp_get_u64(&node, 16, 0); /* scopeId bits[128,192) */
-    /* Emit nodes scoped to this file (scopeId == file_id) or nested. */
     uint16_t which = capnp_get_u16(&node, 12, 0xffff);
     if (which == NODE_FILE)
       continue;
-    /* Heuristic: emit all structs/enums whose displayName mentions the stem
-     * or whose scopeId matches file or a nested id we do not track yet —
-     * for v1 emit every struct/enum in the request (small schemas). */
-    (void)scope;
+    display = get_text(&node, 0);
+    if (!file_name || strncmp(display, file_name, file_name_len) != 0 ||
+        display[file_name_len] != ':')
+      continue;
     if (which == NODE_STRUCT)
       emit_struct(out, &node, nodes);
     else if (which == NODE_ENUM)

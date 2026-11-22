@@ -2,12 +2,12 @@
 # reach janet_unwrap_function and abort the process.
 (import capnp)
 
-(defn must-error [label thunk]
+(defn must-error [what thunk]
   (def err
     (try
       (thunk)
       ([e] (string e))))
-  (assert (string? err) (string "expected an error for " label))
+  (assert (string? err) (string "expected an error for " what))
   (assert (string/find "fill must be a function" err) err))
 
 (def c (capnp/rpc-connect))

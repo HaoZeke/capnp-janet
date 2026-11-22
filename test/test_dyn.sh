@@ -220,31 +220,13 @@ empty_list '{"vText":"hello world!!!!!","lI32":[],"vText":"a"}' elist
 grep -q '"lI32": \[\]' "$TMP/elist-our.json"
 empty_list '{"vText":"hello world!!!!!","lText":[],"vText":"a"}' elist-text
 empty_list '{"lI64":[1,2,3,4],"lI64":[]}' elist-i64
-# A valid surrogate pair is one UTF-8 scalar. A lone surrogate is an
-# error. C++ 1.4.0 stores each \u unit as CESU-8 and accepts a lone one.
-printf '%s\n' '{"vText":"\uD83D\uDE00"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/surr.bin"
-"$BIN" canon "$TMP/surr.bin" "$TMP/surr.can"
-# U+1F600 is f0 9f 98 80. The canonical body is not framed.
-python3 - "$TMP/surr.can" <<'PY'
-import pathlib, sys
-b = pathlib.Path(sys.argv[1]).read_bytes()
-if bytes([0xF0, 0x9F, 0x98, 0x80]) not in b:
-    raise SystemExit("missing utf-8 smile")
-if bytes([0xED, 0xA0, 0xBD]) in b:
-    raise SystemExit("stored cesu-8")
-PY
-if printf '%s\n' '{"vText":"\uD83D"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/lone.bin" 2>"$TMP/lone.err"
-then
-  echo "lone surrogate was accepted" >&2
-  exit 1
-fi
-grep -q "lone surrogate" "$TMP/lone.err"
-if printf '%s\n' '{"vText":"\uDE00"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/lone2.bin" 2>"$TMP/lone2.err"
-then
-  echo "lone low surrogate was accepted" >&2
-  exit 1
-fi
-grep -q "lone surrogate" "$TMP/lone2.err"
+# JsonCodec decodes each \u unit alone, so surrogates, paired or lone,
+# are stored as CESU-8. Bytes match C++ 1.4.0.
+for v in '\uD83D\uDE00' '\uD83D' '\uDE00x' 'A\u00e9\uD83D\uDE00'; do
+  printf '{"vText":"%s"}\n' "$v" | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/surr-ref.bin"
+  printf '{"vText":"%s"}\n' "$v" | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/surr-our.bin"
+  cmp "$TMP/surr-ref.bin" "$TMP/surr-our.bin"
+done
 printf '%s\n' '{"uNote":"first","uNote":"second"}' | capnp convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupu-ref.bin"
 printf '%s\n' '{"uNote":"first","uNote":"second"}' | "$CLI" convert -I"$INC" json:binary "$PARITY_SCHEMA" Parity >"$TMP/dupu-our.bin"
 "$BIN" canon "$TMP/dupu-ref.bin" "$TMP/dupu-ref.can"

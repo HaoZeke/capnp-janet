@@ -155,6 +155,56 @@ static void test_depth_limit_and_cycle(void) {
   capnp_message_free(&m);
 }
 
+/* C++ checks the nesting limit only when it lands a struct or a list.
+ * A struct that may follow nothing further still reads a null pointer and
+ * its Text, directly or through a far pointer. */
+static void test_blob_at_depth_limit(void) {
+  uint8_t near_seg[32], far0[24], far1[16];
+  capnp_segment_t segs[2];
+  capnp_message_t m = {0};
+  capnp_ptr_t root, next, list;
+  const char *t = NULL;
+  size_t n = 0;
+
+  capnp_store_le64(near_seg, capnp_wp_make_struct(0, 0, 2));
+  capnp_store_le64(near_seg + 8, 0);
+  capnp_store_le64(near_seg + 16, capnp_wp_make_list(0, CAPNP_SZ_BYTE, 4));
+  memcpy(near_seg + 24, "end\0\0\0\0\0", 8);
+  segs[0].data = near_seg;
+  segs[0].words = 4;
+  CHECK(capnp_message_from_segments(&m, segs, 1) == CAPNP_OK, "near view");
+  m.depth_limit = 1;
+  CHECK(capnp_root(&m, &root) == CAPNP_OK && root.depth_left == 0,
+        "near root at the limit");
+  CHECK(capnp_getp(&root, 0, &next) == CAPNP_OK &&
+            next.kind == CAPNP_PK_NULL,
+        "null pointer at the limit");
+  CHECK(capnp_get_text(&root, 1, &t, &n) == CAPNP_OK && n == 3 &&
+            memcmp(t, "end", 3) == 0,
+        "text at the limit");
+  CHECK(capnp_getp(&root, 1, &list) == CAPNP_ERR_DEPTH,
+        "a list past the limit still fails");
+  capnp_message_free(&m);
+
+  capnp_store_le64(far0, capnp_wp_make_struct(0, 0, 2));
+  capnp_store_le64(far0 + 8, 0);
+  capnp_store_le64(far0 + 16, capnp_wp_make_far(0, 0, 1));
+  capnp_store_le64(far1, capnp_wp_make_list(0, CAPNP_SZ_BYTE, 4));
+  memcpy(far1 + 8, "end\0\0\0\0\0", 8);
+  segs[0].data = far0;
+  segs[0].words = 3;
+  segs[1].data = far1;
+  segs[1].words = 2;
+  CHECK(capnp_message_from_segments(&m, segs, 2) == CAPNP_OK, "far view");
+  m.depth_limit = 1;
+  CHECK(capnp_root(&m, &root) == CAPNP_OK, "far root");
+  t = NULL;
+  CHECK(capnp_get_text(&root, 1, &t, &n) == CAPNP_OK && n == 3 &&
+            memcmp(t, "end", 3) == 0,
+        "far text at the limit");
+  capnp_message_free(&m);
+}
+
 static void test_builder_offset_overflow(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body;
@@ -306,7 +356,7 @@ static void test_traversal_budget(void) {
   capnp_builder_free(&b);
 
   CHECK(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "parse");
-  /* One pointer word plus a 5-word body (4 data + 1 pointer) is more than 3. */
+  /* Two root charges plus a 5-word body (4 data + 1 pointer) is more than 3. */
   m.traversal_left = 3;
   CHECK(capnp_root(&m, &r) == CAPNP_ERR_TRAVERSAL, "root over budget");
   capnp_message_free(&m);
@@ -316,6 +366,78 @@ static void test_traversal_budget(void) {
   m.traversal_left = 8;
   CHECK(capnp_root(&m, &r) == CAPNP_OK, "root within budget");
   CHECK(capnp_getp(&r, 0, &k) == CAPNP_ERR_TRAVERSAL, "child over budget");
+  capnp_message_free(&m);
+}
+
+/* C++ charges the root pointer twice and each object it lands, but not the
+ * pointer words inside a parent. Reading every name of
+ * (items = [(name = "abc"), (name = "def")]) costs 2 + 1 + 3 + 2 = 8. */
+static void test_traversal_matches_cpp(void) {
+  static const uint8_t flat[] = {
+      0x00, 0x00, 0x00, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+      0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x17, 0x00, 0x00, 0x00,
+      0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x05, 0x00, 0x00, 0x00,
+      0x22, 0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x22, 0x00, 0x00, 0x00,
+      0x61, 0x62, 0x63, 0x00, 0x00, 0x00, 0x00, 0x00, 0x64, 0x65, 0x66, 0x00,
+      0x00, 0x00, 0x00, 0x00};
+  uint64_t budget;
+  for (budget = 7; budget <= 8; budget++) {
+    capnp_message_t m = {0};
+    capnp_ptr_t r, items, item;
+    const char *t;
+    size_t n;
+    uint32_t i;
+    int rc;
+    CHECK(capnp_message_from_flat(&m, flat, sizeof flat) == CAPNP_OK, "parse");
+    m.traversal_left = budget;
+    rc = capnp_root(&m, &r);
+    if (!rc)
+      rc = capnp_getp(&r, 0, &items);
+    for (i = 0; !rc && i < 2; i++) {
+      rc = capnp_list_get_struct(&items, i, &item);
+      if (!rc)
+        rc = capnp_get_text(&item, 0, &t, &n);
+    }
+    if (budget == 8)
+      CHECK(rc == CAPNP_OK && m.traversal_left == 0, "C++ budget suffices");
+    else
+      CHECK(rc == CAPNP_ERR_TRAVERSAL, "one word less runs out");
+    capnp_message_free(&m);
+  }
+}
+
+/* FlatArrayMessageReader and SegmentArrayMessageReader take any segment
+ * count; only stream readers stop at 511. */
+static void test_flat_many_segments(void) {
+  enum { NSEG = 600, TABLE = (4 + 4 * NSEG + 7) / 8 * 8 };
+  static uint8_t flat[TABLE + 8 * (NSEG + 1)];
+  static capnp_segment_t segs[NSEG];
+  capnp_message_t m = {0};
+  capnp_ptr_t r;
+  uint32_t i;
+
+  memset(flat, 0, sizeof flat);
+  capnp_store_le32(flat, NSEG - 1);
+  capnp_store_le32(flat + 4, 2);
+  for (i = 1; i < NSEG; i++)
+    capnp_store_le32(flat + 4 + 4 * i, 1);
+  capnp_store_le64(flat + TABLE, capnp_wp_make_struct(0, 1, 0));
+  capnp_store_le64(flat + TABLE + 8, 7);
+  CHECK(capnp_message_from_flat(&m, flat, sizeof flat) == CAPNP_OK &&
+            m.nsegs == NSEG,
+        "flat array with 600 segments");
+  CHECK(capnp_root(&m, &r) == CAPNP_OK && capnp_get_u64(&r, 0, 0) == 7,
+        "flat root");
+  capnp_message_free(&m);
+
+  segs[0].data = flat + TABLE;
+  segs[0].words = 2;
+  for (i = 1; i < NSEG; i++) {
+    segs[i].data = flat + TABLE + 8 * (1 + i);
+    segs[i].words = 1;
+  }
+  CHECK(capnp_message_from_segments(&m, segs, NSEG) == CAPNP_OK,
+        "segment array with 600 segments");
   capnp_message_free(&m);
 }
 
@@ -495,10 +617,13 @@ int main(void) {
   test_double_far_list_out_of_bounds();
   test_negative_composite_count();
   test_depth_limit_and_cycle();
+  test_blob_at_depth_limit();
   test_text_requires_nul();
   test_builder_offset_overflow();
   test_many_segments_roundtrip();
   test_traversal_budget();
+  test_traversal_matches_cpp();
+  test_flat_many_segments();
   test_zero_size_and_far_validation();
   test_virtual_traversal_charge();
   return harness_finish();

@@ -152,10 +152,9 @@ or `capnp_message_free`. Those calls free the previous buffer when the
 message is already live, so parsing into the same struct again does not
 leak. A zero `ready` field means the struct owns nothing.
 
-JSON text is UTF-8. A `\u` surrogate pair (`\uD83D\uDE00`) is one scalar
-and is stored as UTF-8. A lone surrogate is rejected with the error
-`lone surrogate`. Cap'n Proto C++ 1.4.0 encodes each `\u` unit on its
-own as CESU-8 and accepts a lone surrogate; this library does not.
+JSON `\u` escapes decode one unit at a time, as Cap'n Proto C++ 1.4.0
+does: a surrogate pair (`\uD83D\uDE00`) is stored as two three-byte
+sequences (CESU-8), and a lone surrogate is accepted the same way.
 
 ### Janet
 

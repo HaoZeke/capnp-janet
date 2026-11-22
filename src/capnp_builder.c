@@ -2,6 +2,8 @@
 #include <capnp-janet/capnp_copy.h>
 #include <capnp-janet/capnp_pointer.h>
 
+#include "capnp_internal.h"
+
 #include <stdlib.h>
 #include <string.h>
 
@@ -57,6 +59,15 @@ struct capnp_builder_priv {
   struct capnp_oref *orefs;
   uint32_t norefs;
   uint32_t orefs_cap;
+  /* 0 for the growable arena, else CAPNP_ALLOC_* + 1. */
+  int malloc_mode;
+  uint32_t seg_with_space;
+  size_t next_size;
+  /* Landing pad alloc_for reserved in front of an object that did not
+   * fit the segment of the pointer naming it. */
+  int pad_pending;
+  uint32_t pad_seg;
+  size_t pad_word;
 };
 
 _Static_assert(sizeof(struct capnp_builder_priv) % _Alignof(capnp_bseg_t) == 0,
@@ -89,9 +100,9 @@ static int ensure_segs_cap(capnp_builder_t *b, uint32_t need) {
   size_t bytes;
   if (need <= b->segs_cap)
     return CAPNP_OK;
-  ncap = b->segs_cap ? b->segs_cap * 2u : 4u;
+  ncap = b->segs_cap ? b->segs_cap : 4u;
   while (ncap < need)
-    ncap *= 2u;
+    ncap = ncap > UINT32_MAX / 2u ? UINT32_MAX : ncap * 2u;
 #if SIZE_MAX <= UINT32_MAX
   if ((size_t)ncap >
       (SIZE_MAX - sizeof(struct capnp_builder_priv)) / sizeof(capnp_bseg_t))
@@ -147,7 +158,8 @@ static int append_segment(capnp_builder_t *b, size_t cap_words) {
     cap_words = 1;
   if (cap_words > lim)
     cap_words = lim;
-  if (b->nsegs >= CAPNP_MAX_SEGMENTS)
+  /* Far pointers name a segment with 32 bits. */
+  if (b->nsegs == UINT32_MAX)
     return CAPNP_ERR_ALLOC;
   if (ensure_segs_cap(b, b->nsegs + 1))
     return CAPNP_ERR_ALLOC;
@@ -159,6 +171,44 @@ static int append_segment(capnp_builder_t *b, size_t cap_words) {
   s->cap = cap_words;
   s->words = 0;
   b->nsegs++;
+  return CAPNP_OK;
+}
+
+static int malloc_mode(capnp_builder_t *b) {
+  struct capnp_builder_priv *priv = builder_priv(b);
+  return priv ? priv->malloc_mode : 0;
+}
+
+/* BuilderArena::allocate: the segment with space, else a new segment of
+ * max(n, nextSize) that MallocMessageBuilder::allocateSegment sizes. */
+static int arena_alloc(capnp_builder_t *b, size_t n, uint32_t *out_seg,
+                       size_t *out_word) {
+  struct capnp_builder_priv *priv = builder_priv(b);
+  capnp_bseg_t *s;
+  size_t size;
+  if (priv->seg_with_space < b->nsegs) {
+    s = &b->segs[priv->seg_with_space];
+    if (n <= s->cap - s->words) {
+      *out_seg = priv->seg_with_space;
+      *out_word = s->words;
+      s->words += n;
+      return CAPNP_OK;
+    }
+  }
+  if (n > CAPNP_BUILDER_MAX_SEGMENT_WORDS)
+    return CAPNP_ERR_ALLOC;
+  size = n > priv->next_size ? n : priv->next_size;
+  if (append_segment(b, size))
+    return CAPNP_ERR_ALLOC;
+  priv = builder_priv(b);
+  if (priv->malloc_mode == CAPNP_ALLOC_GROW_HEURISTICALLY + 1)
+    priv->next_size = size <= CAPNP_BUILDER_MAX_SEGMENT_WORDS - priv->next_size
+                          ? priv->next_size + size
+                          : CAPNP_BUILDER_MAX_SEGMENT_WORDS;
+  priv->seg_with_space = b->nsegs - 1;
+  *out_seg = b->nsegs - 1;
+  *out_word = 0;
+  b->segs[*out_seg].words = n;
   return CAPNP_OK;
 }
 
@@ -177,6 +227,8 @@ static int alloc_words(capnp_builder_t *b, size_t n, uint32_t *out_seg,
   size_t ncap;
   if (!b || !out_seg || !out_word || b->nsegs == 0)
     return CAPNP_ERR_ARG;
+  if (malloc_mode(b))
+    return arena_alloc(b, n, out_seg, out_word);
   if (n > lim)
     return CAPNP_ERR_ALLOC;
   last = &b->segs[b->nsegs - 1];
@@ -221,6 +273,8 @@ static int alloc_in(capnp_builder_t *b, uint32_t seg, size_t n,
   s = &b->segs[seg];
   if (n > SIZE_MAX - s->words || s->words + n > lim_words(b))
     return CAPNP_ERR_ALLOC;
+  if (malloc_mode(b) && s->words + n > s->cap)
+    return CAPNP_ERR_ALLOC;
   if (seg_ensure(b, seg, s->words + n))
     return CAPNP_ERR_ALLOC;
   s = &b->segs[seg];
@@ -230,6 +284,52 @@ static int alloc_in(capnp_builder_t *b, uint32_t seg, size_t n,
 }
 
 
+/* Space for an object named by a pointer in slot_seg. WireHelpers::allocate
+ * uses the pointer's own segment when the object fits, and otherwise takes
+ * one more word from the arena for the landing pad in front of it. */
+static int alloc_for(capnp_builder_t *b, uint32_t slot_seg, size_t n,
+                     uint32_t *out_seg, size_t *out_word) {
+  struct capnp_builder_priv *priv = builder_priv(b);
+  capnp_bseg_t *s;
+  uint32_t seg;
+  size_t word;
+  if (!priv || !priv->malloc_mode) {
+    if (n == 0)
+      return tail_slot(b, out_seg, out_word);
+    return alloc_words(b, n, out_seg, out_word);
+  }
+  priv->pad_pending = 0;
+  s = &b->segs[slot_seg];
+  if (n <= s->cap - s->words) {
+    *out_seg = slot_seg;
+    *out_word = s->words;
+    s->words += n;
+    return CAPNP_OK;
+  }
+  if (n >= CAPNP_BUILDER_MAX_SEGMENT_WORDS)
+    return CAPNP_ERR_ALLOC;
+  if (arena_alloc(b, n + 1, &seg, &word))
+    return CAPNP_ERR_ALLOC;
+  priv = builder_priv(b);
+  priv->pad_pending = 1;
+  priv->pad_seg = seg;
+  priv->pad_word = word;
+  *out_seg = seg;
+  *out_word = word + 1;
+  return CAPNP_OK;
+}
+
+static int take_pad(capnp_builder_t *b, uint32_t seg, size_t body,
+                    size_t *pad) {
+  struct capnp_builder_priv *priv = builder_priv(b);
+  if (!priv || !priv->pad_pending || priv->pad_seg != seg ||
+      priv->pad_word + 1 != body)
+    return 0;
+  priv->pad_pending = 0;
+  *pad = priv->pad_word;
+  return 1;
+}
+
 /* Allocate n words for a far landing pad, never in avoid_seg. Always appends
  * a fresh segment so content segments at capacity stay untouched. */
 static int alloc_pad_segment(capnp_builder_t *b, uint32_t avoid_seg, size_t n,
@@ -237,6 +337,8 @@ static int alloc_pad_segment(capnp_builder_t *b, uint32_t avoid_seg, size_t n,
   size_t saved = b->max_seg_words;
   size_t need = n < 1 ? 1 : n;
   (void)avoid_seg;
+  if (malloc_mode(b))
+    return arena_alloc(b, need, out_seg, out_word);
   if (saved && saved < need)
     b->max_seg_words = need;
   if (append_segment(b, need)) {
@@ -275,7 +377,8 @@ static int write_struct_ptr(capnp_builder_t *b, uint32_t slot_seg,
     store_w(b, slot_seg, slot_word, capnp_wp_make_struct(off, dwords, pwords));
     return CAPNP_OK;
   }
-  if (alloc_in(b, body_seg, 1, &pad) == CAPNP_OK) {
+  if (take_pad(b, body_seg, body_word, &pad) ||
+      alloc_in(b, body_seg, 1, &pad) == CAPNP_OK) {
     int32_t off = (int32_t)((int64_t)body_word - (int64_t)pad - 1);
     store_w(b, body_seg, pad, capnp_wp_make_struct(off, dwords, pwords));
     store_w(b, slot_seg, slot_word,
@@ -307,7 +410,8 @@ static int write_list_ptr(capnp_builder_t *b, uint32_t slot_seg,
     store_w(b, slot_seg, slot_word, capnp_wp_make_list(off, esize, count));
     return CAPNP_OK;
   }
-  if (alloc_in(b, content_seg, 1, &pad) == CAPNP_OK) {
+  if (take_pad(b, content_seg, content_word, &pad) ||
+      alloc_in(b, content_seg, 1, &pad) == CAPNP_OK) {
     int32_t off = (int32_t)((int64_t)content_word - (int64_t)pad - 1);
     store_w(b, content_seg, pad, capnp_wp_make_list(off, esize, count));
     store_w(b, slot_seg, slot_word,
@@ -343,6 +447,20 @@ void capnp_builder_init_sized(capnp_builder_t *b, size_t first_words) {
     builder_release_table(b);
     memset(b, 0, sizeof(*b));
   }
+}
+
+void capnp_builder_init_malloc(capnp_builder_t *b, size_t first_words,
+                               int strategy) {
+  struct capnp_builder_priv *priv;
+  capnp_builder_init_sized(b, first_words);
+  priv = builder_priv(b);
+  if (!priv)
+    return;
+  priv->malloc_mode = strategy == CAPNP_ALLOC_FIXED_SIZE
+                          ? CAPNP_ALLOC_FIXED_SIZE + 1
+                          : CAPNP_ALLOC_GROW_HEURISTICALLY + 1;
+  priv->next_size = b->segs[0].cap;
+  priv->seg_with_space = 0;
 }
 
 void capnp_builder_set_max_seg_words(capnp_builder_t *b, size_t max_words) {
@@ -409,7 +527,7 @@ int capnp_builder_struct(const capnp_bptr_t *ptr, uint16_t dwords, uint16_t pwor
     }
     return CAPNP_OK;
   }
-  if (alloc_words(ptr->b, n, &body_seg, &body_word))
+  if (alloc_for(ptr->b, ptr->seg, n, &body_seg, &body_word))
     return CAPNP_ERR_ALLOC;
   rc = write_struct_ptr(ptr->b, ptr->seg, ptr->word, body_seg, body_word,
                         dwords, pwords);
@@ -567,7 +685,7 @@ static int write_text_at(capnp_builder_t *b, uint32_t slot_seg, size_t slot_word
     return CAPNP_ERR_BOUNDS;
   nbytes = text_len + 1;
   nwords = (nbytes + 7) / 8;
-  if (alloc_words(b, nwords, &start_seg, &start_word))
+  if (alloc_for(b, slot_seg, nwords, &start_seg, &start_word))
     return CAPNP_ERR_ALLOC;
   memset(wbytes(b, start_seg, start_word), 0, nwords * CAPNP_WORD_BYTES);
   memcpy(wbytes(b, start_seg, start_word), text, text_len);
@@ -617,15 +735,13 @@ int capnp_builder_set_data(const capnp_bptr_t *body, uint16_t dwords,
     return CAPNP_ERR_BOUNDS;
   drop_slot(body->b, body->seg, ptr_word);
   nwords = (data_len + 7u) / 8u;
+  if (alloc_for(body->b, body->seg, nwords, &start_seg, &start_word))
+    return CAPNP_ERR_ALLOC;
   if (nwords) {
-    if (alloc_words(body->b, nwords, &start_seg, &start_word))
-      return CAPNP_ERR_ALLOC;
     memset(wbytes(body->b, start_seg, start_word), 0,
            nwords * CAPNP_WORD_BYTES);
     if (data_len)
       memcpy(wbytes(body->b, start_seg, start_word), data, data_len);
-  } else if (tail_slot(body->b, &start_seg, &start_word)) {
-    return CAPNP_ERR_ALLOC;
   }
   return write_list_ptr(body->b, body->seg, ptr_word, start_seg, start_word,
                         CAPNP_SZ_BYTE, (uint32_t)data_len);
@@ -633,7 +749,8 @@ int capnp_builder_set_data(const capnp_bptr_t *body, uint16_t dwords,
 
 static int set_list_prim(const capnp_bptr_t *body, uint16_t dwords,
                          uint16_t ptr_index, int esize, uint32_t nitems,
-                         size_t elem_bytes, const void *items) {
+                         size_t elem_bytes, const void *items,
+                         capnp_bptr_t *start) {
   size_t ptr_word, nbytes, nwords;
   uint32_t start_seg;
   size_t start_word;
@@ -646,9 +763,9 @@ static int set_list_prim(const capnp_bptr_t *body, uint16_t dwords,
     return CAPNP_ERR_BOUNDS;
   nbytes = (size_t)nitems * elem_bytes;
   nwords = (nbytes + 7) / 8;
+  if (alloc_for(body->b, body->seg, nwords, &start_seg, &start_word))
+    return CAPNP_ERR_ALLOC;
   if (nwords) {
-    if (alloc_words(body->b, nwords, &start_seg, &start_word))
-      return CAPNP_ERR_ALLOC;
     memset(wbytes(body->b, start_seg, start_word), 0,
            nwords * CAPNP_WORD_BYTES);
     if (items && nbytes) {
@@ -690,8 +807,11 @@ static int set_list_prim(const capnp_bptr_t *body, uint16_t dwords,
         return CAPNP_ERR_ARG;
       }
     }
-  } else if (tail_slot(body->b, &start_seg, &start_word)) {
-    return CAPNP_ERR_ALLOC;
+  }
+  if (start) {
+    start->b = body->b;
+    start->seg = start_seg;
+    start->word = start_word;
   }
   return write_list_ptr(body->b, body->seg, ptr_word, start_seg, start_word,
                         esize, nitems);
@@ -700,32 +820,38 @@ static int set_list_prim(const capnp_bptr_t *body, uint16_t dwords,
 int capnp_builder_set_list_u8(const capnp_bptr_t *body, uint16_t dwords,
                               uint16_t ptr_index, const uint8_t *items,
                               uint32_t nitems) {
-  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_BYTE, nitems, 1, items);
+  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_BYTE, nitems, 1, items,
+                       NULL);
 }
 int capnp_builder_set_list_u16(const capnp_bptr_t *body, uint16_t dwords,
                                uint16_t ptr_index, const uint16_t *items,
                                uint32_t nitems) {
-  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_TWO, nitems, 2, items);
+  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_TWO, nitems, 2, items,
+                       NULL);
 }
 int capnp_builder_set_list_u32(const capnp_bptr_t *body, uint16_t dwords,
                                uint16_t ptr_index, const uint32_t *items,
                                uint32_t nitems) {
-  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_FOUR, nitems, 4, items);
+  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_FOUR, nitems, 4, items,
+                       NULL);
 }
 int capnp_builder_set_list_u64(const capnp_bptr_t *body, uint16_t dwords,
                                uint16_t ptr_index, const uint64_t *items,
                                uint32_t nitems) {
-  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_EIGHT, nitems, 8, items);
+  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_EIGHT, nitems, 8, items,
+                       NULL);
 }
 int capnp_builder_set_list_f32(const capnp_bptr_t *body, uint16_t dwords,
                                uint16_t ptr_index, const float *items,
                                uint32_t nitems) {
-  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_FOUR, nitems, 4, items);
+  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_FOUR, nitems, 4, items,
+                       NULL);
 }
 int capnp_builder_set_list_f64(const capnp_bptr_t *body, uint16_t dwords,
                                uint16_t ptr_index, const double *items,
                                uint32_t nitems) {
-  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_EIGHT, nitems, 8, items);
+  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_EIGHT, nitems, 8, items,
+                       NULL);
 }
 
 int capnp_builder_set_list_bool(const capnp_bptr_t *body, uint16_t dwords,
@@ -741,9 +867,9 @@ int capnp_builder_set_list_bool(const capnp_bptr_t *body, uint16_t dwords,
   drop_slot(body->b, body->seg, ptr_word);
   nbytes = ((size_t)nitems + 7u) / 8u;
   nwords = (nbytes + 7u) / 8u;
+  if (alloc_for(body->b, body->seg, nwords, &start_seg, &start_word))
+    return CAPNP_ERR_ALLOC;
   if (nwords) {
-    if (alloc_words(body->b, nwords, &start_seg, &start_word))
-      return CAPNP_ERR_ALLOC;
     memset(wbytes(body->b, start_seg, start_word), 0,
            nwords * CAPNP_WORD_BYTES);
     if (items) {
@@ -754,8 +880,6 @@ int capnp_builder_set_list_bool(const capnp_bptr_t *body, uint16_t dwords,
         }
       }
     }
-  } else if (tail_slot(body->b, &start_seg, &start_word)) {
-    return CAPNP_ERR_ALLOC;
   }
   return write_list_ptr(body->b, body->seg, ptr_word, start_seg, start_word,
                         CAPNP_SZ_BIT, nitems);
@@ -763,7 +887,40 @@ int capnp_builder_set_list_bool(const capnp_bptr_t *body, uint16_t dwords,
 
 int capnp_builder_set_list_void(const capnp_bptr_t *body, uint16_t dwords,
                                 uint16_t ptr_index, uint32_t nitems) {
-  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_VOID, nitems, 0, NULL);
+  return set_list_prim(body, dwords, ptr_index, CAPNP_SZ_VOID, nitems, 0, NULL,
+                       NULL);
+}
+
+int capnp_builder_init_list(const capnp_bptr_t *body, uint16_t dwords,
+                            uint16_t ptr_index, int esize, uint32_t nitems,
+                            capnp_bptr_t *start) {
+  static const size_t bytes[] = {0, 0, 1, 2, 4, 8};
+  size_t ptr_word, nwords;
+  uint32_t start_seg;
+  size_t start_word;
+  if (esize < CAPNP_SZ_VOID || esize > CAPNP_SZ_EIGHT)
+    return CAPNP_ERR_ARG;
+  if (esize != CAPNP_SZ_BIT)
+    return set_list_prim(body, dwords, ptr_index, esize, nitems,
+                         bytes[esize], NULL, start);
+  if (nitems > CAPNP_BUILDER_MAX_SEGMENT_WORDS)
+    return CAPNP_ERR_BOUNDS;
+  if (slot_word_checked(body, dwords, ptr_index, &ptr_word))
+    return CAPNP_ERR_BOUNDS;
+  drop_slot(body->b, body->seg, ptr_word);
+  nwords = ((size_t)nitems + 63u) / 64u;
+  if (alloc_for(body->b, body->seg, nwords, &start_seg, &start_word))
+    return CAPNP_ERR_ALLOC;
+  if (nwords)
+    memset(wbytes(body->b, start_seg, start_word), 0,
+           nwords * CAPNP_WORD_BYTES);
+  if (start) {
+    start->b = body->b;
+    start->seg = start_seg;
+    start->word = start_word;
+  }
+  return write_list_ptr(body->b, body->seg, ptr_word, start_seg, start_word,
+                        CAPNP_SZ_BIT, nitems);
 }
 
 int capnp_builder_set_list_text_n(const capnp_bptr_t *body, uint16_t dwords,
@@ -778,12 +935,8 @@ int capnp_builder_set_list_text_n(const capnp_bptr_t *body, uint16_t dwords,
   if (slot_word_checked(body, dwords, ptr_index, &list_ptr_word))
     return CAPNP_ERR_BOUNDS;
   drop_slot(body->b, body->seg, list_ptr_word);
-  if (nitems) {
-    if (alloc_words(body->b, nitems, &list_seg, &list_start))
-      return CAPNP_ERR_ALLOC;
-  } else if (tail_slot(body->b, &list_seg, &list_start)) {
+  if (alloc_for(body->b, body->seg, nitems, &list_seg, &list_start))
     return CAPNP_ERR_ALLOC;
-  }
   if (write_list_ptr(body->b, body->seg, list_ptr_word, list_seg, list_start,
                      CAPNP_SZ_PTR, nitems))
     return CAPNP_ERR_ALLOC;
@@ -819,14 +972,11 @@ int capnp_builder_init_ptr_list(const capnp_bptr_t *body, uint16_t dwords,
   if (slot_word_checked(body, dwords, ptr_index, &list_ptr_word))
     return CAPNP_ERR_BOUNDS;
   drop_slot(body->b, body->seg, list_ptr_word);
-  if (nitems) {
-    if (alloc_words(body->b, nitems, &list_seg, &list_start))
-      return CAPNP_ERR_ALLOC;
+  if (alloc_for(body->b, body->seg, nitems, &list_seg, &list_start))
+    return CAPNP_ERR_ALLOC;
+  if (nitems)
     memset(wbytes(body->b, list_seg, list_start), 0,
            (size_t)nitems * CAPNP_WORD_BYTES);
-  } else if (tail_slot(body->b, &list_seg, &list_start)) {
-    return CAPNP_ERR_ALLOC;
-  }
   if (write_list_ptr(body->b, body->seg, list_ptr_word, list_seg, list_start,
                      CAPNP_SZ_PTR, nitems))
     return CAPNP_ERR_ALLOC;
@@ -858,7 +1008,7 @@ int capnp_builder_set_list_struct(const capnp_bptr_t *body, uint16_t dwords,
       content_words == SIZE_MAX)
     return CAPNP_ERR_BOUNDS;
   need = 1 + content_words;
-  if (alloc_words(body->b, need, &tag_seg, &tag_word))
+  if (alloc_for(body->b, body->seg, need, &tag_seg, &tag_word))
     return CAPNP_ERR_ALLOC;
   store_w(body->b, tag_seg, tag_word,
           capnp_wp_make_struct((int32_t)nitems, elem_dwords, elem_pwords));
@@ -981,19 +1131,14 @@ static void walk_list_body(capnp_builder_t *b, uint32_t seg, size_t start,
     uint64_t tag = load_w(b, seg, start);
     uint16_t dw, pw;
     size_t step, i, elems;
-    int32_t off;
     if (capnp_wp_kind(tag) != CAPNP_WK_STRUCT)
       return;
     dw = capnp_wp_struct_dwords(tag);
     pw = capnp_wp_struct_pwords(tag);
     step = (size_t)dw + pw;
-    off = capnp_wp_offset(tag);
-    if (off > 0)
-      elems = (size_t)off;
-    else if (step)
-      elems = (size_t)count / step;
-    else
-      elems = 0;
+    elems = ((uint32_t)tag >> 2) & 0x1fffffffu;
+    if (elems == 0)
+      elems = step ? (size_t)count / step : 0;
     for (i = 0; i < elems; i++) {
       size_t base = start + 1u + i * step;
       walk_struct_ptrs(b, seg, base, dw, pw, depth, watch, pin);

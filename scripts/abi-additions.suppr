@@ -1,0 +1,38 @@
+# Functions added to the public C API since the abi-diff.sh base commit.
+# Additions only: a removed or changed function still fails the check.
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_free
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_read_frame_alloc
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_send_call_ex
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_result_cap
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_answer_cap
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_fail
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_unimplemented
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_recv_fd
+
+[suppress_function]
+  change_kind = added-function
+  name = capnp_rpc_idle

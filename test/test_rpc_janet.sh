@@ -5,13 +5,17 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${CAPNP_JANET_BUILD:-$ROOT/build}"
 SERVER="${CAPNP_JANET_RPC_SERVER:-$BUILD/rpc_peer_server}"
 MODULE="${CAPNP_JANET_MODULE:-$BUILD/capnp.so}"
+# Meson sets CAPNP_JANET_NEED_MODULE when it builds capnp.so, and then
+# a missing tool is a failure.
+skip=77
+[[ "${CAPNP_JANET_NEED_MODULE:-}" == 1 ]] && skip=1
 if ! command -v janet >/dev/null 2>&1; then
   echo "SKIP: no janet" >&2
-  exit 77
+  exit $skip
 fi
 if [[ ! -x "$SERVER" || ! -f "$MODULE" ]]; then
   echo "SKIP: need rpc_peer_server and capnp.so" >&2
-  exit 77
+  exit $skip
 fi
 # Janet loads an instrumented capnp.so, so that process needs the
 # sanitizer runtime first. Host tools and the C++ peer keep their own
