@@ -181,6 +181,11 @@ if bash.found()
       'CAPNP_JANET_BUILD': meson.project_build_root(),
     },
   )
+  test(
+    'bump_hooks',
+    bash,
+    args: [meson.project_source_root() / 'test/test_bump_hooks.sh'],
+  )
 else
   message('codegen smoke: skipped (no bash).')
 endif
