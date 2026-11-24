@@ -14,3 +14,4 @@ const kInts :List(Int32) = [1, -2, 3];
 const kWords :List(Text) = ["a", "bc"];
 const kPoints :List(Point) = [(x = 1), (y = 2, label = "q")];
 const kEmpty :List(UInt8) = [];
+const kAny :AnyPointer = .kPoint;

@@ -29,4 +29,5 @@
        (int/s64 "-9007199254740993"))
 (check "Point $bigU" (get-in c/Point-annotations [1 :value])
        (int/u64 "18446744073709551615"))
+(check "kAny is not declared" (in (curenv) 'c/kAny) nil)
 (print "ok generated consts")

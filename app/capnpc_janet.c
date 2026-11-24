@@ -1522,6 +1522,9 @@ static void emit_const(FILE *out, const capnp_ptr_t *node) {
   if (capnp_getp(node, 4, &value) != CAPNP_OK || value.kind != CAPNP_PK_STRUCT)
     return;
   which = capnp_get_u16(&value, 0, 0xffff);
+  /* capnpc-c++ declares no AnyPointer or interface constant. */
+  if (which == TYPE_INTERFACE || which == TYPE_ANY_POINTER)
+    return;
   fprintf(out, "(def %s ", name);
   switch (which) {
   case TYPE_VOID:
