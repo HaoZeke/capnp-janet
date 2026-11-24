@@ -137,6 +137,33 @@ static void test_struct_list_orphan(void) {
   capnp_message_free(&m);
 }
 
+/* A null slot disowns to a null orphan, which adopts as null and frees
+ * without touching the arena, as in WireHelpers::disown. */
+static void test_disown_null_slot(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body, s0, s1, child;
+  capnp_orphan_t o = {0};
+  size_t words;
+
+  capnp_builder_init(&b);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "dn root");
+  check(capnp_builder_struct(&root, 0, 2, &body) == CAPNP_OK, "dn body");
+  check(capnp_builder_slot(&body, 0, 0, &s0) == CAPNP_OK, "dn slot0");
+  check(capnp_builder_slot(&body, 0, 1, &s1) == CAPNP_OK, "dn slot1");
+  check(capnp_builder_struct(&s1, 1, 0, &child) == CAPNP_OK, "dn child");
+  check(capnp_builder_disown(&s0, &o) == CAPNP_OK, "dn disown");
+  check(o.kind == CAPNP_PK_NULL, "dn null kind");
+  check(capnp_builder_adopt(&s1, &o) == CAPNP_OK, "dn adopt");
+  check(capnp_load_le64(capnp_builder_seg_data(&b, s1.seg) + s1.word * 8) == 0,
+        "dn adopted null");
+  check(capnp_builder_adopt(&s1, &o) == CAPNP_ERR_ARG, "dn adopt once");
+  words = capnp_builder_seg_words(&b, 0);
+  check(capnp_builder_disown(&s0, &o) == CAPNP_OK, "dn disown again");
+  check(capnp_builder_orphan_free(&o) == CAPNP_OK, "dn free");
+  check(capnp_builder_seg_words(&b, 0) == words, "dn free keeps arena");
+  capnp_builder_free(&b);
+}
+
 static void test_disown_double_far(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body, slot, obj;
@@ -965,6 +992,7 @@ int main(void) {
   test_struct_list_orphan();
   test_zero_size_struct_list_orphan();
   test_empty_builder_orphan();
+  test_disown_null_slot();
   test_disown_double_far();
   test_dfar_clear_at_zero();
   test_dfar_adopt_at_zero();

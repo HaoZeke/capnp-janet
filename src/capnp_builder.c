@@ -1706,6 +1706,10 @@ int capnp_builder_orphan_free(capnp_orphan_t *o) {
     return CAPNP_ERR_ARG;
   b = o->b;
   seg = o->seg;
+  if (o->kind == CAPNP_PK_NULL) {
+    orphan_retire(o);
+    return CAPNP_OK;
+  }
   if (seg >= b->nsegs) {
     orphan_retire(o);
     return CAPNP_ERR_SEGMENT;
@@ -1772,11 +1776,14 @@ int capnp_builder_adopt(const capnp_bptr_t *slot, capnp_orphan_t *o) {
     return CAPNP_ERR_ARG;
   if ((rc = raw_slot_checked(slot)) != CAPNP_OK)
     return rc;
-  if (o->kind != CAPNP_PK_STRUCT && o->kind != CAPNP_PK_LIST)
+  if (o->kind != CAPNP_PK_NULL && o->kind != CAPNP_PK_STRUCT &&
+      o->kind != CAPNP_PK_LIST)
     return CAPNP_ERR_KIND;
   /* WireHelpers::adopt zeroes the slot's old target before linking. */
   drop_slot(slot->b, slot->seg, slot->word);
-  if (o->kind == CAPNP_PK_STRUCT) {
+  if (o->kind == CAPNP_PK_NULL) {
+    store_w(slot->b, slot->seg, slot->word, 0);
+  } else if (o->kind == CAPNP_PK_STRUCT) {
     if (o->dwords == 0 && o->pwords == 0)
       store_w(slot->b, slot->seg, slot->word, capnp_wp_make_struct(-1, 0, 0));
     else if ((rc = write_struct_ptr(slot->b, slot->seg, slot->word, o->seg,
@@ -1861,6 +1868,11 @@ static int orphan_from_word(capnp_builder_t *b, uint32_t seg, size_t word,
   if (seg >= b->nsegs || word >= b->segs[seg].words)
     return CAPNP_ERR_BOUNDS;
   w = load_w(b, seg, word);
+  /* WireHelpers::disown gives a null orphan for a null slot. */
+  if (w == 0) {
+    o->kind = CAPNP_PK_NULL;
+    return CAPNP_OK;
+  }
   kind = capnp_wp_kind(w);
   if (kind == CAPNP_WK_FAR && capnp_wp_far_two(w)) {
     uint32_t pseg = capnp_wp_far_seg(w);
