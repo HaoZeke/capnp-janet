@@ -164,6 +164,43 @@ static void test_disown_null_slot(void) {
   capnp_builder_free(&b);
 }
 
+/* A List(Void) with elements occupies no words and may name the segment
+ * end. C++ disowns it like any other list. */
+static void test_disown_void_list_at_end(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body, s0, s1;
+  capnp_orphan_t o = {0};
+  uint64_t w;
+  int64_t at;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m = {0};
+  capnp_ptr_t r, l;
+
+  capnp_builder_init(&b);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "vl root");
+  check(capnp_builder_struct(&root, 0, 2, &body) == CAPNP_OK, "vl body");
+  check(capnp_builder_set_list_void(&body, 0, 0, 3) == CAPNP_OK, "vl set");
+  check(capnp_builder_slot(&body, 0, 0, &s0) == CAPNP_OK, "vl slot0");
+  check(capnp_builder_slot(&body, 0, 1, &s1) == CAPNP_OK, "vl slot1");
+  w = capnp_load_le64(capnp_builder_seg_data(&b, s0.seg) + s0.word * 8);
+  at = (int64_t)s0.word + 1 + capnp_wp_offset(w);
+  check(at == (int64_t)capnp_builder_seg_words(&b, s0.seg), "vl at end");
+  check(capnp_builder_disown(&s0, &o) == CAPNP_OK, "vl disown");
+  check(capnp_builder_adopt(&s1, &o) == CAPNP_OK, "vl adopt");
+  check(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "vl ser");
+  check(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "vl parse");
+  check(capnp_root(&m, &r) == CAPNP_OK, "vl root ptr");
+  check(capnp_getp(&r, 0, &l) == CAPNP_OK && l.kind == CAPNP_PK_NULL,
+        "vl slot0 null");
+  check(capnp_getp(&r, 1, &l) == CAPNP_OK && l.kind == CAPNP_PK_LIST &&
+            l.esize == CAPNP_SZ_VOID && l.count == 3,
+        "vl slot1 list");
+  free(flat);
+  capnp_message_free(&m);
+  capnp_builder_free(&b);
+}
+
 static void test_disown_double_far(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body, slot, obj;
@@ -993,6 +1030,7 @@ int main(void) {
   test_zero_size_struct_list_orphan();
   test_empty_builder_orphan();
   test_disown_null_slot();
+  test_disown_void_list_at_end();
   test_disown_double_far();
   test_dfar_clear_at_zero();
   test_dfar_adopt_at_zero();

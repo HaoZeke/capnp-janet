@@ -1853,7 +1853,9 @@ static int orphan_list_body(capnp_builder_t *b, uint32_t seg, size_t start,
   }
   if (count == 0)
     return CAPNP_OK;
-  if (start >= b->segs[seg].words)
+  /* A List(Void) occupies no words, so it may name the segment end. */
+  if (esize == CAPNP_SZ_VOID ? start > b->segs[seg].words
+                             : start >= b->segs[seg].words)
     return CAPNP_ERR_BOUNDS;
   return CAPNP_OK;
 }
@@ -1952,7 +1954,9 @@ static int orphan_from_word(capnp_builder_t *b, uint32_t seg, size_t word,
       o->word = word;
       return CAPNP_OK;
     }
-    if (start < 0 || (size_t)start >= b->segs[seg].words)
+    if (start < 0 || (o->esize == CAPNP_SZ_VOID
+                          ? (size_t)start > b->segs[seg].words
+                          : (size_t)start >= b->segs[seg].words))
       return CAPNP_ERR_BOUNDS;
     o->seg = seg;
     o->word = (size_t)start;
