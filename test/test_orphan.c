@@ -989,6 +989,38 @@ static void test_live_orphan_keeps_emptied_segment(void) {
   capnp_builder_free(&b);
 }
 
+/* Once the last orphan naming an emptied segment is gone, the segment
+ * goes too, so a later allocation never leaves a zero-word segment in
+ * the frame. */
+static void test_emptied_segment_dropped_after_orphan(void) {
+  capnp_builder_t b = {0};
+  capnp_bptr_t root, body;
+  capnp_orphan_t o = {0};
+  char big[400];
+  uint32_t i, nsegs;
+
+  capnp_builder_init_sized(&b, 2);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "ed root");
+  check(capnp_builder_struct(&root, 0, 2, &body) == CAPNP_OK, "ed body");
+  check(capnp_builder_set_text(&body, 0, 0, "spill_to_second_segment", 23) ==
+            CAPNP_OK,
+        "ed spill");
+  nsegs = capnp_builder_nsegs(&b);
+  check(nsegs >= 3, "ed multi seg");
+  check(capnp_builder_new_orphan_struct(&b, 0, 0, &o, NULL) == CAPNP_OK,
+        "ed orphan");
+  check(capnp_builder_clear_ptr(&body, 0, 0) == CAPNP_OK, "ed clear");
+  check(capnp_builder_nsegs(&b) == nsegs, "ed pinned");
+  check(capnp_builder_orphan_free(&o) == CAPNP_OK, "ed free");
+  check(capnp_builder_nsegs(&b) < nsegs, "ed dropped");
+  memset(big, 'x', sizeof(big));
+  check(capnp_builder_set_text(&body, 0, 1, big, sizeof(big)) == CAPNP_OK,
+        "ed big");
+  for (i = 1; i < capnp_builder_nsegs(&b); i++)
+    check(capnp_builder_seg_words(&b, i) > 0, "ed no empty segment");
+  capnp_builder_free(&b);
+}
+
 /* Grow the side table past its initial capacity, churn orphans across
  * multiple segments, and free cleanly with zero leaks. */
 static void test_orphan_side_table_churn(void) {
@@ -1053,6 +1085,7 @@ int main(void) {
   test_concurrent_zero_size_orphans();
   test_zero_orphan_on_second_segment();
   test_live_orphan_keeps_emptied_segment();
+  test_emptied_segment_dropped_after_orphan();
   test_orphan_side_table_churn();
   if (g_fail) {
     fprintf(stderr, "%d orphan checks failed\n", g_fail);

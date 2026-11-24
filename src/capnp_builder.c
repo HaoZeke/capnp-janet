@@ -1254,6 +1254,21 @@ static int orphan_seg_scan(capnp_builder_t *b, uint32_t seg, size_t *pin) {
   return live;
 }
 
+/* Segment 0 holds the root. An emptied later segment at the end is a
+ * malloc the message no longer needs unless a live orphan still names
+ * it. Nothing else can: a pointer into it would need a word there. */
+static void drop_empty_tail(capnp_builder_t *b) {
+  size_t opin;
+  while (b->nsegs > 1) {
+    capnp_bseg_t *s = &b->segs[b->nsegs - 1u];
+    if (s->words != 0 || orphan_seg_scan(b, b->nsegs - 1u, &opin))
+      return;
+    free(s->data);
+    memset(s, 0, sizeof(*s));
+    b->nsegs--;
+  }
+}
+
 static void reclaim_tail(capnp_builder_t *b, uint32_t seg, size_t start,
                          size_t n) {
   capnp_bseg_t *s;
@@ -1275,13 +1290,8 @@ static void reclaim_tail(capnp_builder_t *b, uint32_t seg, size_t start,
   if (keep > s->words)
     keep = s->words;
   s->words = keep;
-  /* Segment 0 holds the root. An emptied later segment is a malloc
-   * the message no longer needs unless a live orphan still names it. */
-  if (s->words == 0 && seg > 0 && seg + 1u == b->nsegs && !has_live) {
-    free(s->data);
-    memset(s, 0, sizeof(*s));
-    b->nsegs--;
-  }
+  if (s->words == 0 && seg + 1u == b->nsegs && !has_live)
+    drop_empty_tail(b);
 }
 
 static void drop_ptr(capnp_builder_t *b, uint32_t seg, size_t word, int depth);
@@ -1567,6 +1577,7 @@ static void orphan_retire(capnp_orphan_t *o) {
   if (idx < priv->norefs)
     priv->orefs[idx] = priv->orefs[priv->norefs];
   o->live = 0;
+  drop_empty_tail(o->b);
 }
 
 int capnp_builder_new_orphan_struct(capnp_builder_t *b, uint16_t dwords,
