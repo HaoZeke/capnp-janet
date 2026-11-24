@@ -137,6 +137,70 @@ static void test_struct_list_orphan(void) {
   capnp_message_free(&m);
 }
 
+/* A null slot disowns to a null orphan, which adopts as null and frees
+ * without touching the arena, as in WireHelpers::disown. */
+static void test_disown_null_slot(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body, s0, s1, child;
+  capnp_orphan_t o = {0};
+  size_t words;
+
+  capnp_builder_init(&b);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "dn root");
+  check(capnp_builder_struct(&root, 0, 2, &body) == CAPNP_OK, "dn body");
+  check(capnp_builder_slot(&body, 0, 0, &s0) == CAPNP_OK, "dn slot0");
+  check(capnp_builder_slot(&body, 0, 1, &s1) == CAPNP_OK, "dn slot1");
+  check(capnp_builder_struct(&s1, 1, 0, &child) == CAPNP_OK, "dn child");
+  check(capnp_builder_disown(&s0, &o) == CAPNP_OK, "dn disown");
+  check(o.kind == CAPNP_PK_NULL, "dn null kind");
+  check(capnp_builder_adopt(&s1, &o) == CAPNP_OK, "dn adopt");
+  check(capnp_load_le64(capnp_builder_seg_data(&b, s1.seg) + s1.word * 8) == 0,
+        "dn adopted null");
+  check(capnp_builder_adopt(&s1, &o) == CAPNP_ERR_ARG, "dn adopt once");
+  words = capnp_builder_seg_words(&b, 0);
+  check(capnp_builder_disown(&s0, &o) == CAPNP_OK, "dn disown again");
+  check(capnp_builder_orphan_free(&o) == CAPNP_OK, "dn free");
+  check(capnp_builder_seg_words(&b, 0) == words, "dn free keeps arena");
+  capnp_builder_free(&b);
+}
+
+/* A List(Void) with elements occupies no words and may name the segment
+ * end. C++ disowns it like any other list. */
+static void test_disown_void_list_at_end(void) {
+  capnp_builder_t b;
+  capnp_bptr_t root, body, s0, s1;
+  capnp_orphan_t o = {0};
+  uint64_t w;
+  int64_t at;
+  uint8_t *flat = NULL;
+  size_t flen = 0;
+  capnp_message_t m = {0};
+  capnp_ptr_t r, l;
+
+  capnp_builder_init(&b);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "vl root");
+  check(capnp_builder_struct(&root, 0, 2, &body) == CAPNP_OK, "vl body");
+  check(capnp_builder_set_list_void(&body, 0, 0, 3) == CAPNP_OK, "vl set");
+  check(capnp_builder_slot(&body, 0, 0, &s0) == CAPNP_OK, "vl slot0");
+  check(capnp_builder_slot(&body, 0, 1, &s1) == CAPNP_OK, "vl slot1");
+  w = capnp_load_le64(capnp_builder_seg_data(&b, s0.seg) + s0.word * 8);
+  at = (int64_t)s0.word + 1 + capnp_wp_offset(w);
+  check(at == (int64_t)capnp_builder_seg_words(&b, s0.seg), "vl at end");
+  check(capnp_builder_disown(&s0, &o) == CAPNP_OK, "vl disown");
+  check(capnp_builder_adopt(&s1, &o) == CAPNP_OK, "vl adopt");
+  check(capnp_builder_serialize(&b, &flat, &flen) == CAPNP_OK, "vl ser");
+  check(capnp_message_from_flat(&m, flat, flen) == CAPNP_OK, "vl parse");
+  check(capnp_root(&m, &r) == CAPNP_OK, "vl root ptr");
+  check(capnp_getp(&r, 0, &l) == CAPNP_OK && l.kind == CAPNP_PK_NULL,
+        "vl slot0 null");
+  check(capnp_getp(&r, 1, &l) == CAPNP_OK && l.kind == CAPNP_PK_LIST &&
+            l.esize == CAPNP_SZ_VOID && l.count == 3,
+        "vl slot1 list");
+  free(flat);
+  capnp_message_free(&m);
+  capnp_builder_free(&b);
+}
+
 static void test_disown_double_far(void) {
   capnp_builder_t b;
   capnp_bptr_t root, body, slot, obj;
@@ -925,6 +989,38 @@ static void test_live_orphan_keeps_emptied_segment(void) {
   capnp_builder_free(&b);
 }
 
+/* Once the last orphan naming an emptied segment is gone, the segment
+ * goes too, so a later allocation never leaves a zero-word segment in
+ * the frame. */
+static void test_emptied_segment_dropped_after_orphan(void) {
+  capnp_builder_t b = {0};
+  capnp_bptr_t root, body;
+  capnp_orphan_t o = {0};
+  char big[400];
+  uint32_t i, nsegs;
+
+  capnp_builder_init_sized(&b, 2);
+  check(capnp_builder_root(&b, &root) == CAPNP_OK, "ed root");
+  check(capnp_builder_struct(&root, 0, 2, &body) == CAPNP_OK, "ed body");
+  check(capnp_builder_set_text(&body, 0, 0, "spill_to_second_segment", 23) ==
+            CAPNP_OK,
+        "ed spill");
+  nsegs = capnp_builder_nsegs(&b);
+  check(nsegs >= 3, "ed multi seg");
+  check(capnp_builder_new_orphan_struct(&b, 0, 0, &o, NULL) == CAPNP_OK,
+        "ed orphan");
+  check(capnp_builder_clear_ptr(&body, 0, 0) == CAPNP_OK, "ed clear");
+  check(capnp_builder_nsegs(&b) == nsegs, "ed pinned");
+  check(capnp_builder_orphan_free(&o) == CAPNP_OK, "ed free");
+  check(capnp_builder_nsegs(&b) < nsegs, "ed dropped");
+  memset(big, 'x', sizeof(big));
+  check(capnp_builder_set_text(&body, 0, 1, big, sizeof(big)) == CAPNP_OK,
+        "ed big");
+  for (i = 1; i < capnp_builder_nsegs(&b); i++)
+    check(capnp_builder_seg_words(&b, i) > 0, "ed no empty segment");
+  capnp_builder_free(&b);
+}
+
 /* Grow the side table past its initial capacity, churn orphans across
  * multiple segments, and free cleanly with zero leaks. */
 static void test_orphan_side_table_churn(void) {
@@ -965,6 +1061,8 @@ int main(void) {
   test_struct_list_orphan();
   test_zero_size_struct_list_orphan();
   test_empty_builder_orphan();
+  test_disown_null_slot();
+  test_disown_void_list_at_end();
   test_disown_double_far();
   test_dfar_clear_at_zero();
   test_dfar_adopt_at_zero();
@@ -987,6 +1085,7 @@ int main(void) {
   test_concurrent_zero_size_orphans();
   test_zero_orphan_on_second_segment();
   test_live_orphan_keeps_emptied_segment();
+  test_emptied_segment_dropped_after_orphan();
   test_orphan_side_table_churn();
   if (g_fail) {
     fprintf(stderr, "%d orphan checks failed\n", g_fail);

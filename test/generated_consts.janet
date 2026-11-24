@@ -1,4 +1,5 @@
-# Struct and list constants from test/fixtures/consts.capnp read back as
+# Struct and list constants and 64-bit annotations from
+# test/fixtures/consts.capnp read back as
 # `capnp eval` prints them.
 (import capnp)
 (import ./codegen_util :as cg)
@@ -24,4 +25,9 @@
 (check "kPoints[1].y" (c/Point-get-y (capnp/list-getp c/kPoints 1)) 2)
 (check "kPoints[1].label" (c/Point-get-label (capnp/list-getp c/kPoints 1)) "q")
 (check "kEmpty" (capnp/list-len c/kEmpty) 0)
+(check "Point $bigS" (get-in c/Point-annotations [0 :value])
+       (int/s64 "-9007199254740993"))
+(check "Point $bigU" (get-in c/Point-annotations [1 :value])
+       (int/u64 "18446744073709551615"))
+(check "kAny is not declared" (in (curenv) 'c/kAny) nil)
 (print "ok generated consts")

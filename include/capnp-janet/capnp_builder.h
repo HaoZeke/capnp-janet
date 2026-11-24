@@ -160,7 +160,8 @@ typedef struct capnp_orphan {
   capnp_builder_t *b;
   uint32_t seg;
   size_t word;
-  int kind; /* CAPNP_PK_STRUCT or CAPNP_PK_LIST */
+  int kind; /* CAPNP_PK_STRUCT, CAPNP_PK_LIST, or CAPNP_PK_NULL from
+               disowning a null slot */
   uint16_t dwords;
   uint16_t pwords;
   int esize;

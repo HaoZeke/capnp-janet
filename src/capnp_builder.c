@@ -1254,6 +1254,21 @@ static int orphan_seg_scan(capnp_builder_t *b, uint32_t seg, size_t *pin) {
   return live;
 }
 
+/* Segment 0 holds the root. An emptied later segment at the end is a
+ * malloc the message no longer needs unless a live orphan still names
+ * it. Nothing else can: a pointer into it would need a word there. */
+static void drop_empty_tail(capnp_builder_t *b) {
+  size_t opin;
+  while (b->nsegs > 1) {
+    capnp_bseg_t *s = &b->segs[b->nsegs - 1u];
+    if (s->words != 0 || orphan_seg_scan(b, b->nsegs - 1u, &opin))
+      return;
+    free(s->data);
+    memset(s, 0, sizeof(*s));
+    b->nsegs--;
+  }
+}
+
 static void reclaim_tail(capnp_builder_t *b, uint32_t seg, size_t start,
                          size_t n) {
   capnp_bseg_t *s;
@@ -1275,13 +1290,8 @@ static void reclaim_tail(capnp_builder_t *b, uint32_t seg, size_t start,
   if (keep > s->words)
     keep = s->words;
   s->words = keep;
-  /* Segment 0 holds the root. An emptied later segment is a malloc
-   * the message no longer needs unless a live orphan still names it. */
-  if (s->words == 0 && seg > 0 && seg + 1u == b->nsegs && !has_live) {
-    free(s->data);
-    memset(s, 0, sizeof(*s));
-    b->nsegs--;
-  }
+  if (s->words == 0 && seg + 1u == b->nsegs && !has_live)
+    drop_empty_tail(b);
 }
 
 static void drop_ptr(capnp_builder_t *b, uint32_t seg, size_t word, int depth);
@@ -1567,6 +1577,7 @@ static void orphan_retire(capnp_orphan_t *o) {
   if (idx < priv->norefs)
     priv->orefs[idx] = priv->orefs[priv->norefs];
   o->live = 0;
+  drop_empty_tail(o->b);
 }
 
 int capnp_builder_new_orphan_struct(capnp_builder_t *b, uint16_t dwords,
@@ -1706,6 +1717,10 @@ int capnp_builder_orphan_free(capnp_orphan_t *o) {
     return CAPNP_ERR_ARG;
   b = o->b;
   seg = o->seg;
+  if (o->kind == CAPNP_PK_NULL) {
+    orphan_retire(o);
+    return CAPNP_OK;
+  }
   if (seg >= b->nsegs) {
     orphan_retire(o);
     return CAPNP_ERR_SEGMENT;
@@ -1772,11 +1787,14 @@ int capnp_builder_adopt(const capnp_bptr_t *slot, capnp_orphan_t *o) {
     return CAPNP_ERR_ARG;
   if ((rc = raw_slot_checked(slot)) != CAPNP_OK)
     return rc;
-  if (o->kind != CAPNP_PK_STRUCT && o->kind != CAPNP_PK_LIST)
+  if (o->kind != CAPNP_PK_NULL && o->kind != CAPNP_PK_STRUCT &&
+      o->kind != CAPNP_PK_LIST)
     return CAPNP_ERR_KIND;
   /* WireHelpers::adopt zeroes the slot's old target before linking. */
   drop_slot(slot->b, slot->seg, slot->word);
-  if (o->kind == CAPNP_PK_STRUCT) {
+  if (o->kind == CAPNP_PK_NULL) {
+    store_w(slot->b, slot->seg, slot->word, 0);
+  } else if (o->kind == CAPNP_PK_STRUCT) {
     if (o->dwords == 0 && o->pwords == 0)
       store_w(slot->b, slot->seg, slot->word, capnp_wp_make_struct(-1, 0, 0));
     else if ((rc = write_struct_ptr(slot->b, slot->seg, slot->word, o->seg,
@@ -1846,7 +1864,9 @@ static int orphan_list_body(capnp_builder_t *b, uint32_t seg, size_t start,
   }
   if (count == 0)
     return CAPNP_OK;
-  if (start >= b->segs[seg].words)
+  /* A List(Void) occupies no words, so it may name the segment end. */
+  if (esize == CAPNP_SZ_VOID ? start > b->segs[seg].words
+                             : start >= b->segs[seg].words)
     return CAPNP_ERR_BOUNDS;
   return CAPNP_OK;
 }
@@ -1861,6 +1881,11 @@ static int orphan_from_word(capnp_builder_t *b, uint32_t seg, size_t word,
   if (seg >= b->nsegs || word >= b->segs[seg].words)
     return CAPNP_ERR_BOUNDS;
   w = load_w(b, seg, word);
+  /* WireHelpers::disown gives a null orphan for a null slot. */
+  if (w == 0) {
+    o->kind = CAPNP_PK_NULL;
+    return CAPNP_OK;
+  }
   kind = capnp_wp_kind(w);
   if (kind == CAPNP_WK_FAR && capnp_wp_far_two(w)) {
     uint32_t pseg = capnp_wp_far_seg(w);
@@ -1940,7 +1965,9 @@ static int orphan_from_word(capnp_builder_t *b, uint32_t seg, size_t word,
       o->word = word;
       return CAPNP_OK;
     }
-    if (start < 0 || (size_t)start >= b->segs[seg].words)
+    if (start < 0 || (o->esize == CAPNP_SZ_VOID
+                          ? (size_t)start > b->segs[seg].words
+                          : (size_t)start >= b->segs[seg].words))
       return CAPNP_ERR_BOUNDS;
     o->seg = seg;
     o->word = (size_t)start;
