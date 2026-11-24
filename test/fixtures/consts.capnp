@@ -1,6 +1,9 @@
 @0xc4f1a2b3d4e5f607;
 
-struct Point {
+annotation bigS(struct) :Int64;
+annotation bigU(struct) :UInt64;
+
+struct Point $bigS(-9007199254740993) $bigU(18446744073709551615) {
   x @0 :Int32;
   y @1 :Int32;
   label @2 :Text;

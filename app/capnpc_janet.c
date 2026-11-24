@@ -659,6 +659,24 @@ static int parameter_name(const capnp_ptr_t *nodes, uint64_t scope,
 
 static void janet_quote(FILE *out, const char *s, size_t n);
 
+/* Janet numbers are doubles. Past 2^53 a literal would round, so the
+ * value is boxed. */
+static void emit_i64(FILE *out, uint64_t bits) {
+  int64_t i64;
+  memcpy(&i64, &bits, sizeof(i64));
+  if (i64 < INT64_C(-9007199254740992) || i64 > INT64_C(9007199254740992))
+    fprintf(out, "(int/s64 \"%lld\")", (long long)i64);
+  else
+    fprintf(out, "%lld", (long long)i64);
+}
+
+static void emit_u64(FILE *out, uint64_t u64) {
+  if (u64 > UINT64_C(9007199254740992))
+    fprintf(out, "(int/u64 \"%llu\")", (unsigned long long)u64);
+  else
+    fprintf(out, "%llu", (unsigned long long)u64);
+}
+
 static void emit_value_expr(FILE *out, const capnp_ptr_t *value) {
   uint16_t which;
   const char *text;
@@ -691,15 +709,11 @@ static void emit_value_expr(FILE *out, const capnp_ptr_t *value) {
   case TYPE_UINT32:
     fprintf(out, "%u", (unsigned)capnp_get_u32(value, 4, 0));
     break;
-  case TYPE_INT64: {
-    int64_t i64;
-    uint64_t bits = capnp_get_u64(value, 8, 0);
-    memcpy(&i64, &bits, sizeof(i64));
-    fprintf(out, "%lld", (long long)i64);
+  case TYPE_INT64:
+    emit_i64(out, capnp_get_u64(value, 8, 0));
     break;
-  }
   case TYPE_UINT64:
-    fprintf(out, "%llu", (unsigned long long)capnp_get_u64(value, 8, 0));
+    emit_u64(out, capnp_get_u64(value, 8, 0));
     break;
   case TYPE_TEXT:
     if (capnp_get_text(value, 0, &text, &text_len) != CAPNP_OK)
@@ -1535,24 +1549,12 @@ static void emit_const(FILE *out, const capnp_ptr_t *node) {
   case TYPE_UINT32:
     fprintf(out, "%u", (unsigned)capnp_get_u32(&value, 4, 0));
     break;
-  case TYPE_INT64: {
-    int64_t i64;
-    uint64_t bits = capnp_get_u64(&value, 8, 0);
-    memcpy(&i64, &bits, sizeof(i64));
-    if (i64 < INT64_C(-9007199254740992) || i64 > INT64_C(9007199254740992))
-      fprintf(out, "(int/s64 \"%lld\")", (long long)i64);
-    else
-      fprintf(out, "%lld", (long long)i64);
+  case TYPE_INT64:
+    emit_i64(out, capnp_get_u64(&value, 8, 0));
     break;
-  }
-  case TYPE_UINT64: {
-    uint64_t u64 = capnp_get_u64(&value, 8, 0);
-    if (u64 > UINT64_C(9007199254740992))
-      fprintf(out, "(int/u64 \"%llu\")", (unsigned long long)u64);
-    else
-      fprintf(out, "%llu", (unsigned long long)u64);
+  case TYPE_UINT64:
+    emit_u64(out, capnp_get_u64(&value, 8, 0));
     break;
-  }
   case TYPE_FLOAT32: {
     uint32_t bits = capnp_get_u32(&value, 4, 0);
     float f32;
