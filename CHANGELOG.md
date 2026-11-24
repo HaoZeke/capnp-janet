@@ -8,6 +8,13 @@ Pre-1.0 minor releases may include breaking API changes.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-23
+
+### Fixed
+
+- Transport tests give only big-endian hosts the longer first read, so
+  the scenario table drops its per-entry wait field.
+
 ## [0.3.0] - 2026-11-22
 
 ### Added
@@ -479,7 +486,8 @@ with fewer than two zero bytes). Canonical AddressBook matches
 `capnp convert binary:canonical`. Multi-segment builder, far/double-far,
 `capnpc-janet` v1, list upgrade views.
 
-[Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.3.0...main
+[Unreleased]: https://github.com/HaoZeke/capnp-janet/compare/v0.3.1...main
+[0.3.1]: https://github.com/HaoZeke/capnp-janet/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.5...v0.3.0
 [0.2.5]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.4...v0.2.5
 [0.2.4]: https://github.com/HaoZeke/capnp-janet/compare/v0.2.3...v0.2.4

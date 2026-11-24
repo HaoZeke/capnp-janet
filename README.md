@@ -9,7 +9,7 @@ Same family as
 zero-copy segment views, schema evolution defaults, and the `capnpc-janet`
 schema compiler plugin.
 
-**Status:** `0.3.0`. Reader, multi-segment builder, packed and canonical
+**Status:** `0.3.1`. Reader, multi-segment builder, packed and canonical
 codecs, and typed `capnpc-janet` readers/builders. Non-canonical bytes
 follow allocation order, so an AddressBook matches official `capnp encode`
 when nested objects are allocated in schema order. Canonical bytes match
