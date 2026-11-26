@@ -266,6 +266,18 @@ test_dyn = executable(
   dependencies: dyn_deps,
 )
 
+test_schema_parity = executable(
+  'test_schema_parity',
+  'test/test_schema_parity.c',
+  include_directories: test_inc,
+  dependencies: capnp_janet_dep,
+)
+test(
+  'schema_parity',
+  test_schema_parity,
+  args: [meson.project_source_root() / 'test/fixtures/schema-parity'],
+)
+
 if bash.found()
   test(
     'codegen',
