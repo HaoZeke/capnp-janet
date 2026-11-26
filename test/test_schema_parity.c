@@ -228,6 +228,70 @@ static void check_g10(const char *dir) {
   capnp_dyn_free(d);
 }
 
+/* Nodes SchemaLoader::load leaves unloaded. Wording is the C++ text. */
+static const struct {
+  const char *name;
+  const char *text;
+  const char *wording;
+} k_validate[] = {
+    {"BadOrd", "(x = 1, y = 2)",
+     "[1 >= 3]; fields were not ordered by ordinal"},
+    {"BadDisc", "(a = 1)", "invalid discriminantValue"},
+    {"BadValue", "(x = 1)", "[12 == 4]"},
+    {"NotGeneric", "(x = 1)",
+     "if parameter list is non-empty, isGeneric must be true"},
+    {"LoneGroup", "(x = 1)", "group node missing scopeId"},
+    {"DiscOnPlain", "(x = 1)", "invalid discriminantValue"},
+};
+
+static void check_validate(const char *dir) {
+  char path[512];
+  capnp_dyn_t *d = NULL;
+  int rc;
+  const char *err = "";
+  size_t i;
+  join_path(path, sizeof(path), dir, "validate-probe.bin");
+  rc = load_dyn(path, &d);
+  if (rc != 0) {
+    fail("validate", "init failed");
+    capnp_dyn_free(d);
+    return;
+  }
+  for (i = 0; i < sizeof(k_validate) / sizeof(k_validate[0]); i++) {
+    decode(d, k_validate[i].name, k_validate[i].text, &rc, &err);
+    if (rc == 0 || !err || !strstr(err, "no schema node loaded") ||
+        !strstr(err, k_validate[i].wording))
+      fail(k_validate[i].name, err && err[0] ? err : "node still loaded");
+  }
+  decode(d, "HoldEnum", "(e = a)", &rc, &err);
+  if (rc == 0 || !err || !strstr(err, "invalid codeOrder") ||
+      !strstr(err, "enumerant.getName() = b"))
+    fail("HoldEnum", err && err[0] ? err : "enum codeOrder accepted");
+  decode(d, "HoldRange", "(e = b)", &rc, &err);
+  if (rc == 0 || !err || !strstr(err, "invalid codeOrder") ||
+      !strstr(err, "enumerant.getName() = b"))
+    fail("HoldRange", err && err[0] ? err : "enum codeOrder accepted");
+  capnp_dyn_free(d);
+}
+
+/* A valid sibling in the same request still loads. */
+static void check_validate_keep(const char *dir) {
+  char path[512];
+  capnp_dyn_t *d = NULL;
+  int rc;
+  const char *err = "";
+  join_path(path, sizeof(path), dir, "validate-probe.bin");
+  rc = load_dyn(path, &d);
+  if (rc != 0) {
+    fail("keep", "init failed");
+    capnp_dyn_free(d);
+    return;
+  }
+  decode(d, "Keep", "(x = 1)", &rc, &err);
+  expect_ok("keep", rc, err);
+  capnp_dyn_free(d);
+}
+
 int main(int argc, char **argv) {
   const char *dir = argc > 1 ? argv[1] : "test/fixtures/schema-parity";
   check_g1(dir);
@@ -237,6 +301,8 @@ int main(int argc, char **argv) {
   check_g5(dir);
   check_g6(dir);
   check_g10(dir);
+  check_validate(dir);
+  check_validate_keep(dir);
   if (g_fail) {
     fprintf(stderr, "schema parity failed\n");
     return 1;

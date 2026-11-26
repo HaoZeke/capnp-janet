@@ -149,6 +149,12 @@ typedef struct {
   capnp_ptr_t node_ptr;
 } dyn_struct_t;
 
+typedef struct {
+  char name[160];
+  uint64_t id;
+  char msg[384];
+} dyn_reject_t;
+
 struct capnp_dyn {
   capnp_message_t msg;
   capnp_ptr_t nodes_list;
@@ -163,6 +169,9 @@ struct capnp_dyn {
    * input, which outlives the decode. Not owned. */
   const char *bad_src;
   size_t bad_n;
+  dyn_reject_t *rejects;
+  uint32_t nrejects;
+  uint32_t rcap;
 };
 
 static int buf_add(buf_t *b, const char *s, size_t n) {
@@ -515,6 +524,48 @@ static void drop_last_struct(capnp_dyn_t *d) {
   memset(st, 0, sizeof(*st));
 }
 
+/* Remember a node SchemaLoader::load rejected. The node itself is not kept. */
+static void note_reject(capnp_dyn_t *d, const char *name, uint64_t id,
+                        const char *msg) {
+  dyn_reject_t *r;
+  if (d->nrejects == d->rcap) {
+    uint32_t ncap = d->rcap ? d->rcap * 2u : 4u;
+    dyn_reject_t *p =
+        (dyn_reject_t *)realloc(d->rejects, (size_t)ncap * sizeof(*p));
+    if (!p)
+      return;
+    d->rejects = p;
+    d->rcap = ncap;
+  }
+  r = &d->rejects[d->nrejects++];
+  memset(r, 0, sizeof(*r));
+  snprintf(r->name, sizeof(r->name), "%s", name ? name : "");
+  r->id = id;
+  snprintf(r->msg, sizeof(r->msg), "%s", msg ? msg : "");
+}
+
+static const char *reject_named(const capnp_dyn_t *d, const char *name) {
+  uint32_t i;
+  if (!d || !name || !name[0])
+    return NULL;
+  for (i = 0; i < d->nrejects; i++) {
+    if (strcmp(d->rejects[i].name, name) == 0)
+      return d->rejects[i].msg;
+  }
+  return NULL;
+}
+
+static const char *reject_by_id(const capnp_dyn_t *d, uint64_t id) {
+  uint32_t i;
+  if (!d)
+    return NULL;
+  for (i = 0; i < d->nrejects; i++) {
+    if (d->rejects[i].id == id)
+      return d->rejects[i].msg;
+  }
+  return NULL;
+}
+
 /* True when an earlier member of this list already uses name. */
 static int prior_member_name(const capnp_ptr_t *list, uint32_t idx,
                              const char *name) {
@@ -599,6 +650,16 @@ static int load_struct_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
   st->scope_id = capnp_get_u64(node, 16, 0);
   extract_names(node, st->name, sizeof(st->name), st->short_name,
                 sizeof(st->short_name));
+  /* Validator checks this before the struct body. */
+  if (capnp_getp(node, 5, &params) == CAPNP_OK &&
+      params.kind == CAPNP_PK_LIST && capnp_list_len(&params) > 0 &&
+      !capnp_get_bool(node, 288, 0)) {
+    note_reject(d, st->name, st->id,
+                "no schema node loaded; expected node.getIsGeneric(); "
+                "if parameter list is non-empty, isGeneric must be true");
+    drop_last_struct(d);
+    return CAPNP_OK;
+  }
   st->dwords = capnp_get_u16(node, 14, 0);
   st->pwords = capnp_get_u16(node, 24, 0);
   st->disc_count = capnp_get_u16(node, 30, 0);
@@ -635,15 +696,31 @@ static int load_struct_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
     }
   }
 
-  if (capnp_getp(node, 3, &fields) != CAPNP_OK || fields.kind != CAPNP_PK_LIST)
+  if (capnp_getp(node, 3, &fields) != CAPNP_OK || fields.kind != CAPNP_PK_LIST) {
+    if (st->is_group && st->scope_id == 0) {
+      note_reject(d, st->name, st->id,
+                  "no schema node loaded; expected scopeId != 0 [0 != 0]; "
+                  "group node missing scopeId");
+      drop_last_struct(d);
+    }
     return CAPNP_OK;
+  }
   n = capnp_list_len(&fields);
   {
     uint8_t *saw = NULL;
+    uint8_t *saw_disc = NULL;
+    uint32_t next_ord = 0;
     if (n > 0) {
       saw = (uint8_t *)calloc((size_t)n, 1);
       if (!saw)
         return CAPNP_ERR_ALLOC;
+    }
+    if (st->disc_count > 0) {
+      saw_disc = (uint8_t *)calloc((size_t)st->disc_count, 1);
+      if (!saw_disc) {
+        free(saw);
+        return CAPNP_ERR_ALLOC;
+      }
     }
     for (i = 0; i < n; i++) {
       capnp_ptr_t f, typ;
@@ -656,11 +733,13 @@ static int load_struct_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
       /* validateMemberName, then codeOrder, then the slot span. */
       if (prior_member_name(&fields, i, fname)) {
         free(saw);
+        free(saw_disc);
         drop_last_struct(d);
         return CAPNP_OK;
       }
       if (add_field(st, &df)) {
         free(saw);
+        free(saw_disc);
         return CAPNP_ERR_ALLOC;
       }
       snprintf(df->name, sizeof(df->name), "%s", fname);
@@ -669,11 +748,48 @@ static int load_struct_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
       df->code_order = capnp_get_u16(&f, 0, 0);
       if ((uint32_t)df->code_order >= n || saw[df->code_order]) {
         free(saw);
+        free(saw_disc);
         drop_last_struct(d);
         return CAPNP_OK;
       }
       saw[df->code_order] = 1;
+      {
+        uint16_t owhich = capnp_get_u16(&f, 10, 0);
+        if (owhich == 1) {
+          uint16_t expl = capnp_get_u16(&f, 12, 0);
+          if ((uint32_t)expl < next_ord) {
+            char msg[384];
+            snprintf(msg, sizeof(msg),
+                     "no schema node loaded; expected ordinal.getExplicit() "
+                     ">= nextOrdinal [%u >= %u]; fields were not ordered by "
+                     "ordinal",
+                     (unsigned)expl, (unsigned)next_ord);
+            note_reject(d, st->name, st->id, msg);
+            free(saw);
+            free(saw_disc);
+            drop_last_struct(d);
+            return CAPNP_OK;
+          }
+          next_ord = (uint32_t)expl + 1u;
+        }
+      }
       df->disc = (uint16_t)(capnp_get_u16(&f, 2, 0) ^ 0xffffu);
+      if (df->disc != 0xffffu &&
+          ((uint32_t)df->disc >= st->disc_count ||
+           (saw_disc && saw_disc[df->disc]))) {
+        note_reject(d, st->name, st->id,
+                    "no schema node loaded; expected "
+                    "field.getDiscriminantValue() < "
+                    "sawDiscriminantValue.size() && "
+                    "!sawDiscriminantValue[field.getDiscriminantValue()]; "
+                    "invalid discriminantValue");
+        free(saw);
+        free(saw_disc);
+        drop_last_struct(d);
+        return CAPNP_OK;
+      }
+      if (df->disc != 0xffffu && saw_disc)
+        saw_disc[df->disc] = 1;
       fwhich = capnp_get_u16(&f, 8, 0xffff);
       load_field_annotations(&f, df);
       if (fwhich == 1) {
@@ -681,9 +797,34 @@ static int load_struct_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
         df->group_id = capnp_get_u64(&f, 16, 0);
         continue;
       }
+      if (fwhich == 0) {
+        capnp_ptr_t val;
+        uint16_t tw = 0, vw = 0;
+        if (capnp_getp(&f, 2, &typ) == CAPNP_OK && typ.kind == CAPNP_PK_STRUCT)
+          tw = capnp_get_u16(&typ, 0, 0);
+        if (tw <= TY_ANY) {
+          if (capnp_getp(&f, 3, &val) == CAPNP_OK && val.kind == CAPNP_PK_STRUCT)
+            vw = capnp_get_u16(&val, 0, 0);
+          if (vw != tw) {
+            char msg[384];
+            snprintf(msg, sizeof(msg),
+                     "no schema node loaded; expected value.which() == "
+                     "expectedValueType [%u == %u]; Value did not match "
+                     "type.; (uint)value.which() = %u; "
+                     "(uint)expectedValueType = %u",
+                     (unsigned)vw, (unsigned)tw, (unsigned)vw, (unsigned)tw);
+            note_reject(d, st->name, st->id, msg);
+            free(saw);
+            free(saw_disc);
+            drop_last_struct(d);
+            return CAPNP_OK;
+          }
+        }
+      }
       df->offset = capnp_get_u32(&f, 4, 0);
       if (slot_offset_oob(st, &f, df->offset)) {
         free(saw);
+        free(saw_disc);
         drop_last_struct(d);
         return CAPNP_OK;
       }
@@ -694,13 +835,20 @@ static int load_struct_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
       load_default(&f, df);
     }
     free(saw);
+    free(saw_disc);
+  }
+  if (st->is_group && st->scope_id == 0) {
+    note_reject(d, st->name, st->id,
+                "no schema node loaded; expected scopeId != 0 [0 != 0]; "
+                "group node missing scopeId");
+    drop_last_struct(d);
   }
   return CAPNP_OK;
 }
 
 static int load_enum_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
   dyn_enum_t *en;
-  capnp_ptr_t enumerants;
+  capnp_ptr_t enumerants, params;
   uint32_t i, n;
   if (d->nenums == d->ecap) {
     uint32_t ncap = d->ecap ? d->ecap * 2u : 8u;
@@ -717,31 +865,64 @@ static int load_enum_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
   en->scope_id = capnp_get_u64(node, 16, 0);
   extract_names(node, en->name, sizeof(en->name), en->short_name,
                 sizeof(en->short_name));
+  if (capnp_getp(node, 5, &params) == CAPNP_OK &&
+      params.kind == CAPNP_PK_LIST && capnp_list_len(&params) > 0 &&
+      !capnp_get_bool(node, 288, 0)) {
+    note_reject(d, en->name, en->id,
+                "no schema node loaded; expected node.getIsGeneric(); "
+                "if parameter list is non-empty, isGeneric must be true");
+    d->nenums--;
+    return CAPNP_OK;
+  }
   if (capnp_getp(node, 3, &enumerants) != CAPNP_OK ||
       enumerants.kind != CAPNP_PK_LIST)
     return CAPNP_OK;
   n = capnp_list_len(&enumerants);
   if (n > 0) {
+    uint8_t *saw = (uint8_t *)calloc((size_t)n, 1);
     en->vals = (dyn_enum_val_t *)calloc(n, sizeof(dyn_enum_val_t));
-    if (!en->vals)
+    if (!en->vals || !saw) {
+      free(en->vals);
+      en->vals = NULL;
+      free(saw);
       return CAPNP_ERR_ALLOC;
+    }
     en->nvals = n;
     for (i = 0; i < n; i++) {
       capnp_ptr_t ev, anns;
+      uint16_t co;
       if (capnp_list_getp(&enumerants, i, &ev) != CAPNP_OK)
         continue;
       if (prior_member_name(&enumerants, i, node_text(&ev, 0))) {
+        free(saw);
         free(en->vals);
         en->vals = NULL;
         en->nvals = 0;
         d->nenums--;
         return CAPNP_OK;
       }
+      co = capnp_get_u16(&ev, 0, 0);
+      if ((uint32_t)co >= n || saw[co]) {
+        char msg[384];
+        snprintf(msg, sizeof(msg),
+                 "no schema node loaded; expected enumerant.getCodeOrder() < "
+                 "enumerants.size() && !sawCodeOrder[enumerant.getCodeOrder()]; "
+                 "invalid codeOrder; enumerant.getName() = %s",
+                 node_text(&ev, 0));
+        note_reject(d, en->name, en->id, msg);
+        free(saw);
+        free(en->vals);
+        en->vals = NULL;
+        en->nvals = 0;
+        d->nenums--;
+        return CAPNP_OK;
+      }
+      saw[co] = 1;
       snprintf(en->vals[i].name, sizeof(en->vals[i].name), "%s",
                node_text(&ev, 0));
       snprintf(en->vals[i].json_name, sizeof(en->vals[i].json_name), "%s",
                en->vals[i].name);
-      en->vals[i].code_order = capnp_get_u16(&ev, 0, 0);
+      en->vals[i].code_order = co;
       if (capnp_getp(&ev, 1, &anns) == CAPNP_OK &&
           anns.kind == CAPNP_PK_LIST) {
         uint32_t j, na = capnp_list_len(&anns);
@@ -757,6 +938,7 @@ static int load_enum_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
         }
       }
     }
+    free(saw);
   }
   return CAPNP_OK;
 }
@@ -867,6 +1049,7 @@ void capnp_dyn_free(capnp_dyn_t *d) {
     free(d->enums[i].vals);
   free(d->structs);
   free(d->enums);
+  free(d->rejects);
   capnp_message_free(&d->msg);
   free(d);
 }
@@ -5116,8 +5299,12 @@ static int vnode_to_enum(capnp_dyn_t *d, uint64_t enum_id,
                          const vnode_t *v, int json, uint16_t *out_ord) {
   dyn_enum_t *en = find_enum_id(d, enum_id);
   uint32_t i;
-  if (!en)
+  if (!en) {
+    const char *why = reject_by_id(d, enum_id);
+    if (why)
+      dyn_set_err(d, why);
     return -1;
+  }
   if (json) {
     if (v->kind == VK_FLOAT) {
       /* static_cast<uint16_t> of the double. */
@@ -6741,7 +6928,8 @@ static int build_struct_from_vnode(capnp_dyn_t *d,
                           kv);
         free_rtype(&ft);
         if (tv == TV_FATAL || (tv == TV_SKIP && soft_error())) {
-          dyn_err_text(d, "bad value", key, strlen(key));
+          if (!d->err[0])
+            dyn_err_text(d, "bad value", key, strlen(key));
           return -1;
         }
         if (tv == TV_SKIP)
@@ -6833,7 +7021,8 @@ static int decode_root_impl(capnp_dyn_t *d, const char *type_name,
   d->bad_n = 0;
   value_depth = dyn_max_depth;
   if (resolve_root_type_name(d, type_name, &rt, &st) != CAPNP_OK) {
-    dyn_set_err(d, "unknown type");
+    const char *why = reject_named(d, type_name);
+    dyn_set_err(d, why ? why : "unknown type");
     return CAPNP_ERR_KIND;
   }
 
