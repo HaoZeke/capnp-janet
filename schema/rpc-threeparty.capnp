@@ -42,7 +42,8 @@ struct ThirdPartyCapId {
 }
 
 struct JoinKeyPart {
-  # Level 4 over this network, same shape the two-party layer uses.
+  # Same shape the two-party layer uses. Level-3 messages are answered
+  # with Unimplemented, as in C++ 1.4.0.
 
   joinId @0 :UInt32;
   partCount @1 :UInt16;
