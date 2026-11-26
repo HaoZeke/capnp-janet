@@ -7397,9 +7397,13 @@ static int format_ev(capnp_dyn_t *d, const ev_t *ev, int json, int pretty,
     case TY_F32: {
       uint32_t u = (uint32_t)ev->bits;
       float fv;
+      double dv;
       char tmp[64];
       memcpy(&fv, &u, sizeof(fv));
-      fmt_f32(fv, tmp, sizeof(tmp));
+      /* stringify(DynamicValue) prints a bare Float32 with the double
+       * formatter. A field still uses fmt_f32. */
+      dv = (double)fv;
+      fmt_f64(dv, tmp, sizeof(tmp));
       rc = buf_str(&b, tmp);
       break;
     }

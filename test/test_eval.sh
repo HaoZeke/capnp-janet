@@ -60,6 +60,9 @@ check "$CLEAN" empty -opacked
 check "$CLEAN" empty -ocanonical
 check "$CLEAN" defs -obinary
 check "$CLEAN" uset -opacked
+# A bare Float32 constant is printed as a double. A field stays Float32 text.
+check "$CLEAN" f32pi
+check "$ROOT/schema/eval-f32.capnp" fp
 
 # A legal path that used to overflow the fixed 4096-byte compile command
 # and leave the shell quote open.
