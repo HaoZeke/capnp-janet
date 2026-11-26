@@ -1417,15 +1417,15 @@ static const vscenario_t vat_diffs[] = {
     {"Return for a high question id",
      {{VF_RETURN, 0x80000005u, 0, 0, 0, 0, 0, 0},
       {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
-    {"Provide, which this vat serves at level 3",
+    {"Provide",
      {{VF_TAG, 0, 0, 0, 0, 10, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
-    {"Accept, which this vat serves at level 3",
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Accept",
      {{VF_TAG, 0, 0, 0, 0, 11, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
-    {"Join, which this vat serves at level 3",
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
+    {"Join",
      {{VF_TAG, 0, 0, 0, 0, 12, 0, 0},
-      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 1, 0},
+      {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
     {"Disembargo accept",
      {{VF_DISEMBARGO, 0, 0, 3, 2, 0, 0, 0},
       {VF_CALL, 1, VT_IMPORT, 0, 0, 0, 0, 0}}, 2, 1, 0, 0, 0},
@@ -2427,6 +2427,9 @@ static const struct {
   const char *name;
   const char *cpp;
 } vat_recorded[] = {
+    {"Provide", "unimplemented 10 | return 1 results 42"},
+    {"Accept", "unimplemented 11 | return 1 results 42"},
+    {"Join", "unimplemented 12 | return 1 results 42"},
     {"Unimplemented for a Call",
      "abort: Peer did not implement required RPC message type.; "
      "(uint)message.which() = 2"},

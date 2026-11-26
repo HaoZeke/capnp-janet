@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Janet host, stream helper, and level-3 handoff.
+# Janet host and stream helper.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BUILD="${CAPNP_JANET_BUILD:-$ROOT/build}"
@@ -33,10 +33,8 @@ export JANET_PATH="$MODDIR"
 export LD_LIBRARY_PATH="$MODDIR${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 run_janet "$ROOT/test/rpc_fill.janet"
-run_janet "$ROOT/test/rpc_share_vat.janet"
 run_janet "$ROOT/test/rpc_borrow.janet"
 run_janet "$ROOT/test/rpc_fail.janet"
-run_janet "$ROOT/test/rpc_level3.janet"
 run_janet "$ROOT/test/builder_scope.janet"
 # These scripts block or error when jpm runs them with no arguments.
 run_janet "$ROOT/test/rpc_host.janet"

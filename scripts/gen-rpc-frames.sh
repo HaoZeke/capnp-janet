@@ -1,12 +1,10 @@
 #!/usr/bin/env bash
-# Regenerate the level 3 wire goldens with the reference `capnp` CLI.
-# Run with --check to assert the checked-in files still match the schema.
+# Regenerate the reference Provide, Accept, and introduction frames with
+# the `capnp` CLI. Run with --check to assert the checked-in files still
+# match the schema.
 #
-# The frames are what a conforming vat sends for the handoff in
-# schema/rpc-threeparty.capnp: Alice tells Bob to hold export 0 for
-# whoever presents the nonce, and Carol presents it. The question ids are
-# 42 and 43 so that nothing in the golden coincides with the union tags
-# (provide is 10, accept is 11).
+# Question ids are 42 and 43 so that nothing in the golden coincides with
+# the union tags (provide is 10, accept is 11).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")/.." && pwd)

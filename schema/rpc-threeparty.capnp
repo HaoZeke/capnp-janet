@@ -1,5 +1,6 @@
 @0xd94d1d3f0d9f8a11;
-# A three-party network layer for Cap'n Proto RPC level 3.
+# Third-party ids for Cap'n Proto RPC descriptors.
+# Provide, Accept, and Join are answered with an Unimplemented echo.
 #
 # rpc.capnp leaves ProvisionId, RecipientId, ThirdPartyCapId and the join
 # keys as AnyPointer on purpose: what a "vat" is, and how one vat names
@@ -7,17 +8,9 @@
 # declaring most of them empty, because a connection between exactly two
 # vats has no third to name. This layer answers it differently.
 #
-# The handoff (encoding of rpc.capnp's Provide / Accept):
-#
-#   Alice holds a capability hosted by Bob and wants Carol to have it.
-#   1. Alice -> Bob   Provide{target, recipient = RecipientId{carol, nonce}}
-#   2. Alice -> Carol a ThirdPartyCapDescriptor{id = ThirdPartyCapId{bob, nonce}}
-#   3. Carol -> Bob   Accept{provision = ProvisionId{nonce}}
-#   4. Bob   -> Carol Return carrying the capability
-#
-# The nonce is what ties the three messages together: Bob matches Carol's
-# Accept against Alice's Provide by nonce alone, so Bob never has to trust
-# Carol's account of who sent her.
+# The structs below are the wire shapes of Provide.recipient, Accept.provision,
+# and a thirdPartyHosted id. This vat answers the Provide, Accept, and Join
+# messages with an Unimplemented echo.
 
 struct VatId {
   # Where a vat can be reached. A network with a directory would carry an

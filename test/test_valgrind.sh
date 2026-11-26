@@ -32,7 +32,6 @@ bins=(
   test_canonical
   test_copy
   test_rpc_join
-  test_rpc_handoff
   test_rpc_client
   test_transport
   test_abi_layout

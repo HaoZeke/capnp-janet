@@ -1442,10 +1442,6 @@ typedef struct {
   JanetSignal panic_sig;
   Janet panic_err;
   JanetFiber *panic_fib;
-  /* Connection whose vat this one shares. Marked so collection cannot
-   * free that vat while this connection still reads it. */
-  Janet host;
-  int has_host;
 } rpc_conn_wrap;
 
 /* janet_pcall runs the handler on its own fiber and then returns.
@@ -1502,8 +1498,6 @@ static int rpc_gcmark(void *p, size_t len) {
   rpc_conn_wrap *w = (rpc_conn_wrap *)p;
   if (w->has_handler)
     janet_mark(w->handler);
-  if (w->has_host)
-    janet_mark(w->host);
   return 0;
 }
 
@@ -1935,39 +1929,6 @@ static Janet cfun_rpc_recv(int32_t argc, Janet *argv) {
   return janet_wrap_nil();
 }
 
-static Janet cfun_rpc_provide(int32_t argc, Janet *argv) {
-  rpc_conn_wrap *w = get_rpc(argv, 0);
-  uint32_t q;
-  janet_fixarity(argc, 5);
-  q = capnp_rpc_send_provide(&w->conn, (uint32_t)janet_getinteger(argv, 1),
-                             janet_getcstring(argv, 2),
-                             (uint16_t)janet_getinteger(argv, 3),
-                             janet_getuinteger64(argv, 4));
-  if (q == (uint32_t)-1)
-    janet_panic("capnp/rpc-provide: not sent");
-  return janet_wrap_number((double)q);
-}
-
-static Janet cfun_rpc_send_accept(int32_t argc, Janet *argv) {
-  rpc_conn_wrap *w = get_rpc(argv, 0);
-  uint32_t q;
-  janet_fixarity(argc, 3);
-  q = capnp_rpc_send_accept(&w->conn, janet_getuinteger64(argv, 1),
-                            janet_getboolean(argv, 2));
-  if (q == (uint32_t)-1)
-    janet_panic("capnp/rpc-send-accept: not sent");
-  return janet_wrap_number((double)q);
-}
-
-static Janet cfun_rpc_disembargo(int32_t argc, Janet *argv) {
-  rpc_conn_wrap *w = get_rpc(argv, 0);
-  janet_fixarity(argc, 2);
-  if (capnp_rpc_send_disembargo_provide(&w->conn,
-                                        (uint32_t)janet_getinteger(argv, 1)))
-    janet_panic("capnp/rpc-disembargo: not sent");
-  return janet_wrap_nil();
-}
-
 static Janet cfun_rpc_answer_cap(int32_t argc, Janet *argv) {
   rpc_conn_wrap *w = get_rpc(argv, 0);
   int id;
@@ -1976,29 +1937,6 @@ static Janet cfun_rpc_answer_cap(int32_t argc, Janet *argv) {
   if (id < 0)
     janet_panic("capnp/rpc-answer-cap: no capability");
   return janet_wrap_number((double)id);
-}
-
-static Janet cfun_rpc_share_vat(int32_t argc, Janet *argv) {
-  rpc_conn_wrap *a = get_rpc(argv, 0);
-  rpc_conn_wrap *b = get_rpc(argv, 1);
-  janet_fixarity(argc, 2);
-  b->host = janet_wrap_abstract(a);
-  b->has_host = 1;
-  capnp_rpc_set_vat(&b->conn, a->conn.vat);
-  return janet_wrap_nil();
-}
-
-static Janet cfun_rpc_provisions(int32_t argc, Janet *argv) {
-  rpc_conn_wrap *w = get_rpc(argv, 0);
-  uint64_t ids[64];
-  int n, i;
-  JanetArray *arr;
-  janet_fixarity(argc, 1);
-  n = capnp_rpc_pending_provisions(&w->conn, ids, 64);
-  arr = janet_array(n > 0 ? n : 0);
-  for (i = 0; i < n; i++)
-    janet_array_push(arr, janet_wrap_u64(ids[i]));
-  return janet_wrap_array(arr);
 }
 
 typedef struct {
@@ -2230,19 +2168,8 @@ static const JanetReg capnp_cfuns[] = {
     {"rpc-dial-unix", cfun_rpc_dial_unix, "(capnp/rpc-dial-unix path)"},
     {"rpc-recv", cfun_rpc_recv,
      "(capnp/rpc-recv conn)\n\nRead one frame from the socket and handle it."},
-    {"rpc-provide", cfun_rpc_provide,
-     "(capnp/rpc-provide conn cap-id host port nonce)"},
-    {"rpc-send-accept", cfun_rpc_send_accept,
-     "(capnp/rpc-send-accept conn nonce embargo?)"},
-    {"rpc-disembargo", cfun_rpc_disembargo,
-     "(capnp/rpc-disembargo conn provide-question-id)"},
     {"rpc-answer-cap", cfun_rpc_answer_cap,
      "(capnp/rpc-answer-cap conn question-id)"},
-    {"rpc-share-vat", cfun_rpc_share_vat,
-     "(capnp/rpc-share-vat host guest)\n\n"
-     "Guest connections record level-3 provisions on host's vat."},
-    {"rpc-provisions", cfun_rpc_provisions,
-     "(capnp/rpc-provisions conn)\n\nNonces held for a third vat."},
     {"rpc-stream", cfun_rpc_stream, "(capnp/rpc-stream window)"},
     {"rpc-stream-send", cfun_rpc_stream_send,
      "(capnp/rpc-stream-send conn stream cap-id interface-id method-id "
