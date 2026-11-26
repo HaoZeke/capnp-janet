@@ -147,8 +147,6 @@ enum { KEEP_SEND, KEEP_REDIRECT, KEEP_QUIET };
 #define DIS_CTX_RECEIVER_LOOPBACK 1
 #define DIS_CTX_ACCEPT 2
 #define DIS_CTX_PROVIDE 3
-#define DISEMBARGO_DW 1
-#define DISEMBARGO_PW 1
 /* MessageTarget union tags. */
 #define TARGET_TAG_PROMISEDANSWER 1
 
