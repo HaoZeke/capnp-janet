@@ -52,6 +52,14 @@ check "$PARITY" Parity.vEnum
 check "$PARITY" Parity.vStruct
 check "$PARITY" Parity.vData
 check "$PARITY" 'Parity.lI32[1]'
+# A struct const keeps the size it was built at. Canonical output stays trimmed.
+CLEAN="$ROOT/schema/eval-clean.capnp"
+check "$CLEAN" empty -obinary
+check "$CLEAN" empty --flat
+check "$CLEAN" empty -opacked
+check "$CLEAN" empty -ocanonical
+check "$CLEAN" defs -obinary
+check "$CLEAN" uset -opacked
 
 # A legal path that used to overflow the fixed 4096-byte compile command
 # and leave the shell quote open.

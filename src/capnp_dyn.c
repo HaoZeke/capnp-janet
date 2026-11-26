@@ -7492,6 +7492,7 @@ int capnp_dyn_eval_struct(capnp_dyn_t *d, const char *expr, uint8_t **out,
     return CAPNP_ERR_ARG;
   *out = NULL;
   *out_len = 0;
+  value_depth = dyn_max_depth;
   rc = resolve_eval_expr(d, expr, &ev);
   if (rc)
     return rc;
@@ -7511,7 +7512,9 @@ int capnp_dyn_eval_struct(capnp_dyn_t *d, const char *expr, uint8_t **out,
     return CAPNP_ERR_ALLOC;
   }
   if (ev.ptr.kind == CAPNP_PK_STRUCT) {
-    if (capnp_builder_copy_ptr(&root, &ev.ptr)) {
+    /* setRoot copies the struct at the size it was built. The canonical
+     * copier drops trailing zero words. */
+    if (copy_ptr_full(&b, root.seg, root.word, &ev.ptr, 0)) {
       capnp_builder_free(&b);
       free_ev(&ev);
       return CAPNP_ERR_ALLOC;
