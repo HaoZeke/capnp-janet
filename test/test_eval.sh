@@ -63,6 +63,15 @@ check "$CLEAN" uset -opacked
 # A bare Float32 constant is printed as a double. A field stays Float32 text.
 check "$CLEAN" f32pi
 check "$ROOT/schema/eval-f32.capnp" fp
+# Eval JSON ignores Json annotations. Convert of the same bytes still applies them.
+ANN="$ROOT/schema/eval-ann.capnp"
+check "$ANN" n0 -ojson --short
+check "$ANN" d0 -ojson --short
+check "$ANN" d1 -ojson --short
+capnp eval -I"$INC" -obinary "$ANN" n0 >"$TMP/n0.bin"
+capnp convert -I"$INC" binary:json --short "$ANN" Named <"$TMP/n0.bin" >"$TMP/ref.txt"
+"$BIN" convert -I"$INC" binary:json --short "$ANN" Named <"$TMP/n0.bin" >"$TMP/ours.txt"
+cmp "$TMP/ref.txt" "$TMP/ours.txt"
 
 # A legal path that used to overflow the fixed 4096-byte compile command
 # and leave the shell quote open.
