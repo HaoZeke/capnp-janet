@@ -45,5 +45,5 @@ Tests: =test/test_list_evolution.c=.
 | =wire= / =list_text= | demo shapes | core reader/builder |
 
 The calculator fixtures exercise expression serialization. Live RPC tests use
-=schema/adder.capnp= with a C++ peer; level 3 frame tests use
-=schema/rpc-threeparty.capnp=.
+=schema/adder.capnp= with a C++ peer. Provide, Accept, and Join are answered
+with an Unimplemented echo. Frame fixtures use =schema/rpc-threeparty.capnp=.
