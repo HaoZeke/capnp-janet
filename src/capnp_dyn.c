@@ -504,6 +504,89 @@ static int add_field(dyn_struct_t *st, dyn_field_t **out) {
   return CAPNP_OK;
 }
 
+/* Drop the struct just added by load_struct_node. Sibling nodes stay. */
+static void drop_last_struct(capnp_dyn_t *d) {
+  dyn_struct_t *st;
+  if (!d->nstructs)
+    return;
+  st = &d->structs[--d->nstructs];
+  free(st->fields);
+  free(st->params);
+  memset(st, 0, sizeof(*st));
+}
+
+/* True when an earlier member of this list already uses name. */
+static int prior_member_name(const capnp_ptr_t *list, uint32_t idx,
+                             const char *name) {
+  uint32_t j;
+  for (j = 0; j < idx; j++) {
+    capnp_ptr_t prev;
+    if (capnp_list_getp(list, j, &prev) != CAPNP_OK)
+      continue;
+    if (strcmp(node_text(&prev, 0), name) == 0)
+      return 1;
+  }
+  return 0;
+}
+
+/* schema-loader.c++ slot width: data bits and whether the slot is a pointer. */
+static void slot_width(const capnp_ptr_t *field, uint32_t *bits,
+                       uint32_t *is_ptr) {
+  capnp_ptr_t typ;
+  uint16_t w;
+  *bits = 0;
+  *is_ptr = 0;
+  if (capnp_getp(field, 2, &typ) != CAPNP_OK || typ.kind != CAPNP_PK_STRUCT)
+    return;
+  w = capnp_get_u16(&typ, 0, 0xffff);
+  switch (w) {
+  case TY_BOOL:
+    *bits = 1;
+    break;
+  case TY_I8:
+  case TY_U8:
+    *bits = 8;
+    break;
+  case TY_I16:
+  case TY_U16:
+  case TY_ENUM:
+    *bits = 16;
+    break;
+  case TY_I32:
+  case TY_U32:
+  case TY_F32:
+    *bits = 32;
+    break;
+  case TY_I64:
+  case TY_U64:
+  case TY_F64:
+    *bits = 64;
+    break;
+  case TY_TEXT:
+  case TY_DATA:
+  case TY_LIST:
+  case TY_STRUCT:
+  case TY_IFACE:
+  case TY_ANY:
+    *is_ptr = 1;
+    break;
+  default:
+    break;
+  }
+}
+
+/* fieldBits * (offset + 1) and the pointer form, both uint32 products. */
+static int slot_offset_oob(const dyn_struct_t *st, const capnp_ptr_t *field,
+                           uint32_t offset) {
+  uint32_t bits = 0, is_ptr = 0, next;
+  slot_width(field, &bits, &is_ptr);
+  next = offset + 1u;
+  if (bits * next > (uint32_t)st->dwords * 64u ||
+      is_ptr * next > (uint32_t)st->pwords)
+    return 1;
+  return 0;
+}
+
 static int load_struct_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
   dyn_struct_t *st;
   capnp_ptr_t fields, params;
@@ -520,15 +603,17 @@ static int load_struct_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
   st->pwords = capnp_get_u16(node, 24, 0);
   st->disc_count = capnp_get_u16(node, 30, 0);
   {
-    /* schema-loader rejects (discriminantOffset + 1) * 16 bits past
-     * the data section. A uint32 multiply wraps that offset to 0. */
+    /* schema-loader.c++: a one-member union is invalid, and
+     * (discriminantOffset + 1) * 16 is a uint32 product. The product
+     * wraps, so a large offset can still pass. */
     uint32_t disc_off = capnp_get_u32(node, 32, 0);
-    uint64_t disc_bytes = (uint64_t)disc_off * 2u;
-    if (st->disc_count > 0 &&
-        (disc_bytes > UINT32_MAX ||
-         disc_bytes + 2u > (uint64_t)st->dwords * 8u))
-      return CAPNP_ERR_SCHEMA;
-    st->disc_byte = disc_bytes > UINT32_MAX ? 0u : (uint32_t)disc_bytes;
+    uint32_t data_bits = (uint32_t)st->dwords * 64u;
+    if (st->disc_count == 1 ||
+        (st->disc_count > 0 && (disc_off + 1u) * 16u > data_bits)) {
+      drop_last_struct(d);
+      return CAPNP_OK;
+    }
+    st->disc_byte = disc_off * 2u;
   }
   st->is_group = capnp_get_bool(node, 224, 0);
   load_struct_annotations(node, st);
@@ -553,32 +638,62 @@ static int load_struct_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
   if (capnp_getp(node, 3, &fields) != CAPNP_OK || fields.kind != CAPNP_PK_LIST)
     return CAPNP_OK;
   n = capnp_list_len(&fields);
-  for (i = 0; i < n; i++) {
-    capnp_ptr_t f, typ;
-    dyn_field_t *df;
-    uint16_t fwhich;
-    if (capnp_list_getp(&fields, i, &f) != CAPNP_OK)
-      continue;
-    if (add_field(st, &df))
-      return CAPNP_ERR_ALLOC;
-    snprintf(df->name, sizeof(df->name), "%s", node_text(&f, 0));
-    snprintf(df->json_name, sizeof(df->json_name), "%s", df->name);
-    snprintf(df->disc_name, sizeof(df->disc_name), "%s", df->name);
-    df->code_order = capnp_get_u16(&f, 0, 0);
-    df->disc = (uint16_t)(capnp_get_u16(&f, 2, 0) ^ 0xffffu);
-    fwhich = capnp_get_u16(&f, 8, 0xffff);
-    load_field_annotations(&f, df);
-    if (fwhich == 1) {
-      df->is_group = 1;
-      df->group_id = capnp_get_u64(&f, 16, 0);
-      continue;
+  {
+    uint8_t *saw = NULL;
+    if (n > 0) {
+      saw = (uint8_t *)calloc((size_t)n, 1);
+      if (!saw)
+        return CAPNP_ERR_ALLOC;
     }
-    df->offset = capnp_get_u32(&f, 4, 0);
-    if (capnp_getp(&f, 2, &typ) == CAPNP_OK && typ.kind == CAPNP_PK_STRUCT) {
-      df->type_proto = typ;
-      df->has_type_proto = 1;
+    for (i = 0; i < n; i++) {
+      capnp_ptr_t f, typ;
+      dyn_field_t *df;
+      uint16_t fwhich;
+      const char *fname;
+      if (capnp_list_getp(&fields, i, &f) != CAPNP_OK)
+        continue;
+      fname = node_text(&f, 0);
+      /* validateMemberName, then codeOrder, then the slot span. */
+      if (prior_member_name(&fields, i, fname)) {
+        free(saw);
+        drop_last_struct(d);
+        return CAPNP_OK;
+      }
+      if (add_field(st, &df)) {
+        free(saw);
+        return CAPNP_ERR_ALLOC;
+      }
+      snprintf(df->name, sizeof(df->name), "%s", fname);
+      snprintf(df->json_name, sizeof(df->json_name), "%s", df->name);
+      snprintf(df->disc_name, sizeof(df->disc_name), "%s", df->name);
+      df->code_order = capnp_get_u16(&f, 0, 0);
+      if ((uint32_t)df->code_order >= n || saw[df->code_order]) {
+        free(saw);
+        drop_last_struct(d);
+        return CAPNP_OK;
+      }
+      saw[df->code_order] = 1;
+      df->disc = (uint16_t)(capnp_get_u16(&f, 2, 0) ^ 0xffffu);
+      fwhich = capnp_get_u16(&f, 8, 0xffff);
+      load_field_annotations(&f, df);
+      if (fwhich == 1) {
+        df->is_group = 1;
+        df->group_id = capnp_get_u64(&f, 16, 0);
+        continue;
+      }
+      df->offset = capnp_get_u32(&f, 4, 0);
+      if (slot_offset_oob(st, &f, df->offset)) {
+        free(saw);
+        drop_last_struct(d);
+        return CAPNP_OK;
+      }
+      if (capnp_getp(&f, 2, &typ) == CAPNP_OK && typ.kind == CAPNP_PK_STRUCT) {
+        df->type_proto = typ;
+        df->has_type_proto = 1;
+      }
+      load_default(&f, df);
     }
-    load_default(&f, df);
+    free(saw);
   }
   return CAPNP_OK;
 }
@@ -615,6 +730,13 @@ static int load_enum_node(capnp_dyn_t *d, const capnp_ptr_t *node) {
       capnp_ptr_t ev, anns;
       if (capnp_list_getp(&enumerants, i, &ev) != CAPNP_OK)
         continue;
+      if (prior_member_name(&enumerants, i, node_text(&ev, 0))) {
+        free(en->vals);
+        en->vals = NULL;
+        en->nvals = 0;
+        d->nenums--;
+        return CAPNP_OK;
+      }
       snprintf(en->vals[i].name, sizeof(en->vals[i].name), "%s",
                node_text(&ev, 0));
       snprintf(en->vals[i].json_name, sizeof(en->vals[i].json_name), "%s",

@@ -744,17 +744,16 @@ static int cmd_disc(const char *req, const char *mode) {
   rc = capnp_dyn_init(&d, flat, fl);
   if (rc != CAPNP_OK) {
     free(flat);
-    /* A discriminant past the data section, including one whose byte
-     * offset wraps a 32-bit multiply, is a malformed schema. */
-    if (oob || huge)
-      return rc == CAPNP_ERR_SCHEMA ? 0 : 1;
     return 1;
   }
   free(flat);
   rc = capnp_dyn_decode_json(d, "U", json, strlen(json), &msg, &mn);
   free(msg);
   capnp_dyn_free(d);
-  if (oob || huge)
+  /* Offset 4 ends past one data word, so the struct is absent and
+   * decode fails. 0x80000000 wraps in the uint32 end-bit product and
+   * the struct still loads. */
+  if (oob)
     return rc == CAPNP_OK;
   return rc != CAPNP_OK;
 }
