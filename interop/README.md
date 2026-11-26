@@ -38,6 +38,6 @@ the C++ peer to return `2`. Run the isolated gate with:
 meson test -C build rpc_interop_cpp --print-errorlogs
 ```
 
-Level 3 `Provide`, `Accept`, embargo, and handoff frames use
-`schema/rpc-threeparty.capnp`. `scripts/gen-rpc-frames.sh --check` compares the
-checked-in frames with the official `capnp encode` output.
+`schema/rpc-threeparty.capnp` names third-party ids. Provide, Accept, and Join
+are answered with an Unimplemented echo. `scripts/gen-rpc-frames.sh --check`
+compares the checked-in frames with the official `capnp encode` output.

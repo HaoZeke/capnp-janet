@@ -379,14 +379,6 @@ test(
   env: {'CAPNP_JANET_SOURCE_ROOT': meson.project_source_root()},
 )
 
-test_rpc_handoff = executable(
-  'test_rpc_handoff',
-  'test/test_rpc_handoff.c',
-  dependencies: capnp_janet_dep,
-  include_directories: test_inc,
-)
-test('rpc_handoff', test_rpc_handoff)
-
 test_rpc_client = executable(
   'test_rpc_client',
   'test/test_rpc_client.c',
@@ -567,7 +559,6 @@ if bash.found()
     test_canonical,
     test_copy,
     test_rpc_join,
-    test_rpc_handoff,
     test_rpc_client,
     test_transport,
     test_abi_layout,

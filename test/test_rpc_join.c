@@ -1,8 +1,8 @@
-/* Level 4 `Join`: does a set of capabilities name one object?
+/* RPC vat: pipelining, disembargo, third-party descriptors, and the
+ * Unimplemented echo for Provide, Accept, and Join.
  *
- * The vat is driven with raw messages rather than through a client
- * facade, so each assertion is about the wire behaviour the spec
- * prescribes and not about a convenience layer on top of it.
+ * The vat is driven with raw messages, so each assertion is about the
+ * wire reply.
  */
 
 #include <stdio.h>
@@ -110,38 +110,24 @@ static void send_join_part(capnp_rpc_conn_t *c, uint32_t qid, uint32_t export_id
   capnp_builder_free(&b);
 }
 
-typedef struct {
-  uint32_t answer_id;
-  uint32_t join_id;
-  int succeeded;
-  int has_cap;
-} join_reply_t;
-
-static join_reply_t read_join_reply(const uint8_t *data, size_t len)
+/* The reply is Unimplemented, and the echoed message carries `tag` and
+ * question id `qid`. */
+static void check_echo(const uint8_t *data, size_t len, uint16_t tag,
+                       uint32_t qid)
 {
   capnp_message_t m = {0};
-  capnp_ptr_t root, ret, payload, jr;
-  join_reply_t out;
-  memset(&out, 0, sizeof out);
-
-  CHECK(capnp_message_from_flat(&m, data, len) == CAPNP_OK, "capnp_message_from_flat(&m, data, len) == CAPNP_OK");
-  CHECK(capnp_root(&m, &root) == CAPNP_OK, "capnp_root(&m, &root) == CAPNP_OK");
-  CHECK(capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_RETURN, "capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_RETURN");
-  CHECK(capnp_getp(&root, 0, &ret) == CAPNP_OK, "capnp_getp(&root, 0, &ret) == CAPNP_OK");
-  out.answer_id = capnp_get_u32(&ret, 0, 0);
-  CHECK(capnp_getp(&ret, 0, &payload) == CAPNP_OK, "capnp_getp(&ret, 0, &payload) == CAPNP_OK");
-  CHECK(capnp_getp(&payload, 0, &jr) == CAPNP_OK, "capnp_getp(&payload, 0, &jr) == CAPNP_OK");
-  out.join_id = capnp_get_u32(&jr, 0, 0);
-  out.succeeded = capnp_get_bool(&jr, 32, 0);
-  {
-    capnp_ptr_t cap;
-    out.has_cap = capnp_getp(&jr, 0, &cap) == CAPNP_OK &&
-                  cap.kind == CAPNP_PK_CAP;
-  }
+  capnp_ptr_t root, echoed, body;
+  CHECK(capnp_message_from_flat(&m, data, len) == CAPNP_OK, "echo decodes");
+  CHECK(capnp_root(&m, &root) == CAPNP_OK, "echo root");
+  CHECK(capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_UNIMPLEMENTED,
+        "unimplemented");
+  CHECK(capnp_getp(&root, 0, &echoed) == CAPNP_OK, "echoed message");
+  CHECK(echoed.kind == CAPNP_PK_STRUCT, "echoed struct");
+  CHECK(capnp_get_u16(&echoed, 0, 0) == tag, "echoed tag");
+  CHECK(capnp_getp(&echoed, 0, &body) == CAPNP_OK, "echoed body");
+  CHECK(capnp_get_u32(&body, 0, 0) == qid, "echoed question");
   capnp_message_free(&m);
-  return out;
 }
-
 
 /* rpc.capnp shapes for the L1 messages. */
 #define PROMISED_ANSWER_DW 1
@@ -282,7 +268,7 @@ static int is_release_of(const uint8_t *data, size_t len, uint32_t id)
   int match = 0;
   if (capnp_message_from_flat(&m, data, len) != CAPNP_OK)
     return 0;
-  /* The root is the Message itself, as in read_join_reply above. */
+  /* The root is the Message itself. */
   if (capnp_root(&m, &root) == CAPNP_OK &&
       capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_RELEASE &&
       capnp_getp(&root, 0, &rel) == CAPNP_OK) {
@@ -390,7 +376,7 @@ static return_info_t read_return(const uint8_t *data, size_t len)
 }
 
 
-/* rpc.capnp / rpc-threeparty.capnp shapes for the level 3 messages. */
+/* rpc.capnp / rpc-threeparty.capnp shapes for Provide and Accept. */
 #define PROVIDE_DW 1
 #define PROVIDE_PW 2
 #define ACCEPT_DW 1
@@ -402,7 +388,7 @@ static return_info_t read_return(const uint8_t *data, size_t len)
 #define VATID_DW 1
 #define VATID_PW 1
 
-/* Alice -> us: hold export `export_id` for whoever presents `nonce`. */
+/* Provide naming `export_id` and `nonce`. */
 static void send_provide(capnp_rpc_conn_t *c, uint32_t qid, uint32_t export_id,
                          uint64_t nonce)
 {
@@ -433,58 +419,7 @@ static void send_provide(capnp_rpc_conn_t *c, uint32_t qid, uint32_t export_id,
   CHECK(capnp_builder_set_u16(&vat, 0, 4000) == CAPNP_OK, "port");
 
   CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
-  capnp_rpc_handle(c, flat, len);
-  free(flat);
-  capnp_builder_free(&b);
-}
-
-/* Carol -> us: claim the capability under `nonce`, but hold the answer
- * until the introducer lifts the embargo. */
-static void send_accept_embargoed(capnp_rpc_conn_t *c, uint32_t qid, uint64_t nonce)
-{
-  capnp_builder_t b;
-  capnp_bptr_t root, msg, slot, accept, provision;
-  uint8_t *flat = NULL;
-  size_t len = 0;
-
-  capnp_builder_init(&b);
-  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
-  CHECK(capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK, "msg");
-  CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_ACCEPT) == CAPNP_OK, "accept tag");
-  CHECK(capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot) == CAPNP_OK, "msg slot");
-  CHECK(capnp_builder_struct(&slot, ACCEPT_DW, ACCEPT_PW, &accept) == CAPNP_OK, "accept");
-  CHECK(capnp_builder_set_u32(&accept, 0, qid) == CAPNP_OK, "qid");
-  CHECK(capnp_builder_set_bool(&accept, 32, 1) == CAPNP_OK, "embargo");
-  CHECK(capnp_builder_slot(&accept, ACCEPT_DW, 0, &slot) == CAPNP_OK, "pslot");
-  CHECK(capnp_builder_struct(&slot, PROVISION_DW, PROVISION_PW, &provision) == CAPNP_OK, "provision");
-  CHECK(capnp_builder_set_u64(&provision, 0, nonce) == CAPNP_OK, "nonce");
-
-  CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
-  capnp_rpc_handle(c, flat, len);
-  free(flat);
-  capnp_builder_free(&b);
-}
-
-/* Alice -> us: lift the embargo on the Accept she arranged, naming her
- * own Provide question. */
-static void send_disembargo_provide(capnp_rpc_conn_t *c, uint32_t provide_qid)
-{
-  capnp_builder_t b;
-  capnp_bptr_t root, msg, slot, dis;
-  uint8_t *flat = NULL;
-  size_t len = 0;
-
-  capnp_builder_init(&b);
-  CHECK(capnp_builder_root(&b, &root) == CAPNP_OK, "root");
-  CHECK(capnp_builder_struct(&root, MESSAGE_DW, MESSAGE_PW, &msg) == CAPNP_OK, "msg");
-  CHECK(capnp_builder_set_u16(&msg, 0, CAPNP_RPC_MSG_DISEMBARGO) == CAPNP_OK, "dis tag");
-  CHECK(capnp_builder_slot(&msg, MESSAGE_DW, 0, &slot) == CAPNP_OK, "msg slot");
-  CHECK(capnp_builder_struct(&slot, DIS_DW, DIS_PW, &dis) == CAPNP_OK, "dis");
-  CHECK(capnp_builder_set_u16(&dis, 4, 3) == CAPNP_OK, "provide tag");
-  CHECK(capnp_builder_set_u32(&dis, 0, provide_qid) == CAPNP_OK, "provide qid");
-
-  CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
-  capnp_rpc_handle(c, flat, len);
+  CHECK(capnp_rpc_handle(c, flat, len) == CAPNP_OK, "provide handled");
   free(flat);
   capnp_builder_free(&b);
 }
@@ -521,7 +456,7 @@ static uint8_t *load_frame(const char *name, size_t *len)
   return buf;
 }
 
-/* Carol -> us: claim the capability held under `nonce`. */
+/* Accept naming `nonce`. */
 static void send_accept(capnp_rpc_conn_t *c, uint32_t qid, uint64_t nonce)
 {
   capnp_builder_t b;
@@ -540,33 +475,12 @@ static void send_accept(capnp_rpc_conn_t *c, uint32_t qid, uint64_t nonce)
   CHECK(capnp_builder_struct(&slot, PROVISION_DW, PROVISION_PW, &provision) == CAPNP_OK, "provision");
   CHECK(capnp_builder_set_u64(&provision, 0, nonce) == CAPNP_OK, "nonce");
   CHECK(capnp_builder_serialize(&b, &flat, &len) == CAPNP_OK, "serialize");
-  capnp_rpc_handle(c, flat, len);
+  CHECK(capnp_rpc_handle(c, flat, len) == CAPNP_OK, "accept handled");
   free(flat);
   capnp_builder_free(&b);
 }
 
-/* Return tag, and whether the results content is a capability. */
-static void read_l3(const uint8_t *data, size_t len, uint32_t *ansid,
-                    int *is_exception, int *has_cap)
-{
-  capnp_message_t m = {0};
-  capnp_ptr_t root, ret, payload, content;
-  *ansid = 0;
-  *is_exception = 1;
-  *has_cap = 0;
-  CHECK(capnp_message_from_flat(&m, data, len) == CAPNP_OK, "from_flat");
-  CHECK(capnp_root(&m, &root) == CAPNP_OK, "root");
-  CHECK(capnp_get_u16(&root, 0, 0) == CAPNP_RPC_MSG_RETURN, "is return");
-  CHECK(capnp_getp(&root, 0, &ret) == CAPNP_OK, "ret");
-  *ansid = capnp_get_u32(&ret, 0, 0);
-  *is_exception = capnp_get_u16(&ret, 6, 0) != 0;
-  if (!*is_exception && capnp_getp(&ret, 0, &payload) == CAPNP_OK &&
-      capnp_getp(&payload, 0, &content) == CAPNP_OK)
-    *has_cap = content.kind == CAPNP_PK_CAP;
-  capnp_message_free(&m);
-}
-
-/* Bootstrap once so the vat holds a live export (id 0). */
+/* Bootstrap once so the vat has a live export (id 0). */
 static void bootstrap_once(capnp_rpc_conn_t *c, outbox_t *o)
 {
   capnp_builder_t b;
@@ -596,70 +510,29 @@ int main(void)
   static capnp_rpc_conn_t c;
   int calls = 0;
 
-  /* Two parts naming one capability join, and one result carries the cap. */
   memset(&out, 0, sizeof out);
   capnp_rpc_init(&c, collect, &out);
   capnp_rpc_set_bootstrap(&c, &calls, counting_dispatch);
   bootstrap_once(&c, &out);
 
+  /* Join, Provide, and Accept are echoed as Unimplemented. */
   send_join_part(&c, 700, 0, 9, 2, 0);
-  /* An incomplete set is not answerable, so nothing comes back yet. */
-  CHECK(out.n == 0, "out.n == 0");
-  send_join_part(&c, 701, 0, 9, 2, 1);
-  CHECK(out.n == 2, "out.n == 2");
-  {
-    join_reply_t a = read_join_reply(out.data[0], out.len[0]);
-    join_reply_t b = read_join_reply(out.data[1], out.len[1]);
-    CHECK(a.join_id == 9 && b.join_id == 9, "a.join_id == 9 && b.join_id == 9");
-    CHECK(a.succeeded && b.succeeded, "a.succeeded && b.succeeded");
-    CHECK((a.answer_id == 700 && b.answer_id == 701) ||
-              (a.answer_id == 701 && b.answer_id == 700),
-          "both join questions answered");
-    /* JoinResult: exactly one of the set carries the joined capability. */
-    CHECK((a.has_cap ? 1 : 0) + (b.has_cap ? 1 : 0) == 1, "(a.has_cap ? 1 : 0) + (b.has_cap ? 1 : 0) == 1");
-  }
+  CHECK(out.n == 1, "join echoed");
+  if (out.n == 1)
+    check_echo(out.data[0], out.len[0], CAPNP_RPC_MSG_JOIN, 700);
   outbox_clear(&out);
 
-  /* A part naming nothing we host fails the whole set. */
-  send_join_part(&c, 710, 0, 11, 2, 0);
-  send_join_part(&c, 711, 40, 11, 2, 1);
-  CHECK(out.n == 2, "out.n == 2");
-  {
-    join_reply_t a = read_join_reply(out.data[0], out.len[0]);
-    join_reply_t b = read_join_reply(out.data[1], out.len[1]);
-    CHECK(!a.succeeded && !b.succeeded, "!a.succeeded && !b.succeeded");
-    CHECK(!a.has_cap && !b.has_cap, "!a.has_cap && !b.has_cap");
-  }
+  send_provide(&c, 10, 0, 0xfeedfaceULL);
+  CHECK(out.n == 1, "provide echoed");
+  if (out.n == 1)
+    check_echo(out.data[0], out.len[0], CAPNP_RPC_MSG_PROVIDE, 10);
   outbox_clear(&out);
 
-  /* Every part unresolvable still fails: the parts agree, but they agree
-   * on naming nothing. */
-  send_join_part(&c, 740, 40, 17, 2, 0);
-  send_join_part(&c, 741, 40, 17, 2, 1);
-  CHECK(out.n == 2, "out.n == 2");
-  {
-    join_reply_t a = read_join_reply(out.data[0], out.len[0]);
-    join_reply_t b = read_join_reply(out.data[1], out.len[1]);
-    CHECK(!a.succeeded && !b.succeeded, "!a.succeeded && !b.succeeded");
-    CHECK(!a.has_cap && !b.has_cap, "!a.has_cap && !b.has_cap");
-  }
+  send_accept(&c, 11, 0xfeedfaceULL);
+  CHECK(out.n == 1, "accept echoed");
+  if (out.n == 1)
+    check_echo(out.data[0], out.len[0], CAPNP_RPC_MSG_ACCEPT, 11);
   outbox_clear(&out);
-
-  /* An incomplete set is never answered. */
-  send_join_part(&c, 720, 0, 13, 3, 0);
-  send_join_part(&c, 721, 0, 13, 3, 1);
-  CHECK(out.n == 0, "out.n == 0");
-
-  /* A partNum outside the set is rejected on its own. */
-  send_join_part(&c, 730, 0, 15, 2, 7);
-  CHECK(out.n == 1, "out.n == 1");
-  {
-    join_reply_t a = read_join_reply(out.data[0], out.len[0]);
-    CHECK(a.answer_id == 730, "a.answer_id == 730");
-    CHECK(!a.succeeded, "!a.succeeded");
-  }
-  outbox_clear(&out);
-
 
   /* Promise pipelining: a call addressed to an answer reaches the
    * capability inside it. */
@@ -696,6 +569,10 @@ int main(void)
   }
   outbox_clear(&out);
 
+  /* Finish released the bootstrap export. A fresh bootstrap makes export
+   * 0 current again for the checks below. */
+  bootstrap_once(&c, &out);
+
   /* Disembargo: every export here is local, so a senderLoopback aborts
    * as rpc.c++ does, and a receiverLoopback names no embargo of ours. */
   CHECK(send_disembargo(&c, 0, 12345) == CAPNP_ERR_KIND && out.n == 1 &&
@@ -725,136 +602,9 @@ int main(void)
   outbox_clear(&out);
 
 
-  /* Level 3: a provided capability is claimable exactly once. */
-  {
-    const uint64_t nonce = 0xfeedfaceULL;
-    uint32_t ansid;
-    int exc, cap;
-    send_provide(&c, 10, 0, nonce);
-    CHECK(out.n == 1, "provide answered");
-    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
-    CHECK(!exc, "provide accepted");
-    CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == 1, "one provision held");
-    outbox_clear(&out);
-
-    send_accept(&c, 11, nonce);
-    CHECK(out.n == 1, "accept answered");
-    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
-    CHECK(ansid == 11, "accept answerId");
-    CHECK(!exc, "accept succeeded");
-    /* The capability comes back as a capability, not a struct. */
-    CHECK(cap, "accept returned the capability");
-    CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == 0, "provision consumed");
-    outbox_clear(&out);
-
-    /* A nonce is single-use: leaving it claimable would let anyone who
-     * learned it take the capability again. */
-    send_accept(&c, 12, nonce);
-    CHECK(out.n == 1, "replay answered");
-    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
-    CHECK(exc, "a nonce cannot be claimed twice");
-    outbox_clear(&out);
-  }
-
-  /* An Accept with an unknown nonce is refused, even while a different
-   * arrangement is standing: matching is on the nonce, not on there
-   * being something to hand over. */
-  {
-    uint32_t ansid;
-    int exc, cap;
-    send_provide(&c, 19, 0, 0xc0ffeeULL);
-    outbox_clear(&out);
-    send_accept(&c, 20, 0xdeadbeefULL);
-    CHECK(out.n == 1, "unknown nonce answered");
-    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
-    CHECK(exc, "unknown nonce refused");
-    CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == 1,
-          "the standing arrangement is untouched");
-    outbox_clear(&out);
-    send_accept(&c, 21, 0xc0ffeeULL);
-    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
-    CHECK(!exc, "the arranged nonce is claimable");
-    outbox_clear(&out);
-  }
-
-  /* Providing a capability we do not host is refused. */
-  {
-    uint32_t ansid;
-    int exc, cap;
-    send_provide(&c, 30, 40, 0x1234ULL);
-    CHECK(out.n == 1, "bad provide answered");
-    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
-    CHECK(exc, "cannot provide what we do not host");
-    CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == 0, "nothing recorded");
-    outbox_clear(&out);
-  }
-
-  /* Two provisions of the same capability are independent. */
-  {
-    uint32_t ansid;
-    int exc, cap;
-    send_provide(&c, 40, 0, 0xaaaULL);
-    send_provide(&c, 41, 0, 0xbbbULL);
-    CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == 2, "two provisions");
-    outbox_clear(&out);
-    send_accept(&c, 42, 0xaaaULL);
-    CHECK(out.n == 1, "first claim answered");
-    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
-    CHECK(!exc, "first claim succeeded");
-    /* Claiming one leaves the other standing. */
-    CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == 1, "the other stands");
-    outbox_clear(&out);
-  }
-
-  /* Level 3 embargo: an embargoed Accept claims the capability but is
-   * not answered until the introducer says the recipient's earlier calls
-   * have all arrived. Answering sooner would let a call sent straight to
-   * us overtake one still in flight through the introducer. */
-  {
-    const uint64_t nonce = 0x5150ULL;
-    uint32_t ansid;
-    int exc, cap;
-    int before = capnp_rpc_pending_provisions(&c, NULL, 0);
-
-    send_provide(&c, 70, 0, nonce);
-    outbox_clear(&out);
-
-    send_accept_embargoed(&c, 71, nonce);
-    CHECK(out.n == 0, "an embargoed Accept is not answered yet");
-    CHECK(capnp_rpc_embargoed_accepts(&c) == 1, "one embargoed accept held");
-
-    /* The arrangement is claimed, so a second Accept finds nothing. */
-    send_accept(&c, 72, nonce);
-    CHECK(out.n == 1, "second accept answered");
-    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
-    CHECK(exc, "a claimed provision cannot be claimed again");
-    outbox_clear(&out);
-
-    /* A Disembargo naming a Provide we never received is refused as
-     * rpc.c++ refuses every provide context, and the embargo stays. */
-    send_disembargo_provide(&c, 999);
-    CHECK(out.n == 1 &&
-              is_abort(out.data[0], out.len[0],
-                       "Unimplemented Disembargo type.; disembargo = "
-                       "(context = (provide = 999))"),
-          "unknown provide question refused");
-    CHECK(capnp_rpc_embargoed_accepts(&c) == 1, "still held");
-    outbox_clear(&out);
-
-    send_disembargo_provide(&c, 70);
-    CHECK(out.n == 1, "embargo lifted, accept answered");
-    read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
-    CHECK(ansid == 71, "the embargoed Accept's answerId");
-    CHECK(!exc, "embargoed accept succeeded");
-    CHECK(cap, "embargoed accept got the capability");
-    CHECK(capnp_rpc_embargoed_accepts(&c) == 0, "embargo cleared");
-    CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == before, "provision consumed");
-    outbox_clear(&out);
-  }
-
-  /* Level 3, receiving half: a payload that names a third party's
-   * capability is recorded as an introduction, and the vine survives
-   * until the pickup is finished. */
+  /* A payload that names a third party's capability is recorded as
+   * an introduction, and the vine survives until the pickup is
+   * finished. */
   {
     capnp_rpc_introduction_t got[4];
     int i, released;
@@ -940,46 +690,33 @@ int main(void)
     }
   }
 
-  /* Level 3 driven by frames the reference `capnp` CLI encoded.
-   *
-   * Everything above builds its own Provide and Accept, so it shows the
-   * vat agrees with this library's builder and nothing more: a layout
-   * both sides share but the wire format does not would pass all of it.
-   * These bytes come from the reference implementation
-   * (scripts/gen-rpc-frames.sh): hold export 0 for whoever presents
-   * 0xfeedface (question 42), then claim it (question 43). */
+  /* Frames the reference capnp CLI encoded. The echo carries the
+   * question id from the frame: 42 for Provide, 43 for Accept. */
   {
     uint8_t *frame;
     size_t len = 0;
-    uint32_t ansid;
-    int exc, cap;
-    int before = capnp_rpc_pending_provisions(&c, NULL, 0);
 
     frame = load_frame("rpc-provide.bin", &len);
+    CHECK(frame != NULL, "provide golden");
     if (frame) {
-      CHECK(capnp_rpc_handle(&c, frame, len) == CAPNP_OK, "reference Provide handled");
+      CHECK(capnp_rpc_handle(&c, frame, len) == CAPNP_OK,
+            "reference Provide handled");
       free(frame);
-      CHECK(out.n == 1, "reference Provide answered");
-      read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
-      CHECK(ansid == 42, "reference Provide answerId");
-      CHECK(!exc, "reference Provide accepted");
-      /* The nonce the vat recorded is the one the CLI wrote. */
-      CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == before + 1,
-            "reference Provide recorded");
+      CHECK(out.n == 1, "reference Provide echoed");
+      if (out.n == 1)
+        check_echo(out.data[0], out.len[0], CAPNP_RPC_MSG_PROVIDE, 42);
       outbox_clear(&out);
     }
 
     frame = load_frame("rpc-accept.bin", &len);
+    CHECK(frame != NULL, "accept golden");
     if (frame) {
-      CHECK(capnp_rpc_handle(&c, frame, len) == CAPNP_OK, "reference Accept handled");
+      CHECK(capnp_rpc_handle(&c, frame, len) == CAPNP_OK,
+            "reference Accept handled");
       free(frame);
-      CHECK(out.n == 1, "reference Accept answered");
-      read_l3(out.data[0], out.len[0], &ansid, &exc, &cap);
-      CHECK(ansid == 43, "reference Accept answerId");
-      CHECK(!exc, "reference Accept succeeded");
-      CHECK(cap, "reference Accept got the capability");
-      CHECK(capnp_rpc_pending_provisions(&c, NULL, 0) == before,
-            "reference Accept consumed the arrangement");
+      CHECK(out.n == 1, "reference Accept echoed");
+      if (out.n == 1)
+        check_echo(out.data[0], out.len[0], CAPNP_RPC_MSG_ACCEPT, 43);
       outbox_clear(&out);
     }
   }

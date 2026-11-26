@@ -1,11 +1,10 @@
 /* Two-party Cap'n Proto RPC vat.
  *
  * Answers the level 1 messages a peer sends to a capability this vat
- * hosts, level 2 persistence hooks, level 3 in both directions, and
- * level 4 `Join`. Level 3 needs a network layer that can name a third
- * vat, which rpc-twoparty.capnp cannot -- it declares those ids empty,
- * "never used, because there is no third party". This family defines
- * one instead: schema/rpc-threeparty.capnp.
+ * hosts, and the level 2 persistence hooks. Provide, Accept, and Join
+ * are answered with an Unimplemented message that echoes the message
+ * received, as Cap'n Proto C++ 1.4.0 does. schema/rpc-threeparty.capnp
+ * names a third vat for descriptors rpc-twoparty.capnp leaves empty.
  *
  * A connection is around a megabyte: the answer and question tables hold
  * their replies inline. That is the whole default thread stack on
@@ -118,40 +117,29 @@ typedef struct capnp_rpc_question {
   size_t reply_len;
 } capnp_rpc_question_t;
 
-/* A capability promised to a third vat, awaiting its Accept.
- *
- * Level 3: the introducer told us to expect someone, and the nonce is
- * the whole of the arrangement. Matching on it alone is what lets the
- * recipient claim the capability without us having to trust her account
- * of who sent her. */
+/* Provision fields stay in the connection layout. Provide and Accept
+ * are answered with Unimplemented, and nothing writes these slots. */
 typedef struct capnp_rpc_provision {
   int used;
   uint64_t nonce;
-  /* The capability itself, not this connection's id for it: the
-   * recipient may well arrive on another connection, where that id means
-   * nothing. */
   void *server;
   capnp_rpc_dispatch_fn dispatch;
   int export_id;
-  /* The introducer's Provide question, which is how a later Disembargo
-   * names this arrangement (rpc.capnp, Disembargo.context.provide). */
   uint32_t question_id;
-  /* An embargoed Accept has claimed the capability but must not be
-   * answered until the introducer lifts the embargo, so the slot
-   * outlives the claim and carries the answer to send. */
   int embargoed;
   uint32_t accept_question_id;
 } capnp_rpc_provision_t;
 
-/* An introduction we have been handed but not yet picked up.
+/* An introduction recorded from a thirdPartyHosted descriptor and not
+ * yet picked up.
  *
- * Level 3: a payload can name a capability hosted by a third vat, as a
+ * A payload can name a capability hosted by a third vat, as a
  * `thirdPartyHosted` CapDescriptor carrying where to go and a vine. The
  * vine is an ordinary import through the introducer, so calls work
  * before we ever reach the third party; that is the fallback the spec
- * gives level 1 and 2 receivers, and it is why the vine must not be
- * released until the pickup succeeds. Connecting is the network layer's
- * job, so the vat records the introduction and hands it over.
+ * gives level 1 and 2 receivers, and the vine stays until the pickup
+ * finishes. Connecting is the network layer's job, so the vat records
+ * the introduction and hands it over.
  */
 typedef struct capnp_rpc_introduction {
   int used;
@@ -175,13 +163,8 @@ typedef struct capnp_rpc_stream {
   int have_failure;
 } capnp_rpc_stream_t;
 
-/* One in-flight Join, keyed by the sender's joinId.
- *
- * A Join asks whether several capabilities are the same object. Each part
- * is its own question, so no part is answerable when it arrives: the
- * answer depends on the whole set. Parts accumulate here and every
- * question is answered once the last one lands, which is the order
- * rpc-twoparty.capnp's JoinResult describes.
+/* Join fields stay in the connection layout. Join is answered with
+ * Unimplemented, and nothing writes these slots.
  */
 typedef struct capnp_rpc_join {
   int used;
@@ -193,14 +176,8 @@ typedef struct capnp_rpc_join {
   int eids[CAPNP_RPC_MAX_JOIN_PARTS];
 } capnp_rpc_join_t;
 
-/* What a vat knows across all its connections.
- *
- * A level 3 handoff is arranged on one connection and claimed on
- * another: the introducer sends `Provide` over its own, and the
- * recipient arrives on hers. Holding the arrangement on the connection
- * would make it claimable only by the introducer, which is no handoff at
- * all. Connections given no vat get one to themselves, which is what a
- * two-party deployment wants.
+/* Per-vat storage shared by connections that point at the same vat.
+ * A connection with no other vat uses its own.
  */
 typedef struct capnp_rpc_vat {
   capnp_rpc_provision_t provisions[CAPNP_RPC_MAX_PROVISIONS];
@@ -254,8 +231,7 @@ CAPNP_JANET_EXPORT int capnp_rpc_export(capnp_rpc_conn_t *c, void *server,
  * a question id still in use. So does a Release of an export we lack, or
  * of more references than it has, and a Disembargo loopback: this vat
  * exports no promise for one to name. A Disembargo with any other
- * context aborts too, unless it is a provide naming a Provide this vat
- * holds, which lifts that Accept's embargo. So does a Resolve naming an
+ * context aborts too. So does a Resolve naming an
  * import that a Return or a running call's params handed us as
  * senderHosted, and that is not yet released. */
 CAPNP_JANET_EXPORT int capnp_rpc_handle(capnp_rpc_conn_t *c, const uint8_t *data, size_t len);
@@ -391,48 +367,20 @@ CAPNP_JANET_EXPORT int capnp_rpc_answer_cap(capnp_rpc_conn_t *c, uint32_t questi
 CAPNP_JANET_EXPORT int capnp_rpc_answer_content(capnp_rpc_conn_t *c, uint32_t question_id,
                              capnp_message_t *msg_out, capnp_ptr_t *out);
 
-/* Nonces of capabilities held for a third vat, for tests and shutdown
- * accounting. Writes up to `cap` entries and returns how many exist. */
-CAPNP_JANET_EXPORT int capnp_rpc_pending_provisions(capnp_rpc_conn_t *c, uint64_t *out, int cap);
-
-/* Introductions handed to us and not yet picked up. Copies up to `cap`
- * into `out` (may be NULL) and returns how many are held. */
-/* Accepts claimed but still embargoed, awaiting Disembargo.provide. */
-CAPNP_JANET_EXPORT int capnp_rpc_embargoed_accepts(capnp_rpc_conn_t *c);
-
-/* Share level 3 arrangements with this vat's other connections. Call
- * after capnp_rpc_init and before any Provide; `vat` must outlive the
- * connection. */
-CAPNP_JANET_EXPORT void capnp_rpc_set_vat(capnp_rpc_conn_t *c, capnp_rpc_vat_t *vat);
-
-/* Ask the peer to hold `imported_cap` for a third vat, and return the
- * question id, which is also what a later Disembargo.provide names. The
- * nonce is the whole of the arrangement: the recipient presents it in an
- * Accept, and the host matches on it alone. */
-CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_provide(capnp_rpc_conn_t *c, uint32_t imported_cap,
-                                const char *recipient_host,
-                                uint16_t recipient_port, uint64_t nonce);
-
-/* Claim a capability a third vat provided for us. Returns the question
- * id; the answer carries the capability. */
-CAPNP_JANET_EXPORT uint32_t capnp_rpc_send_accept(capnp_rpc_conn_t *c, uint64_t nonce, int embargo);
-
-/* Lift the embargo on the Accept this vat arranged with Provide. */
-CAPNP_JANET_EXPORT int capnp_rpc_send_disembargo_provide(capnp_rpc_conn_t *c, uint32_t provide_qid);
-
+/* Introductions recorded from a payload and not yet picked up. Copies
+ * up to `cap` into `out` (may be NULL) and returns how many are waiting. */
 CAPNP_JANET_EXPORT int capnp_rpc_pending_introductions(capnp_rpc_conn_t *c,
                                     capnp_rpc_introduction_t *out, int cap);
 
-/* Finish the pickup for `nonce`: releases the vine, which the sender
- * treats as the signal to close its Provide. Call this only once the
- * third party has actually handed the capability over; releasing early
- * drops the fallback path with nothing in its place. Returns 0 on
- * success, -1 if no such introduction is held. */
+/* Finish the pickup for `nonce`: releases the vine. Call this only once
+ * the third party has handed the capability over; releasing early drops
+ * the fallback path with nothing in its place. Returns 0 on success, -1
+ * when no such introduction is recorded. */
 CAPNP_JANET_EXPORT int capnp_rpc_introduction_done(capnp_rpc_conn_t *c, uint64_t nonce);
 
 /* Write a `thirdPartyHosted` descriptor into the builder `cd`: where the
- * recipient should go, which pending Provide to claim once there, and
- * the vine we export so calls work in the meantime. */
+ * recipient should go, the nonce to present there, and the vine we
+ * export so calls work in the meantime. */
 CAPNP_JANET_EXPORT int capnp_rpc_write_third_party_cap(capnp_rpc_conn_t *c, capnp_bptr_t *cd,
                                     const char *host, uint16_t port,
                                     uint64_t nonce, uint32_t vine_id);

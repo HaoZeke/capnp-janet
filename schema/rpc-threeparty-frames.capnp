@@ -1,6 +1,7 @@
 @0xb1f2c3d4e5a60789;
 # Layout-exact subset of rpc.capnp with the three-party ids bound to real
-# structs, so that the reference `capnp` CLI can encode level 3 frames.
+# structs, so that the reference `capnp` CLI can encode Provide, Accept,
+# and introduction frames.
 #
 # rpc.capnp types ProvisionId and RecipientId as AnyPointer, which the
 # text format cannot fill, so the CLI cannot encode a Provide or an

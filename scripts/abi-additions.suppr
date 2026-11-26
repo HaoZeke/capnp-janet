@@ -1,5 +1,7 @@
 # Functions added to the public C API since the abi-diff.sh base commit.
-# Additions only: a removed or changed function still fails the check.
+# A changed function still fails the check. The deleted functions below
+# are the Provide, Accept, and Join helpers, removed so those messages
+# are answered with an Unimplemented echo as Cap'n Proto C++ 1.4.0 does.
 
 [suppress_function]
   change_kind = added-function
@@ -36,3 +38,27 @@
 [suppress_function]
   change_kind = added-function
   name = capnp_rpc_idle
+
+[suppress_function]
+  change_kind = deleted-function
+  name = capnp_rpc_embargoed_accepts
+
+[suppress_function]
+  change_kind = deleted-function
+  name = capnp_rpc_pending_provisions
+
+[suppress_function]
+  change_kind = deleted-function
+  name = capnp_rpc_send_accept
+
+[suppress_function]
+  change_kind = deleted-function
+  name = capnp_rpc_send_disembargo_provide
+
+[suppress_function]
+  change_kind = deleted-function
+  name = capnp_rpc_send_provide
+
+[suppress_function]
+  change_kind = deleted-function
+  name = capnp_rpc_set_vat
