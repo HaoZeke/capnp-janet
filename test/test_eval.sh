@@ -52,6 +52,26 @@ check "$PARITY" Parity.vEnum
 check "$PARITY" Parity.vStruct
 check "$PARITY" Parity.vData
 check "$PARITY" 'Parity.lI32[1]'
+# A struct const keeps the size it was built at. Canonical output stays trimmed.
+CLEAN="$ROOT/schema/eval-clean.capnp"
+check "$CLEAN" empty -obinary
+check "$CLEAN" empty --flat
+check "$CLEAN" empty -opacked
+check "$CLEAN" empty -ocanonical
+check "$CLEAN" defs -obinary
+check "$CLEAN" uset -opacked
+# A bare Float32 constant is printed as a double. A field stays Float32 text.
+check "$CLEAN" f32pi
+check "$ROOT/schema/eval-f32.capnp" fp
+# Eval JSON ignores Json annotations. Convert of the same bytes still applies them.
+ANN="$ROOT/schema/eval-ann.capnp"
+check "$ANN" n0 -ojson --short
+check "$ANN" d0 -ojson --short
+check "$ANN" d1 -ojson --short
+capnp eval -I"$INC" -obinary "$ANN" n0 >"$TMP/n0.bin"
+capnp convert -I"$INC" binary:json --short "$ANN" Named <"$TMP/n0.bin" >"$TMP/ref.txt"
+"$BIN" convert -I"$INC" binary:json --short "$ANN" Named <"$TMP/n0.bin" >"$TMP/ours.txt"
+cmp "$TMP/ref.txt" "$TMP/ours.txt"
 
 # A legal path that used to overflow the fixed 4096-byte compile command
 # and leave the shell quote open.

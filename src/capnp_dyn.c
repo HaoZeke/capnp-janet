@@ -59,6 +59,8 @@ enum {
  * text; set from `dyn_max_depth` on entry to each public call. */
 static _Thread_local int value_depth = CAPNP_DEFAULT_DEPTH_LIMIT;
 static int dyn_max_depth = CAPNP_DEFAULT_DEPTH_LIMIT;
+/* Set only while `capnp eval -ojson` encodes. Convert keeps annotations. */
+static _Thread_local int drop_json_ann;
 
 typedef struct {
   char *data;
@@ -2824,6 +2826,12 @@ static int push_flat_json(flat_json_list_t *fl, const flat_json_field_t *item) {
   return 0;
 }
 
+static const char *json_out_name(const dyn_field_t *f) {
+  if (!drop_json_ann && f->json_name[0])
+    return f->json_name;
+  return f->name;
+}
+
 static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
                               const brand_env_t *env, const capnp_ptr_t *s,
                               const disc_opts_t *disc_override,
@@ -2839,9 +2847,9 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
     return -1;
   s = as_struct(s, &empty);
   memset(&dopts, 0, sizeof(dopts));
-  if (disc_override && disc_override->present)
+  if (!drop_json_ann && disc_override && disc_override->present)
     dopts = *disc_override;
-  else if (st->disc_opts.present)
+  else if (!drop_json_ann && st->disc_opts.present)
     dopts = st->disc_opts;
   if (dopts.present) {
     if (dopts.has_name)
@@ -2857,7 +2865,7 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
       continue;
     if (!field_has_wire(d, s, f, env, 1))
       continue;
-    if (f->json_flatten) {
+    if (!drop_json_ann && f->json_flatten) {
       char next_prefix[256];
       snprintf(next_prefix, sizeof(next_prefix), "%s%s", prefix ? prefix : "",
                f->flatten_prefix);
@@ -2888,7 +2896,7 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
       flat_json_field_t item;
       memset(&item, 0, sizeof(item));
       snprintf(item.name, sizeof(item.name), "%s%s", prefix ? prefix : "",
-               f->json_name);
+               json_out_name(f));
       item.st = st;
       item.f = f;
       item.env = *env;
@@ -2921,7 +2929,7 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
         if (push_flat_json(out, &tag_item))
           return -1;
       }
-      if (uf->json_flatten) {
+      if (!drop_json_ann && uf->json_flatten) {
         char next_prefix[256];
         snprintf(next_prefix, sizeof(next_prefix), "%s%s", prefix ? prefix : "",
                  uf->flatten_prefix);
@@ -2957,7 +2965,7 @@ static int gather_json_fields(capnp_dyn_t *d, const dyn_struct_t *st,
           free_rtype(&ft);
         } else {
           flat_json_field_t item;
-          const char *fname = uf->json_name;
+          const char *fname = json_out_name(uf);
           if (dopts.present && dopts.has_value_name)
             fname = dopts.value_name;
           memset(&item, 0, sizeof(item));
@@ -2988,9 +2996,11 @@ static int encode_json_struct(buf_t *b, capnp_dyn_t *d,
 static int encode_json_enum(buf_t *b, capnp_dyn_t *d, uint64_t enum_id,
                             uint16_t ord) {
   dyn_enum_t *en = find_enum_id(d, enum_id);
-  if (en && ord < en->nvals)
-    return quote_json_string(b, en->vals[ord].json_name,
-                             strlen(en->vals[ord].json_name));
+  if (en && ord < en->nvals) {
+    const char *nm =
+        drop_json_ann ? en->vals[ord].name : en->vals[ord].json_name;
+    return quote_json_string(b, nm, strlen(nm));
+  }
   return buf_fmt_u(b, ord);
 }
 
@@ -3474,8 +3484,9 @@ static int encode_json_field_item(buf_t *b, capnp_dyn_t *d,
     const uint8_t *p = NULL;
     size_t pn = 0;
     enc_field_blob(s, f, TY_DATA, (const void **)&p, &pn);
-    rc = encode_json_data_bytes(b, p, pn, f->json_data_mode, indent, multiline,
-                                1, pretty);
+    rc = encode_json_data_bytes(b, p, pn,
+                                drop_json_ann ? 0 : f->json_data_mode, indent,
+                                multiline, 1, pretty);
     break;
   }
   case TY_STRUCT: {
@@ -7397,9 +7408,13 @@ static int format_ev(capnp_dyn_t *d, const ev_t *ev, int json, int pretty,
     case TY_F32: {
       uint32_t u = (uint32_t)ev->bits;
       float fv;
+      double dv;
       char tmp[64];
       memcpy(&fv, &u, sizeof(fv));
-      fmt_f32(fv, tmp, sizeof(tmp));
+      /* stringify(DynamicValue) prints a bare Float32 with the double
+       * formatter. A field still uses fmt_f32. */
+      dv = (double)fv;
+      fmt_f64(dv, tmp, sizeof(tmp));
       rc = buf_str(&b, tmp);
       break;
     }
@@ -7463,16 +7478,23 @@ int capnp_dyn_eval_ex(capnp_dyn_t *d, const char *expr, int json,
                       int pretty, char **out, size_t *len) {
   ev_t ev;
   int rc;
+  int prev_drop;
   if (!d || !expr || !out || !len)
     return CAPNP_ERR_ARG;
   *out = NULL;
   *len = 0;
+  prev_drop = drop_json_ann;
+  if (json)
+    drop_json_ann = 1;
   value_depth = dyn_max_depth;
   rc = resolve_eval_expr(d, expr, &ev);
-  if (rc)
+  if (rc) {
+    drop_json_ann = prev_drop;
     return rc;
+  }
   rc = format_ev(d, &ev, json, pretty, out, len);
   free_ev(&ev);
+  drop_json_ann = prev_drop;
   return rc;
 }
 
@@ -7492,6 +7514,7 @@ int capnp_dyn_eval_struct(capnp_dyn_t *d, const char *expr, uint8_t **out,
     return CAPNP_ERR_ARG;
   *out = NULL;
   *out_len = 0;
+  value_depth = dyn_max_depth;
   rc = resolve_eval_expr(d, expr, &ev);
   if (rc)
     return rc;
@@ -7511,7 +7534,9 @@ int capnp_dyn_eval_struct(capnp_dyn_t *d, const char *expr, uint8_t **out,
     return CAPNP_ERR_ALLOC;
   }
   if (ev.ptr.kind == CAPNP_PK_STRUCT) {
-    if (capnp_builder_copy_ptr(&root, &ev.ptr)) {
+    /* setRoot copies the struct at the size it was built. The canonical
+     * copier drops trailing zero words. */
+    if (copy_ptr_full(&b, root.seg, root.word, &ev.ptr, 0)) {
       capnp_builder_free(&b);
       free_ev(&ev);
       return CAPNP_ERR_ALLOC;
